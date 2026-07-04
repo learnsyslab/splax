@@ -56,11 +56,17 @@ exclude = ["splax/_project.py", "splax/_rasterize.py"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = [{ platform = "linux-64", cuda = "12" }]
+platforms = [
+    { name = "linux-64-cpu", platform = "linux-64" },
+    { name = "linux-64-cuda", platform = "linux-64", cuda = "12" },
+]
 
 [tool.pixi.dependencies]
 pip = "*"
 ruff = "*"
+
+[tool.pixi.feature.cuda]
+platforms = ["linux-64-cuda"]
 
 [tool.pixi.pypi-dependencies]
 splax = { path = "./", editable = true }
@@ -69,6 +75,9 @@ splax = { path = "./", editable = true }
 python = ">=3.12,<3.13"
 properdocs = ">=1.5.0"
 mkdocs-material = ">=9.5.0"
+
+[tool.pixi.feature.docs]
+platforms = ["linux-64-cpu"]
 
 [tool.pixi.feature.docs.pypi-dependencies]
 mkdocstrings = { extras = ["python"], version = ">=0.26.0" }
@@ -85,6 +94,9 @@ docs-serve = { cmd = "properdocs serve --livereload", description = "Serve the d
 [tool.pixi.feature.tests.dependencies]
 python = ">=3.12,<3.13"
 pytest = "*"
+
+[tool.pixi.feature.tests]
+platforms = ["linux-64-cuda"]
 
 [tool.pixi.feature.tests.pypi-dependencies]
 torch = ">=2.4"
@@ -111,11 +123,11 @@ upload_test = { cmd = "twine upload --repository testpypi dist/*", description =
 upload = { cmd = "twine upload dist/*", description = "Upload to PyPI" }
 
 [tool.pixi.environments]
-default = { solve-group = "default" }
-docs = { features = ["docs"], solve-group = "default" }
-tests = { features = ["tests"], solve-group = "default" }
-lint = { features = ["lint"], solve-group = "default" }
-dist = { features = ["dist"], solve-group = "default" }
+default = { features = ["cuda"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "docs" }
+tests = { features = ["cuda", "tests"], solve-group = "default" }
+lint = { features = ["cuda", "lint"], solve-group = "default" }
+dist = { features = ["cuda", "dist"], solve-group = "default" }
 
 [tool.setuptools.packages]
 find = {include = ["splax*"]}
