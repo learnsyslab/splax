@@ -1,0 +1,13 @@
+.venv/
+.cuda/
+data/
+__pycache__/
+*.egg-info/
+build/
+dist/
+site/
+results/*.png
+results/*.ply
+dev
+reports/
+results/

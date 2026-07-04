@@ -1,0 +1,124 @@
+[project]
+name = "splax"
+dynamic = ["version"]
+description = "High-performance vectorized gaussian splatting rendering in JAX"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "licenses/*"]
+requires-python = ">=3.12"
+dependencies = [
+    "jax[cuda12]>=0.10",
+    "imageio",
+    "plyfile",
+    "matplotlib>=3.11.0",
+    "warp-lang>=1.14.0",
+    "optax>=0.2.8",
+    "dm-pix>=0.4.5",
+]
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+# gsplat is the external test reference (torch/CUDA). Both are required so the test suite's parity
+# checks run
+tests = ["pytest", "torch>=2.4", "gsplat>=1.5"]
+lint = ["ty==0.0.56"]
+docs = [
+    "properdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.26.0",
+    "mkdocs-gen-files>=0.5.0",
+    "mkdocs-literate-nav>=0.6.0",
+    "mkdocs-section-index>=0.3.0",
+    "mkdocs-autorefs>=1.2.0",
+]
+dist = ["build", "twine"]
+dev = ["ruff", { include-group = "tests" }, { include-group = "docs" }, { include-group = "lint" }]
+
+[tool.uv]
+# gsplat compiles a CUDA extension against torch, so it must build without isolation
+no-build-isolation-package = ["gsplat"]
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.ty.src]
+# The Warp-DSL kernel modules are excluded: their kernel bodies are written in
+# warp's kernel language, which warp's type stubs cannot type.
+exclude = ["splax/_project.py", "splax/_rasterize.py"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = [{ platform = "linux-64", cuda = "12" }]
+
+[tool.pixi.dependencies]
+pip = "*"
+ruff = "*"
+
+[tool.pixi.pypi-dependencies]
+splax = { path = "./", editable = true }
+
+[tool.pixi.feature.docs.dependencies]
+python = ">=3.12,<3.13"
+properdocs = ">=1.5.0"
+mkdocs-material = ">=9.5.0"
+
+[tool.pixi.feature.docs.pypi-dependencies]
+mkdocstrings = { extras = ["python"], version = ">=0.26.0" }
+mkdocs-gen-files = ">=0.5.0"
+mkdocs-literate-nav = ">=0.6.0"
+mkdocs-section-index = ">=0.3.0"
+mkdocs-autorefs = ">=1.2.0"
+
+[tool.pixi.feature.docs.tasks]
+docs-build = { cmd = "properdocs build --strict", description = "Build the documentation" }
+docs-serve = { cmd = "properdocs serve --livereload", description = "Serve the documentation locally" }
+
+# Tests feature: pytest plus gsplat as external reference
+[tool.pixi.feature.tests.dependencies]
+python = ">=3.12,<3.13"
+pytest = "*"
+
+[tool.pixi.feature.tests.pypi-dependencies]
+torch = ">=2.4"
+gsplat = ">=1.5"
+
+[tool.pixi.feature.tests.tasks]
+tests = { cmd = "pytest -v tests", description = "Run tests" }
+
+# Lint feature: ty type checking of the library.
+[tool.pixi.feature.lint.pypi-dependencies]
+ty = "==0.0.56"
+
+[tool.pixi.feature.lint.tasks]
+ty = { cmd = "ty check splax", description = "Type check the library" }
+
+# Dist feature: build the wheel/sdist and publish.
+[tool.pixi.feature.dist.pypi-dependencies]
+build = "*"
+twine = "*"
+
+[tool.pixi.feature.dist.tasks]
+build = { cmd = "python -m build && twine check dist/*", description = "Build the sdist and wheel" }
+upload_test = { cmd = "twine upload --repository testpypi dist/*", description = "Upload to TestPyPI" }
+upload = { cmd = "twine upload dist/*", description = "Upload to PyPI" }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }
+tests = { features = ["tests"], solve-group = "default" }
+lint = { features = ["lint"], solve-group = "default" }
+dist = { features = ["dist"], solve-group = "default" }
+
+[tool.setuptools.packages]
+find = {include = ["splax*"]}
+
+[tool.setuptools.dynamic]
+version = {attr = "splax.__version__"}
