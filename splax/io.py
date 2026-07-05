@@ -11,7 +11,7 @@ to render-space inputs:
 ``write_ply`` takes the *render-space* splats (the same tensors ``render``
 consumes) and writes the inverse activation-space fields so a subsequent
 ``load_ply`` reproduces them. Normals are zeroed and ``f_rest`` (higher-order SH)
-is omitted -- ``load_ply`` reads neither, so a written file round-trips exactly
+is omitted. ``load_ply`` reads neither, so a written file round-trips exactly
 through it (SH degree 0 only, which is all splax renders).
 """
 
@@ -72,7 +72,7 @@ def write_ply(
       opacities  (N, 1) or (N,) opacity in [0, 1] (stored as logit)
 
     Fields written: x,y,z, nx,ny,nz (zero), f_dc_0..2, opacity, scale_0..2,
-    rot_0..3 -- exactly the set ``load_ply`` consumes.
+    rot_0..3, exactly the set ``load_ply`` consumes.
     """
     means = np.asarray(means, np.float32)
     scales = np.asarray(scales, np.float32)

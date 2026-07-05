@@ -2,10 +2,10 @@
 
 `splax.training.render`, aliased as `splax.render`, is the differentiable render
 path. It composes the `jax.custom_vjp` projection and rasterization primitives, so
-`jax.grad` and `jax.value_and_grad` flow through it w.r.t. means, scales, quats,
-colors, and opacities. The viewmat and background are constants by default. The
-call always returns an `(image, depths)` pair; the depth slot is `None` unless
-`render_depth=True`.
+`jax.grad` and `jax.value_and_grad` flow through it with respect to means,
+scales, quats, colors, and opacities. The viewmat and background are constants by
+default. The call always returns an `(image, depths)` pair. The depth slot is
+`None` unless `render_depth=True`.
 
 ```python
 def loss(means, scales, quats, colors, opacities):
@@ -23,15 +23,28 @@ The rendered image and its forward computation are identical to
 `splax.inference.render` (which returns only the image). The only difference is
 that the differentiable path keeps the blend residuals alive for the backward.
 
-## Camera pose gradients with `diff_wrt`
+## Camera pose gradients
 
-`diff_wrt` selects which inputs receive gradients through the projection backward.
+Gradient selection happens purely through `jax.grad` and its `argnums`. The
+projection backward is a single `jax.custom_vjp` with `symbolic_zeros=True`, so it
+reads which inputs are actually differentiated and launches only the kernels those
+gradients need.
 
-- `("gaussians",)` is the default. Gradients flow to means, scales, quats, colors, and opacities. The viewmat is a constant.
-- `("viewmat",)` computes only the camera-pose gradient. The gaussian projection chains are skipped, so post-training pose optimization pays only for the camera gradient. The gaussians receive no cotangent.
-- `("gaussians", "viewmat")` computes both. The gaussian gradients are bit-identical to the default.
+- Differentiating with respect to means, scales, quats (and colors, opacities through the rasterizer) runs the gaussian-grad kernels. The viewmat is treated as a constant.
+- Differentiating with respect to the `viewmat` runs the camera-pose accumulator only. The gaussian projection chains and their atomics are skipped, so post-training pose optimization pays only for the camera gradient.
+- Differentiating with respect to both runs the joint kernel. The gaussian gradients are bit-identical to the gaussian-only path.
 
-`scripts/optimize_pose.py` is a reference recipe for the pose-only path.
+Because `viewmat` is a keyword argument of `render`, take its gradient by closing
+over it in the differentiated position, for example:
+
+```python
+def loss(viewmat):
+    img, _ = splax.training.render(means, scales, quats, colors, opacities,
+                                   viewmat=viewmat, background=bg, **cam)
+    return photometric(img, target)
+
+pose_grad = jax.grad(loss)(viewmat)  # runs the camera-pose accumulator only
+```
 
 ## Depth channel
 

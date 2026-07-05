@@ -1,9 +1,9 @@
 """COLMAP loader invariants for ``scripts/train_colmap.py``.
 
-Data-dependent: ``data/`` is gitignored, so every test is skipped unless the
-drone scene has been unzipped to ``data/drone/sparse/0``. Checks the hand-written
-COLMAP binary parsers and the point-cloud init produce self-consistent, static
-shapes with the right conventions (no GPU / no render needed).
+Requires the drone scene unzipped to ``data/drone/sparse/0``. Checks the
+hand-written COLMAP binary parsers and the point-cloud init produce
+self-consistent, static shapes with the right conventions (no GPU and no render
+needed).
 """
 
 from __future__ import annotations
@@ -14,14 +14,9 @@ import types
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SPARSE = ROOT / "data" / "drone" / "sparse" / "0"
-
-pytestmark = pytest.mark.skipif(
-    not SPARSE.exists(), reason="COLMAP drone dataset not present (data/ is gitignored)"
-)
 
 
 def _load_module() -> types.ModuleType:
@@ -43,10 +38,10 @@ def test_parsers_and_conventions() -> None:
     assert len(cams) >= 1 and len(imgs) > 0 and xyz.shape[0] > 0
     assert xyz.shape[1] == 3 and rgb.shape == xyz.shape
     assert ids.shape == (xyz.shape[0],)
-    # images sorted by name; every image references a known camera
+    # images sorted by name, every image references a known camera
     assert [im["name"] for im in imgs] == sorted(im["name"] for im in imgs)
     assert all(im["camera_id"] in cams for im in imgs)
-    # per-image 2D observations (survey T2): valid point ids reference known points
+    # per-image 2D observations: valid point ids reference known points
     known = set(int(p) for p in ids)
     obs = imgs[0]["obs_pid"]
     assert imgs[0]["obs_xy"].shape == (obs.shape[0], 2)

@@ -45,7 +45,7 @@ frames = jax.vmap(lambda vm: splax.inference.render(
 ## Take a gradient
 
 `splax.render` is the differentiable `splax.training.render`. It differentiates
-w.r.t. means, scales, quats, colors, and opacities, and returns an
+with respect to means, scales, quats, colors, and opacities, and returns an
 `(image, depths)` pair whose depth slot is `None` unless `render_depth=True`.
 
 ```python
@@ -65,5 +65,5 @@ grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(means, scales, quats, colors, op
 ## Next steps
 
 - [Rendering](../user-guide/rendering.md) covers camera conventions, backgrounds, and the antialiased flag.
-- [Training](../user-guide/training.md) covers `diff_wrt`, the depth channel, and the trainer scripts.
+- [Training](../user-guide/training.md) covers camera-pose gradients, the depth channel, and the trainer scripts.
 - [Batching](../user-guide/batching.md) covers vmap semantics for inference and gradients.

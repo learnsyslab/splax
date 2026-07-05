@@ -52,7 +52,7 @@ frames = jax.vmap(lambda vm: splax.inference.render(
 ))(viewmats)  # (B, H, W, 3)
 ```
 
-Take gradients through the differentiable renderer with `jax.grad`. `splax.render` is `splax.training.render` and differentiates w.r.t. means, scales, quats, colors, opacities.
+Take gradients through the differentiable renderer with `jax.grad`. `splax.render` is `splax.training.render` and differentiates with respect to means, scales, quats, colors, opacities.
 
 ```python
 import jax
@@ -88,7 +88,7 @@ splax started from [jaxsplat](https://github.com/yklcs/jaxsplat) as the referenc
 
 ## Improvements
 
-Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the papers behind it, which inspired most of the performance work (credit per item):
+Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the papers behind it, which inspired most of the performance work (credit per item).
 
 - Native multi-camera batched rendering, one launch with the camera id folded into the sort key (gsplat)
 - Opacity-aware tight tile intersection (StopThePop, Speedy-Splat, gsplat #927)
@@ -100,7 +100,7 @@ Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the paper
 - Progressive resolution fine-tuning (coarse-to-fine, 3DGS)
 - Per-parameter Adam learning-rate schedules (gsplat, 3DGS)
 - L1 plus D-SSIM photometric loss (3DGS, gsplat, via dm-pix)
-- Camera pose gradients via `render(..., diff_wrt=("viewmat",))` (gsplat projection backward)
+- Camera pose gradients via `jax.grad(loss, argnums=viewmat)`, dispatched by JAX symbolic zeros so a pose-only step skips the gaussian projection backward (gsplat projection backward)
 - Batch-native backward passes, `jax.vmap(jax.grad(render))` runs as one batched launch (gsplat)
 - Batched training steps with sqrt-batch learning-rate scaling (gsplat `batch_size` and `steps_scaler`)
 - Anti-aliased opacity compensation (Mip-Splatting, gsplat), depth regularization from COLMAP points (gsplat `depth_loss`), per-image exposure correction (gsplat appearance optimization), all opt-in

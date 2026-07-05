@@ -53,7 +53,7 @@ inference that a model was trained with.
 ## Low-level primitives
 
 `splax.inference.render` composes two `jax.custom_vjp` primitives that are also
-public:
+public.
 
 - `splax.project` maps gaussians to screen-space `(xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit)`.
 - `splax.rasterize` blends the projected gaussians into the `(H, W, 3)` image.

@@ -10,7 +10,7 @@ Two CPU-checkable properties of the pose sampler and one end-to-end smoke test o
      (positive camera-space depth) and projects onto the principal point, and a
      healthy fraction of the whole cloud lies within the view frustum.
   3. ``distill`` runs end to end on a tiny random teacher in seconds and returns a
-     render-space student of the requested size that renders a finite image; the
+     render-space student of the requested size that renders a finite image. The
      synthetic held-out loss drops over training (the student learns the teacher).
 """
 
@@ -73,7 +73,7 @@ def test_poses_inside_bbox_and_proper_rotation() -> None:
 
 def test_poses_look_at_gaussians() -> None:
     """The look-at target sits in front of the camera and on the optical axis, and a
-    real fraction of the cloud falls inside the frustum -- the views point at the splat."""
+    real fraction of the cloud falls inside the frustum, the views point at the splat."""
     t = _random_teacher(4000, seed=3)
     means = t["means"].astype(np.float64)
     vms = sample_poses(t["means"], t["opacities"], 120, seed=4, min_dist=0.2)
@@ -89,7 +89,7 @@ def test_poses_look_at_gaussians() -> None:
     assert (in_front.sum(axis=1) > 0).all()
     assert (z.max(axis=1) >= 0.2 - 1e-3).all()
 
-    # frustum coverage: with f = image size, |x/z|,|y/z| < 0.5 -> inside a 90deg-ish FOV.
+    # frustum coverage: with f = image size, |x/z|,|y/z| < 0.5 means inside a 90deg-ish FOV.
     fov = (np.abs(pc[:, :, 0]) < 0.5 * z) & (np.abs(pc[:, :, 1]) < 0.5 * z) & in_front
     frac_cov = fov.sum(axis=1) / means.shape[0]
     assert frac_cov.mean() > 0.05, f"views barely see the cloud ({frac_cov.mean():.2%})"
@@ -103,7 +103,7 @@ def test_trajectory_bias_moves_cameras() -> None:
         [[3.0, 0, 0], [3.1, 0.2, 0.1], [2.9, -0.1, 0.05]], np.float32
     )
     traj = np.broadcast_to(np.eye(4, dtype=np.float32), (3, 4, 4)).copy()
-    traj[:, :3, 3] = -traj_centers  # R = I -> center = -t
+    traj[:, :3, 3] = -traj_centers  # R = I so center = -t
     vms = sample_poses(
         t["means"], t["opacities"], 300, seed=6, viewmats=traj, traj_frac=0.5
     )

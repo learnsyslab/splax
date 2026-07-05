@@ -1,20 +1,20 @@
-"""Batched training-step tests (survey T6, gsplat ``batch_size`` + sqrt-batch LR).
+"""Batched training-step tests (gsplat ``batch_size`` + sqrt-batch LR).
 
-``scripts/train_colmap.py::_make_step`` now takes a static ``batch`` and ``jax.vmap``-s a
+``scripts/train_colmap.py::_make_step`` takes a static ``batch`` and ``jax.vmap``-s a
 per-view loss over ``batch`` views (loss mean-reduced over the batch, per gsplat), driving
-the Phase 8a batch-native backward as one launch. These tests pin the two properties the
-refactor must preserve:
+the batch-native backward as one launch. These tests pin the two properties the
+batched step must preserve:
 
-  1. **B=1 identity.** The batched builder at ``batch=1`` reproduces the exact pre-T6
+  1. **B=1 identity.** The batched builder at ``batch=1`` reproduces the exact
      single-view gradient (the default trainer path, incl. the long 1.5M fit, must not
-     move). Checked against a from-scratch reconstruction of the old single-view loss.
+     move). Checked against a from-scratch reconstruction of the single-view loss.
   2. **Batch = mean-of-views.** A B=2 step's gradient equals the mean of the two
-     corresponding B=1 gradients at identical params (pre-optimizer) — the defining
-     property of averaging the loss over the batch. Also runs under jit (it always does;
+     corresponding B=1 gradients at identical params (pre-optimizer), the defining
+     property of averaging the loss over the batch. Also runs under jit (it always does,
      ``_make_step`` jits the step) and the duplicate-view sanity (B=2 of one view == B=1).
 
 Gradients are recovered end-to-end through the real ``_make_step`` by using a plain SGD
-optimizer (lr=1 ⇒ ``grad = p − step(p)``), so the actual jitted code path is exercised.
+optimizer (lr=1, so ``grad = p − step(p)``), so the actual jitted code path is exercised.
 Tolerances follow ``test_depth_reg.py`` / ``test_warp_grad_batched.py`` (atomic-order jitter
 in the batched backward is ~1e-4 rel).
 """
@@ -62,7 +62,7 @@ def _view(seed: int) -> tuple[jax.Array, jax.Array]:
 
 
 def _sgd_opt(params: dict[str, jax.Array]) -> optax.GradientTransformation:
-    # lr=1 SGD so apply_updates(p) = p - grad  =>  grad = p - step(p)  (linear recovery).
+    # lr=1 SGD so apply_updates(p) = p - grad, so grad = p - step(p)  (linear recovery).
     txs: dict[Hashable, optax.GradientTransformation] = {
         kk: optax.sgd(1.0) for kk in params
     }
@@ -90,13 +90,13 @@ def _recover_grad(
 
 
 def test_b1_matches_pre_t6_single_view() -> None:
-    """batch=1 grad == the reconstructed pre-T6 single-view grad (default path frozen)."""
+    """batch=1 grad == the reconstructed single-view grad (default path frozen)."""
     params = _params(seed=1)
     gt, vm = _view(3)
 
     def old_loss(
         p: dict[str, jax.Array],
-    ) -> jax.Array:  # exact pre-T6 single-view loss_fn (train_colmap, before batching)
+    ) -> jax.Array:  # the single-view loss_fn train_colmap uses for one view
         img, _ = tc.render_params(p, vm, H, W, INTR, background=jnp.ones(3))
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
@@ -163,6 +163,6 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
         params, opt_state, exp_p, exp_state, gts, vms, bg, vi, uv, depth, mask
     )
     assert np.isfinite(float(l1))
-    # only the touched exposure rows (0,3,5) moved; the rest stayed identity.
+    # only the touched exposure rows (0,3,5) moved, the rest stayed identity.
     moved = np.abs(np.asarray(new_exp - exp_p)).sum((1, 2)) > 0
     assert moved[[0, 3, 5]].all() and not moved[[1, 2, 4, 6, 7]].any()

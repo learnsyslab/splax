@@ -3,13 +3,13 @@
 Renders the pretrained lego splat (``data/scenes/lego.ply``, ~313k gaussians,
 SH degree 0) at three held-out test poses and asserts the PSNR against the
 ground-truth images stays at or above the established floor. This is the
-correctness gate that used to live in ``scripts/render_lego.py``, reproduced here
-without any CUDA reference: splax renders the scene itself.
+correctness gate for the pretrained lego scene, reproduced here
+without any CUDA reference. splax renders the scene itself.
 
-Protocol (identical to the historical render_lego.py):
+Protocol:
   - poses/intrinsics from ``data/nerf_synthetic/lego/transforms_test.json``,
     frames 0 / 25 / 50,
-  - NeRF c2w (OpenGL, -z forward) -> w2c viewmat (OpenCV, +z forward) via the
+  - NeRF c2w (OpenGL, -z forward) to w2c viewmat (OpenCV, +z forward) via the
     diag(1, -1, -1, 1) flip then inverse,
   - focal length from ``camera_angle_x``, principal point at the image center,
     ``glob_scale=1.0``, ``clip_thresh=0.01``,
@@ -17,7 +17,7 @@ Protocol (identical to the historical render_lego.py):
 
 The floors are the established reference values (30.89 / 31.43 / 32.08 dB) minus a
 0.05 dB slack for float32 blend-order jitter. splax currently reproduces them to
-better than 0.01 dB. Skips gracefully when the (unshipped) dataset is absent.
+better than 0.01 dB. The lego dataset and the pretrained ply must be present.
 """
 
 from __future__ import annotations
@@ -36,21 +36,18 @@ ROOT = Path(__file__).resolve().parents[1]
 LEGO = ROOT / "data/nerf_synthetic/lego"
 PLY = ROOT / "data/scenes/lego.ply"
 
-# frame index -> established PSNR floor (dB) at that held-out test pose.
+# frame index to the established PSNR floor (dB) at that held-out test pose.
 KNOWN_PSNR = {0: 30.89, 25: 31.43, 50: 32.08}
 SLACK = 0.05
 
 
 def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
-    """NeRF c2w (OpenGL, -z forward) -> w2c viewmat (OpenCV, +z forward)."""
+    """NeRF c2w (OpenGL, -z forward) to w2c viewmat (OpenCV, +z forward)."""
     c2w = np.array(frame["transform_matrix"], np.float64)
     c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
     return np.linalg.inv(c2w).astype(np.float32)
 
 
-@pytest.mark.skipif(
-    not (LEGO.exists() and PLY.exists()), reason="lego dataset / ply missing"
-)
 @pytest.mark.parametrize("frame_idx", [0, 25, 50])
 def test_lego_render_psnr_regression(frame_idx: int) -> None:
     meta = json.loads((LEGO / "transforms_test.json").read_text())

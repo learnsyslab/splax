@@ -124,6 +124,6 @@ def test_inject_noise_respects_opacity() -> None:
     opac_logit = jnp.concatenate([jnp.full((200, 1), -5.0), jnp.full((200, 1), 8.0)])
     moved = mcmc.inject_noise(k[0], means, log_scales, quats, opac_logit, scaler=100.0)
     disp = np.linalg.norm(np.asarray(moved), axis=1)
-    # low-opacity gaussians move; high-opacity ones barely move
+    # low-opacity gaussians move, high-opacity ones barely move
     assert disp[:200].mean() > 10 * disp[200:].mean() + 1e-6
     assert moved.shape == (n, 3)

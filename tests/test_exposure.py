@@ -1,13 +1,13 @@
-"""Per-image affine exposure correction (survey T5) for ``train_colmap.py``.
+"""Per-image affine exposure correction for ``train_colmap.py``.
 
-All tests here are **pure JAX on CPU** -- they exercise only the affine helpers
+All tests here are **pure JAX on CPU**, they exercise only the affine helpers
 (``init_exposure`` / ``apply_exposure``), no renderer, no Warp kernels, no GPU.
 ``JAX_PLATFORMS=cpu`` is pinned below so they never touch the device even if a GPU
 is present. (Importing ``train_colmap`` pulls in ``splax``/Warp at module scope,
 but Warp initializes lazily and nothing here launches a kernel.)
 
 The training step itself (``_make_step_exposure``) needs the Warp renderer and so
-is *not* unit-tested here; it is covered by the coordinator's drone eval run. The
+is *not* unit-tested here. It is covered by the coordinator's drone eval run. The
 invariants below are exactly the ones that matter for correctness and honesty:
 identity init, correct affine algebra, and off-path parity.
 """

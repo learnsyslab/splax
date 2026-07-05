@@ -1,9 +1,8 @@
-"""N-aware init-scale correction for ``scripts/train_colmap.py`` (phase8j).
+"""N-aware init-scale correction for ``scripts/train_colmap.py``.
 
 CPU-only, data-independent (synthetic point cloud): checks the density-ratio
 scale correction is applied iff the fixed-N init pads the sparse cloud (n>m),
-and with exactly the (1/3)ln(n/m) log-space magnitude. See ``init_from_points``
-and reports/phase8j_init_fix.md.
+and with exactly the (1/3)ln(n/m) log-space magnitude. See ``init_from_points``.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ def test_padding_applies_density_ratio_correction() -> None:
     xyz, rgb = _cloud(m)
     p = tc.init_from_points(xyz, rgb, n, 0.1, seed=0)
     ls = np.asarray(p["log_scales"])
-    # the correction is applied to the whole knn-derived cloud; the first m rows are the
+    # the correction is applied to the whole knn-derived cloud, the first m rows are the
     # original points, so compare them against the uncorrected knn scales (cap=0.3 as in
     # init_from_points) minus the expected (1/3)ln(n/m) offset.
     base = tc.knn_scales(xyz, cap=0.3)  # (m,) uncorrected

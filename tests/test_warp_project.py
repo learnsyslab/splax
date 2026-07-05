@@ -10,14 +10,14 @@ numeric tolerance:
   - depths: camera-space z, essentially identical.
   - conics: inverse projected-2D-covariance (a, b, c), close.
 
-Integer tile counts (radii / num_tiles_hit) are NOT compared: gsplat returns a
+Integer tile counts (radii / num_tiles_hit) are NOT compared. gsplat returns a
 per-axis pixel radius under a different visibility/tiling convention than splax's
 scalar 3-sigma radius, so only the visibility they induce is cross-checked (the
 gaussians each backend keeps agree on the overwhelming majority). See
 tests/_gsplat_ref.py for the full list of convention conversions.
 
-Skips (module-level) when torch/gsplat are absent or their CUDA extension cannot
-run. Everything here needs gsplat, so the whole module is guarded.
+Everything here needs the gsplat reference, so the module guard fails the
+whole file loudly when gsplat cannot run.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from typing import TypedDict
 import numpy as np
 import jax
 import jax.numpy as jnp
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -38,22 +37,13 @@ sys.path.insert(0, str(ROOT / "tests"))
 import _gsplat_ref as gref  # noqa: E402
 import splax  # noqa: E402
 
-# Every test here needs the gsplat reference; skip the whole module without it.
+# Every test here needs the gsplat reference, fail the whole module without it.
 gref.require_working(allow_module_level=True)
 
 LEGO = ROOT / "data/nerf_synthetic/lego"
 
 
 class _ProjArgs(TypedDict):
-    img_shape: tuple[int, int]
-    f: tuple[float, float]
-    c: tuple[float, float]
-    glob_scale: float
-    clip_thresh: float
-    block_width: int
-
-
-class _RefArgs(TypedDict):
     img_shape: tuple[int, int]
     f: tuple[float, float]
     c: tuple[float, float]
@@ -67,16 +57,8 @@ PROJ_ARGS: _ProjArgs = {
     "c": (128, 128),
     "glob_scale": 1.0,
     "clip_thresh": 0.01,
-    "block_width": 16,
 }
-# gref.project takes the same kwargs minus block_width (gsplat has no CUDA block arg).
-REF_ARGS: _RefArgs = {
-    "img_shape": PROJ_ARGS["img_shape"],
-    "f": PROJ_ARGS["f"],
-    "c": PROJ_ARGS["c"],
-    "glob_scale": PROJ_ARGS["glob_scale"],
-    "clip_thresh": PROJ_ARGS["clip_thresh"],
-}
+REF_ARGS = PROJ_ARGS
 
 
 def _random_inputs(
@@ -121,16 +103,18 @@ def _assert_parity(
 
 def test_parity_random_10k() -> None:
     means, scales, quats, viewmat = _random_inputs(10_000, seed=1)
-    a = splax.project(means, scales, quats, viewmat, **PROJ_ARGS)
+    opac = jnp.full((means.shape[0],), 0.99)
+    a = splax.project(means, scales, quats, viewmat, opacities=opac, **PROJ_ARGS)
     b = gref.project(means, scales, quats, viewmat, **REF_ARGS)
     _assert_parity(a, b)
 
 
 def test_parity_under_jit() -> None:
     means, scales, quats, viewmat = _random_inputs(10_000, seed=2)
-    a = jax.jit(lambda m, s, q, v: splax.project(m, s, q, v, **PROJ_ARGS))(
-        means, scales, quats, viewmat
-    )
+    opac = jnp.full((means.shape[0],), 0.99)
+    a = jax.jit(
+        lambda m, s, q, v: splax.project(m, s, q, v, opacities=opac, **PROJ_ARGS)
+    )(means, scales, quats, viewmat)
     b = gref.project(means, scales, quats, viewmat, **REF_ARGS)
     _assert_parity(a, b)
 
@@ -141,7 +125,6 @@ def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
     return np.linalg.inv(c2w).astype(np.float32)
 
 
-@pytest.mark.skipif(not LEGO.exists(), reason="lego dataset missing")
 def test_parity_lego_slice() -> None:
     meta = json.loads((LEGO / "transforms_test.json").read_text())
     means, scales, quats, _colors, _opac = splax.load_ply(ROOT / "data/scenes/lego.ply")
@@ -156,13 +139,7 @@ def test_parity_lego_slice() -> None:
         "f": (float(ff), float(ff)),
         "c": (W // 2, H // 2),
     }
-    ref_args: _RefArgs = {
-        "img_shape": args["img_shape"],
-        "f": args["f"],
-        "c": args["c"],
-        "glob_scale": args["glob_scale"],
-        "clip_thresh": args["clip_thresh"],
-    }
-    a = splax.project(means, scales, quats, viewmat, **args)
-    b = gref.project(means, scales, quats, viewmat, **ref_args)
+    opac = jnp.full((means.shape[0],), 0.99)
+    a = splax.project(means, scales, quats, viewmat, opacities=opac, **args)
+    b = gref.project(means, scales, quats, viewmat, **args)
     _assert_parity(a, b)

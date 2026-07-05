@@ -1,10 +1,10 @@
-"""Native batching (Phase 4d): jax.vmap over the pure-Warp splax pipeline.
+"""Native batching: jax.vmap over the pure-Warp splax pipeline.
 
 splax.project / splax.rasterize / splax.render carry vmap_method="expand_dims" and
 launch a single grid over the whole batch (gsplat-style, no host loop). These tests
 assert that a vmapped call equals ``jnp.stack`` of the per-element unbatched calls.
 
-Batching must NOT change blend order within an image: the global sort packs the
+Batching must NOT change blend order within an image. The global sort packs the
 image id above the tile bits, so each image's (tile, depth) ordering is identical to
 the unbatched sort, and the front-to-back accumulation is bit-identical. We therefore
 require **bit-exact** equality (array_equal), not just an allclose tolerance.
@@ -21,7 +21,7 @@ import pytest
 import warp as wp
 
 import splax
-import splax._rasterize as _rast
+import splax._intersect as _isect
 
 
 class _KW(TypedDict):
@@ -39,22 +39,20 @@ class _ProjKW(TypedDict):
     c: tuple[float, float]
     glob_scale: float
     clip_thresh: float
-    block_width: int
 
 
 @pytest.fixture(autouse=True)
 def _faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the faithful 64-bit sort key for the bit-exact batch-native assertions.
+    """Pin the 64-bit sort key for the bit-exact batch-native assertions.
 
-    Batch-native == stack-of-unbatched is BIT-EXACT only for the 64-bit key, whose
-    per-image (tile, depth) order is independent of B (image id packed above the tile
-    bits). The default packed 32-bit key (phase 8r) sizes its depth field as
-    depth_bits = 31 - image_bits - tile_bits, which shrinks as B grows, so a batched
-    render quantizes depth slightly coarser than the B=1 reference -> equal only up to
-    a perceptual bound (asserted in test_render_vmap_packed_matches_stack). The 64-bit
-    fallback preserves the exact invariant here.
+    Batch-native == stack-of-unbatched is bit-exact only for the 64-bit key, whose
+    per-image (tile, depth) order is independent of B. The default packed 32-bit
+    key sizes its depth field as 31 - image_bits - tile_bits, which shrinks as B
+    grows, so a batched render quantizes depth slightly coarser than the B=1
+    reference and matches only up to a perceptual bound (asserted in
+    test_render_vmap_packed_matches_stack).
     """
-    monkeypatch.setattr(_rast, "_PACK_KEYS", False)
+    monkeypatch.setattr(_isect, "_use_32bit_keys", lambda depth_bits: False)
 
 
 def _rand_scene(
@@ -92,7 +90,6 @@ PROJ_KW: _ProjKW = {
     "c": (W // 2, H // 2),
     "glob_scale": 1.0,
     "clip_thresh": 0.01,
-    "block_width": 16,
 }
 VIEWS = jnp.stack([_viewmat(0.0), _viewmat(0.3), _viewmat(-0.2)])  # B=3
 
@@ -112,14 +109,14 @@ def test_project_vmap_over_viewmats() -> None:
     layout: every image's intersections are laid out contiguously), so it equals the
     global cumsum of the flattened num_tiles_hit rather than the per-image cumsum.
     """
-    m, s, q, _c, _o = _rand_scene(N, seed=1)
+    m, s, q, _c, o = _rand_scene(N, seed=1)
 
     def f(vm: jax.Array) -> tuple:
-        return splax.project(m, s, q, vm, **PROJ_KW)
+        return splax.project(m, s, q, vm, opacities=o, **PROJ_KW)
 
     B = VIEWS.shape[0]
     batched = jax.vmap(f)(VIEWS)
-    # outputs 0..4 = xys, depths, radii, conics, num_tiles_hit -> bit-exact per image
+    # outputs 0..4 = xys, depths, radii, conics, num_tiles_hit, bit-exact per image
     for i in range(B):
         ref = f(VIEWS[i])
         for k in range(5):
@@ -198,10 +195,10 @@ def test_render_vmap_larger_batch_and_res() -> None:
 
 def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default packed 32-bit key: batch-native render == stacked unbatched, to a tight
-    perceptual bound (not bit-exact -- depth_bits shrinks with B, so batched depth
-    quantization is coarser; see the autouse fixture note). Also confirms this config
+    perceptual bound (not bit-exact, depth_bits shrinks with B, so batched depth
+    quantization is coarser, see the autouse fixture note). Also confirms this config
     actually takes the packed path (int32 scratch)."""
-    monkeypatch.setattr(_rast, "_PACK_KEYS", True)
+    monkeypatch.setattr(_isect, "_use_32bit_keys", lambda depth_bits: depth_bits >= 16)
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
     kw: _KW = {
@@ -220,7 +217,9 @@ def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> No
             views
         )
     )  # B=8 render packs with depth_bits=18 (image 3 + tile 10)
-    assert _rast._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
+    assert (
+        _isect._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
+    )
     d = np.abs(out - np.asarray(ref))
     mse = float(np.mean((out - np.asarray(ref)) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)

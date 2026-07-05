@@ -10,7 +10,7 @@ Two kinds of test live here:
     tolerance. gsplat cannot be matched bit-for-bit (different sort, blend, and
     tiling), so we bound the difference perceptually (max abs diff + PSNR) rather
     than element-wise-exactly the way a faithful port would. These are guarded by
-    the ``gsplat_ref`` fixture and skip when gsplat is unavailable.
+    the ``gsplat_ref`` fixture, which fails loudly when gsplat is unavailable.
 
 Convention conversions for the gsplat reference are documented in
 tests/_gsplat_ref.py.
@@ -22,7 +22,7 @@ import json
 import sys
 import types
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import TypedDict
 
 import numpy as np
 import jax
@@ -35,9 +35,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import _gsplat_ref as gref  # noqa: E402
 import splax  # noqa: E402
-import splax._rasterize as _rast  # noqa: E402
+import splax._intersect as _isect  # noqa: E402
 import warp as wp  # noqa: E402
-from splax._rasterize import _map_gaussian_to_intersects, _bits_for_count  # noqa: E402
+from splax._intersect import _bits_for_count, _map_intersects_64bit  # noqa: E402
 
 LEGO = ROOT / "data/nerf_synthetic/lego"
 
@@ -48,7 +48,6 @@ class _ProjKW(TypedDict):
     c: tuple[float, float]
     glob_scale: float
     clip_thresh: float
-    block_width: int
 
 
 class _Scene(TypedDict):
@@ -61,13 +60,10 @@ class _Scene(TypedDict):
     conics: jax.Array
     cum_tiles_hit: jax.Array
     img_shape: tuple[int, int]
-    block_width: int
 
 
 class _RastKW(TypedDict):
     img_shape: tuple[int, int]
-    block_width: int
-    tight: NotRequired[bool]
 
 
 class _RenderKW(TypedDict):
@@ -91,13 +87,13 @@ class _RenderKWNoView(TypedDict):
 
 @pytest.fixture
 def gsplat_ref() -> types.ModuleType:
-    """Skip a test (not the whole module) when gsplat cannot run."""
+    """Fail the test with a clear reason when gsplat cannot run."""
     gref.require_working()
     return gref
 
 
 def _random_scene(n: int, H: int, W: int, seed: int = 0) -> _Scene:
-    """Random scene projected with splax (legacy bbox) -> rasterize inputs."""
+    """Random scene projected with splax into rasterize inputs."""
     key = jax.random.key(seed)
     k = jax.random.split(key, 6)
     means = jax.random.normal(k[0], (n, 3))
@@ -116,10 +112,9 @@ def _random_scene(n: int, H: int, W: int, seed: int = 0) -> _Scene:
         "c": (W // 2, H // 2),
         "glob_scale": 1.0,
         "clip_thresh": 0.01,
-        "block_width": 16,
     }
     xys, depths, radii, conics, _nth, cum = splax.project(
-        means, scales, quats, viewmat, **proj_args
+        means, scales, quats, viewmat, opacities=opacities, **proj_args
     )
     return {
         "colors": colors,
@@ -131,12 +126,11 @@ def _random_scene(n: int, H: int, W: int, seed: int = 0) -> _Scene:
         "conics": conics,
         "cum_tiles_hit": cum,
         "img_shape": (H, W),
-        "block_width": 16,
     }
 
 
 def _splax_rast(scene: _Scene) -> np.ndarray:
-    kw: _RastKW = {"img_shape": scene["img_shape"], "block_width": scene["block_width"]}
+    kw: _RastKW = {"img_shape": scene["img_shape"]}
     args = (
         scene["colors"],
         scene["opacities"],
@@ -185,9 +179,9 @@ def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: types.ModuleType) 
     """splax.render vs gsplat.rasterization on the same scene.
 
     Different kernels (sort order, blend, opacity-aware tiling), so we bound the
-    image difference perceptually. splax's tight O6 tiling drops per-gaussian tails
+    image difference perceptually. splax's tight tiling drops per-gaussian tails
     already below 1/255, and gsplat's classic rasterizer keeps a slightly different
-    set, so a handful of pixels move by a few 1/255; the bulk agree to well under
+    set, so a handful of pixels move by a few 1/255. The bulk agree to well under
     that. Empirically PSNR is comfortably above 30 dB across sizes.
     """
     (splats, kw) = _render_scene(n, H, W, seed=n)
@@ -196,7 +190,7 @@ def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: types.ModuleType) 
     assert a.shape == b.shape
     mse = float(np.mean((a - b) ** 2))
     psnr = -10 * np.log10(mse) if mse > 0 else float("inf")
-    # Measured ~100 dB / max abs ~0.003 across these sizes; bounded with margin.
+    # Measured ~100 dB / max abs ~0.003 across these sizes, bounded with margin.
     assert psnr > 60.0, f"splax vs gsplat render PSNR only {psnr:.1f} dB"
     assert np.abs(a - b).max() < 0.03, f"max abs diff {np.abs(a - b).max():.3f}"
 
@@ -213,7 +207,7 @@ def test_render_under_jit_matches_eager() -> None:
 
 
 def test_scratch_reuse_across_sizes() -> None:
-    """Persistent grow-only scratch (O3) must not leak state between renders.
+    """Persistent grow-only scratch must not leak state between renders.
 
     Render several scenes of *different* intersection counts back to back (shrinking
     then growing), each time comparing against a freshly cleared reference render of
@@ -253,25 +247,25 @@ def test_scratch_dropped_on_signature_change() -> None:
     )
 
 
-# --- Packed 32-bit sort key (phase 8r) ----------------------------------------
+# --- Packed 32-bit sort key ----------------------------------------
 
 
 def _rasterize_both_keymodes(
     args: tuple[jax.Array, ...], kw: _RastKW
 ) -> tuple[np.ndarray, np.ndarray]:
     """Rasterize the same inputs with the packed 32-bit key and the 64-bit key."""
-    orig = _rast._PACK_KEYS
+    orig = _isect._use_32bit_keys
     try:
         splax.clear_scratch()
-        _rast._PACK_KEYS = True
+        _isect._use_32bit_keys = lambda depth_bits: depth_bits >= 16  # ty: ignore[invalid-assignment]
         packed = np.asarray(splax.rasterize(*args, **kw))
         splax.clear_scratch()
-        _rast._PACK_KEYS = False
-        legacy = np.asarray(splax.rasterize(*args, **kw))
+        _isect._use_32bit_keys = lambda depth_bits: False  # ty: ignore[invalid-assignment]
+        wide = np.asarray(splax.rasterize(*args, **kw))
     finally:
-        _rast._PACK_KEYS = orig
+        _isect._use_32bit_keys = orig
         splax.clear_scratch()
-    return packed, legacy
+    return packed, wide
 
 
 def test_packed_vs_64bit_random() -> None:
@@ -279,11 +273,11 @@ def test_packed_vs_64bit_random() -> None:
 
     Depth is linearly quantized into depth_bits (>=16) buckets over the per-frame
     range, so the blend order changes only for near-coincident (same-bucket)
-    gaussians -> >65 dB PSNR, <0.05 max abs diff vs the 64-bit path (measured floor
-    ~80-140 dB across configs; see reports/phase8r_packed_sort_keys.md).
+    gaussians, giving >65 dB PSNR, <0.05 max abs diff vs the 64-bit path (measured
+    floor ~80-140 dB across configs).
     """
     scene = _random_scene(100_000, 512, 512, seed=7)
-    kw: _RastKW = {"img_shape": scene["img_shape"], "block_width": scene["block_width"]}
+    kw: _RastKW = {"img_shape": scene["img_shape"]}
     args = (
         scene["colors"],
         scene["opacities"],
@@ -294,16 +288,16 @@ def test_packed_vs_64bit_random() -> None:
         scene["conics"],
         scene["cum_tiles_hit"],
     )
-    packed, legacy = _rasterize_both_keymodes(args, kw)
-    d = np.abs(packed - legacy)
-    mse = float(np.mean((packed - legacy) ** 2))
+    packed, wide = _rasterize_both_keymodes(args, kw)
+    d = np.abs(packed - wide)
+    mse = float(np.mean((packed - wide) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
     assert d.max() < 0.05, f"packed vs 64-bit max abs diff {d.max():.2e}"
     assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
 
 
 def test_packed_vs_64bit_lego() -> None:
-    """Packed vs 64-bit on the real lego scene (tight O6 key emission)."""
+    """Packed vs 64-bit on the real lego scene (tight key emission)."""
     means, scales, quats, colors, opac = splax.load_ply(ROOT / "data/scenes/lego.ply")
     H, W = 720, 1280
     viewmat = jnp.asarray(
@@ -322,13 +316,12 @@ def test_packed_vs_64bit_lego() -> None:
         c=(W // 2, H // 2),
         glob_scale=1.0,
         clip_thresh=0.01,
-        block_width=16,
     )
-    kw: _RastKW = {"img_shape": (H, W), "block_width": 16, "tight": True}
+    kw: _RastKW = {"img_shape": (H, W)}
     args = (colors, opac, jnp.ones(3), xys, depths, radii, conics, cum)
-    packed, legacy = _rasterize_both_keymodes(args, kw)
-    d = np.abs(packed - legacy)
-    mse = float(np.mean((packed - legacy) ** 2))
+    packed, wide = _rasterize_both_keymodes(args, kw)
+    d = np.abs(packed - wide)
+    mse = float(np.mean((packed - wide) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
     assert d.max() < 0.05, f"packed vs 64-bit max abs diff {d.max():.2e}"
     assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
@@ -337,9 +330,9 @@ def test_packed_vs_64bit_lego() -> None:
 def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
     """When image+tile bits leave <16 for depth, the 64-bit key is used (fallback).
 
-    Observed via the scratch key buffer dtype: packed -> int32, fallback -> int64.
-    B=8 at 1080p gives image(3)+tile(13)=16 bits -> depth_bits=15 <16 -> fallback;
-    B=1 at 1080p gives 13 bits -> depth_bits=18 -> packed.
+    Observed via the scratch key buffer dtype: packed gives int32, fallback gives int64.
+    B=8 at 1080p gives image(3)+tile(13)=16 bits, so depth_bits=15 <16 and it falls back.
+    B=1 at 1080p gives 13 bits, so depth_bits=18 and it packs.
     """
     dev = str(wp.get_device("cuda:0"))
     m, s, q, c, o = (
@@ -359,19 +352,19 @@ def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
         "clip_thresh": 0.01,
     }
 
-    # B=1: packs -> int32 scratch
+    # B=1 packs into int32 scratch
     splax.clear_scratch()
     img, _ = splax.render(m, s, q, c, o, viewmat=_id_viewmat(), **kw)
     img.block_until_ready()
-    assert _rast._scratch_cache[dev]["isect_dtype"] == wp.int32
+    assert _isect._scratch_cache[dev]["isect_dtype"] == wp.int32
 
-    # B=8: image(3)+tile(13)=16 > 15 -> fallback to int64 scratch
+    # B=8: image(3)+tile(13)=16 > 15, falls back to int64 scratch
     splax.clear_scratch()
     views = jnp.stack([_id_viewmat(dz=5.0 + 0.1 * i) for i in range(8)])
     jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(
         views
     ).block_until_ready()
-    assert _rast._scratch_cache[dev]["isect_dtype"] == wp.int64
+    assert _isect._scratch_cache[dev]["isect_dtype"] == wp.int64
     splax.clear_scratch()
 
 
@@ -391,7 +384,6 @@ def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
     return np.linalg.inv(c2w).astype(np.float32)
 
 
-@pytest.mark.skipif(not LEGO.exists(), reason="lego dataset missing")
 def test_render_lego_vs_gsplat(gsplat_ref: types.ModuleType) -> None:
     """splax vs gsplat full render on the real lego scene, from a dataset pose.
 
@@ -418,15 +410,13 @@ def test_render_lego_vs_gsplat(gsplat_ref: types.ModuleType) -> None:
     b = gsplat_ref.render(means, scales, quats, colors, opac, **kw)
     mse = float(np.mean((a - b) ** 2))
     psnr = -10 * np.log10(mse) if mse > 0 else float("inf")
-    # Measured ~82 dB on this pose; bounded well below with margin for scene detail.
+    # Measured ~82 dB on this pose, bounded well below with margin for scene detail.
     assert psnr > 45.0, f"splax vs gsplat lego render PSNR only {psnr:.1f} dB"
 
 
-# --- O6: SNUGBOX + AccuTile opacity-aware tight tile intersection ---------------
-# render() feeds projection the opacities so it emits an opacity-aware tight ellipse
-# (per-axis SNUGBOX radii) and counts tiles via the AccuTile ellipse walk; rasterize
-# walks the identical ellipse to emit keys (tight=True). The count and the emit MUST
-# agree exactly or the per-gaussian sort-buffer offsets corrupt.
+# Opacity-aware tight tile intersection. Projection counts tiles via the ellipse
+# walk and rasterize walks the identical ellipse to emit keys. The count and the
+# emit must agree exactly or the per-gaussian sort buffer offsets corrupt.
 
 
 def _project_tight(
@@ -441,7 +431,7 @@ def _project_tight(
     jax.Array,
     tuple[int, int],
 ]:
-    """splax.project WITH opacities -> SNUGBOX radii + AccuTile num_tiles_hit."""
+    """splax.project WITH opacities gives SNUGBOX radii + AccuTile num_tiles_hit."""
     key = jax.random.key(seed)
     k = jax.random.split(key, 5)
     means = jax.random.normal(k[0], (n, 3))
@@ -458,7 +448,6 @@ def _project_tight(
         "c": (W // 2, H // 2),
         "glob_scale": 1.0,
         "clip_thresh": 0.01,
-        "block_width": 16,
     }
     xys, depths, radii, conics, nth, cum = splax.project(
         means, scales, quats, viewmat, opacities=opacities, **pk
@@ -472,7 +461,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
 
     Launch the emission kernel into a sentinel-filled buffer and verify that every
     slot in [cum[i-1], cum[i]) is written by gaussian i and no slot is left stale or
-    overwritten -- i.e. the emitted count agrees bit-for-bit with the projection's
+    overwritten, i.e. the emitted count agrees bit-for-bit with the projection's
     AccuTile tile count. A divergence between the count (projection) and the walk
     (emission) would show up as sentinels remaining or a wrong gaussian id.
     """
@@ -509,7 +498,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     gids = wp.array(np.full(total, -1, np.int32), dtype=wp.int32, device=dev)
 
     wp.launch(
-        _map_gaussian_to_intersects,
+        _map_intersects_64bit,
         dim=n,
         inputs=[
             xys_w,
@@ -520,11 +509,9 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
             cum_w,
             n,
             n,
-            1,
             tile_n_bits,
             tbx,
             tby,
-            bw,
         ],
         outputs=[isect, gids],
         device=dev,
@@ -541,35 +528,3 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     for i in np.nonzero(nth_np > 0)[0][:2000]:
         s, e = int(starts[i]), int(cum_np[i])
         assert (gids_np[s:e] == i).all(), f"gaussian {i} slot ownership mismatch"
-
-
-def test_snugbox_reduces_intersections() -> None:
-    """SNUGBOX/AccuTile emits fewer (tile,gaussian) pairs than the legacy bbox."""
-    key = jax.random.key(7)
-    k = jax.random.split(key, 4)
-    n = 100_000
-    means = jax.random.normal(k[0], (n, 3))
-    scales = jax.random.uniform(k[1], (n, 3), minval=0.005, maxval=0.05)
-    quats = jax.random.normal(k[2], (n, 4))
-    quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
-    opac = jax.random.uniform(k[3], (n, 1))
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
-    pk: _ProjKW = {
-        "img_shape": (512, 512),
-        "f": (512.0, 512.0),
-        "c": (256, 256),
-        "glob_scale": 1.0,
-        "clip_thresh": 0.01,
-        "block_width": 16,
-    }
-    tight = int(
-        np.asarray(
-            splax.project(means, scales, quats, vm, opacities=opac, **pk)[5]
-        ).ravel()[-1]
-    )
-    legacy = int(
-        np.asarray(splax.project(means, scales, quats, vm, **pk)[5]).ravel()[-1]
-    )
-    assert tight < legacy, f"tight {tight} not < legacy {legacy}"

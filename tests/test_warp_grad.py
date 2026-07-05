@@ -1,25 +1,19 @@
-"""Gradient tests for the Warp backend (Phase 6a).
+"""Gradient tests for the Warp backend.
 
-Three things are checked:
-  1. Gradient parity vs the gsplat reference (torch autograd) on the LEGACY
-     projection path, for two scalar losses (img.sum and a weighted MSE) and all
-     five splat params. gsplat is a different CUDA kernel, so this is a numeric
-     cross-check, not a bit-for-bit port comparison. It is guarded by the
-     ``gsplat_ref`` fixture and skips when gsplat is unavailable.
-  2. Finite-difference directional-derivative self-consistency on both the legacy
-     and the tight (O6) render paths. Needs no reference; always runs.
-  3. grad under jit works; grad under vmap is batch-native (Phase 6f) -- the batched
-     backward matches per-sample sequential grad. Exhaustive batched coverage across
-     diff_wrt selections lives in test_warp_grad_batched.py.
+Three things are checked. First, gradient parity vs the gsplat reference (torch
+autograd) for two scalar losses and all five splat params. gsplat is a different
+CUDA kernel, so this is a numeric cross-check, not a bit-for-bit port comparison.
+It fails when gsplat is unavailable. Second, finite-difference directional
+derivative self-consistency, which needs no reference and always runs. Third,
+grad under jit and batch-native grad under vmap matching the per-sample
+sequential grads. Exhaustive batched coverage lives in test_warp_grad_batched.py.
 
-Parity tolerance: the well-behaved parameters (means/scales/colors/opacities) agree
-to ~1e-4 relative Frobenius, so a 2e-3 bound holds with margin. The quaternion
-gradient is the one documented convention difference: gsplat normalizes quats
-INTERNALLY, so its grad is projected onto the unit-sphere tangent space at q
-(orthogonal to q), while splax treats quats as already unit and keeps the radial
-component too. We therefore compare the quaternion grads only after projecting
-splax's onto the same tangent space (subtracting the component along q); the
-tangential -- physically meaningful -- part agrees to ~2e-5.
+Parity tolerance: the well-behaved parameters agree to ~1e-4 relative Frobenius,
+so a 2e-3 bound holds with margin. The quaternion gradient is the one documented
+convention difference. gsplat normalizes quats internally, so its grad lives in
+the unit-sphere tangent space at q, while splax treats quats as already unit and
+keeps the radial component too. The quaternion grads are compared after
+projecting splax's onto the same tangent space.
 """
 
 from __future__ import annotations
@@ -44,7 +38,7 @@ import splax  # noqa: E402
 
 @pytest.fixture
 def gsplat_ref() -> types.ModuleType:
-    """Skip a test (not the whole module) when gsplat cannot run."""
+    """Fail the test with a clear reason when gsplat cannot run."""
     gref.require_working()
     return gref
 
@@ -75,10 +69,6 @@ class _PK(TypedDict):
     clip_thresh: float
 
 
-class _ProjKW(_PK):
-    block_width: int
-
-
 def _pk(H: int, W: int) -> _PK:
     return {
         "img_shape": (H, W),
@@ -87,37 +77,6 @@ def _pk(H: int, W: int) -> _PK:
         "glob_scale": 1.0,
         "clip_thresh": 0.01,
     }
-
-
-def _splax_legacy(
-    means: jax.Array,
-    scales: jax.Array,
-    quats: jax.Array,
-    colors: jax.Array,
-    opac: jax.Array,
-    bg: jax.Array,
-    vm: jax.Array,
-    H: int,
-    W: int,
-) -> jax.Array:
-    """splax render on the LEGACY (isotropic 3-sigma bbox) projection path."""
-    pk: _ProjKW = {**_pk(H, W), "block_width": 16}
-    xys, depths, radii, conics, _nth, cum = splax.project(
-        means, scales, quats, vm, **pk
-    )
-    return splax.rasterize(
-        colors,
-        opac,
-        bg,
-        xys,
-        depths,
-        radii,
-        conics,
-        cum,
-        img_shape=(H, W),
-        block_width=16,
-        tight=False,
-    )
 
 
 def _splax_tight(
@@ -161,7 +120,7 @@ def test_grad_parity_vs_gsplat(
     w = jax.random.uniform(jax.random.key(123), (H, W, 3))
 
     def loss(*a: jax.Array) -> jax.Array:
-        img = _splax_legacy(*a, bg, vm, H, W)
+        img = _splax_tight(*a, bg, vm, H, W)
         return jnp.sum(img) if which == "sum" else jnp.mean(w * img**2)
 
     weight = None if which == "sum" else np.asarray(w)
@@ -187,26 +146,23 @@ def test_grad_parity_vs_gsplat(
         assert rel < tol, f"{which}/{name} relative grad error {rel:.2e}"
 
 
-@pytest.mark.parametrize("path", ["legacy", "tight"])
-def test_finite_difference(path: str) -> None:
+def test_finite_difference() -> None:
     """Directional-derivative FD check: grad . v ~= (L(x+eps v) - L(x-eps v))/2eps.
 
-    ~10 random parameters are exercised at once via a random unit direction per
-    array; central differences in float32 give ~1e-2 relative accuracy, so we use a
-    loose relative bound. Runs on both the legacy and tight (O6) render paths -- the
-    tight path has no external reference, so this FD self-consistency is its grad
-    check.
+    Hundreds of random parameters are exercised at once via a random unit
+    direction per array. Central differences in float32 give ~1e-2 relative
+    accuracy, so a loose relative bound is used.
     """
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)
-    render = _splax_legacy if path == "legacy" else _splax_tight
+    render = _splax_tight
     w = jax.random.uniform(jax.random.key(5), (H, W, 3))
 
     def loss(
         m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
     ) -> jax.Array:
-        # Linear, mean-reduced loss: keeps the loss magnitude small (float32 render
-        # -> minimal FD cancellation) while giving an O(1) gradient over all five
+        # Linear, mean-reduced loss keeps the loss magnitude small (float32 render,
+        # so minimal FD cancellation) while giving an O(1) gradient over all five
         # parameter arrays at once (~4800 perturbed entries).
         return jnp.mean(w * render(m, s, q, c, o, bg, vm, H, W))
 
@@ -214,10 +170,10 @@ def test_finite_difference(path: str) -> None:
     grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
 
     # Perturb ALONG the gradient (per-array unit direction): maximizes the
-    # directional-derivative signal relative to float32 render noise -- the
+    # directional-derivative signal relative to float32 render noise, the
     # standard well-conditioned gradient check. The residual ~3% is intrinsic to
     # splatting's hard 1/255-cull / early-termination discontinuities, which FD
-    # steps cross; hence the loose bound.
+    # steps cross, hence the loose bound.
     dirs = [g / (jnp.linalg.norm(g) + 1e-12) for g in grads]
     analytic = sum(float(jnp.vdot(g, d)) for g, d in zip(grads, dirs))
 
@@ -228,7 +184,7 @@ def test_finite_difference(path: str) -> None:
 
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
     assert rel < 8e-2, (
-        f"{path} FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
+        f"FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
     )
 
 
@@ -241,7 +197,7 @@ def test_grad_under_jit() -> None:
     def sp(
         m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
     ) -> jax.Array:
-        return _splax_legacy(m, s, q, c, o, bg, vm, H, W)
+        return _splax_tight(m, s, q, c, o, bg, vm, H, W)
 
     g_eager = jax.grad(loss(sp), argnums=(0, 1, 2, 3, 4))(*args)
     g_jit = jax.jit(jax.grad(loss(sp), argnums=(0, 1, 2, 3, 4)))(*args)
@@ -250,10 +206,10 @@ def test_grad_under_jit() -> None:
 
 
 def test_grad_under_vmap_matches_sequential() -> None:
-    """Batch-native backward (Phase 6f): grad under vmap over a batched gaussian input
+    """Batch-native backward: grad under vmap over a batched gaussian input
     must match per-sample sequential jax.grad (the batched callables are
     vmap_method='expand_dims'). Full mixed batched/broadcast coverage across every
-    diff_wrt selection is in test_warp_grad_batched.py."""
+    gradient selection is in test_warp_grad_batched.py."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
     bmeans = means + 0.02 * jax.random.normal(jax.random.key(1), (B, n, 3))
@@ -263,11 +219,18 @@ def test_grad_under_vmap_matches_sequential() -> None:
 
     gv = np.asarray(jax.vmap(jax.grad(loss))(bmeans))
     gs = np.stack([np.asarray(jax.grad(loss)(bmeans[i])) for i in range(B)])
-    assert np.allclose(gv, gs, rtol=1e-4, atol=1e-6)
+    # The rasterize backward accumulates with atomics, so even the sequential
+    # path jitters run to run. rtol=1e-4 flaked, same bound as the viewmat
+    # variant below.
+    assert np.allclose(gv, gs, rtol=2e-3, atol=1e-4)
 
 
-# --- Phase 6e: camera-pose (viewmat) gradients --------------------------------
-def _render_diff(
+# --- camera-pose (viewmat) gradients --------------------------------
+# Gradient selection is pure jax.grad/argnums. Differentiating with respect to the
+# viewmat runs the camera-pose accumulator, differentiating with respect to a
+# gaussian input runs the gaussian-grad kernels, and both together run the joint
+# kernel. The jax.grad argnums alone decide which kernels run.
+def _render(
     means: jax.Array,
     scales: jax.Array,
     quats: jax.Array,
@@ -277,7 +240,6 @@ def _render_diff(
     vm: jax.Array,
     H: int,
     W: int,
-    diff_wrt: tuple[str, ...],
 ) -> jax.Array:
     return splax.training.render(
         means,
@@ -287,29 +249,23 @@ def _render_diff(
         opac,
         viewmat=vm,
         background=bg,
-        diff_wrt=diff_wrt,
         **_pk(H, W),
     )[0]
 
 
 def test_viewmat_finite_difference() -> None:
     """Directional-derivative FD check of the viewmat gradient (the primary
-    validation -- gsplat's rasterization exposes no directly comparable viewmat
+    validation, since gsplat's rasterization exposes no directly comparable viewmat
     grad in this setup). Perturb the 12
-    differentiable viewmat entries along the analytic gradient direction; central
+    differentiable viewmat entries along the analytic gradient direction, central
     differences match grad.direction to a few percent (loose bound for the same
-    hard-cull discontinuities Phase 6a's FD test documents)."""
+    hard-cull discontinuities the FD test documents)."""
     n, H, W = 4000, 120, 120
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=11)
     w = jax.random.uniform(jax.random.key(4), (H, W, 3))
 
     def loss(v: jax.Array) -> jax.Array:
-        return jnp.mean(
-            w
-            * _render_diff(
-                means, scales, quats, colors, opac, bg, v, H, W, ("viewmat",)
-            )
-        )
+        return jnp.mean(w * _render(means, scales, quats, colors, opac, bg, v, H, W))
 
     g = np.asarray(jax.grad(loss)(vm))
     assert np.all(np.isfinite(g)), "viewmat grad has non-finite entries"
@@ -328,39 +284,36 @@ def test_viewmat_finite_difference() -> None:
     )
 
 
-def test_diff_wrt_consistency() -> None:
-    """diff_wrt=('gaussians','viewmat') must reproduce the ('gaussians',) gaussian
-    grads and the ('viewmat',) camera grad -- the 'both' kernel shares the exact
-    vjp helpers, so both agree to tight tolerance (the tiny residual is FMA
-    scheduling under the different tile-launch geometry, ~1e-9)."""
+def test_grad_selection_consistency() -> None:
+    """The joint (gaussians+viewmat) backward must reproduce the gaussian-only
+    gaussian grads and the viewmat-only camera grad. Differentiating with respect to
+    only the means selects the gaussian-grad kernel, differentiating with respect to
+    (means, viewmat) selects the joint kernel. The two must agree to tight tolerance because the
+    joint kernel shares the exact vjp helpers (the tiny residual is FMA scheduling
+    under the different tile-launch geometry, ~1e-9). Likewise viewmat-only vs joint
+    for the camera grad."""
     n, H, W = 3000, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=5)
     w = jax.random.uniform(jax.random.key(6), (H, W, 3))
 
-    def gloss(m: jax.Array, diff: tuple[str, ...]) -> jax.Array:
-        return jnp.mean(
-            w * _render_diff(m, scales, quats, colors, opac, bg, vm, H, W, diff)
-        )
+    def loss(m: jax.Array, v: jax.Array) -> jax.Array:
+        return jnp.mean(w * _render(m, scales, quats, colors, opac, bg, v, H, W))
 
-    gm_only = jax.grad(gloss)(means, ("gaussians",))
-    gm_both = jax.grad(gloss)(means, ("gaussians", "viewmat"))
+    # gaussian grad: means-only (gaussian kernel) vs joint (both kernel).
+    gm_only = jax.grad(loss, argnums=0)(means, vm)
+    gm_both, gv_both = jax.grad(loss, argnums=(0, 1))(means, vm)
     assert np.allclose(np.asarray(gm_only), np.asarray(gm_both), rtol=1e-5, atol=1e-6)
 
-    def vloss(v: jax.Array, diff: tuple[str, ...]) -> jax.Array:
-        return jnp.mean(
-            w * _render_diff(means, scales, quats, colors, opac, bg, v, H, W, diff)
-        )
-
-    gv_only = np.asarray(jax.grad(vloss)(vm, ("viewmat",)))
-    gv_both = np.asarray(jax.grad(vloss)(vm, ("gaussians", "viewmat")))
-    assert np.allclose(gv_only, gv_both, rtol=1e-4, atol=1e-6)
+    # camera grad: viewmat-only (view kernel) vs joint (both kernel).
+    gv_only = np.asarray(jax.grad(loss, argnums=1)(means, vm))
+    assert np.allclose(gv_only, np.asarray(gv_both), rtol=1e-4, atol=1e-6)
 
 
 def test_pose_chain_rule_fd() -> None:
     """jax chain rule: parametrize a pose as a 6-vector (axis-angle + translation)
-    built into a 4x4 INSIDE jax, then grad w.r.t. the 6-vector. It must be finite
-    and match a directional FD -- validates the grad flowing se3 -> 4x4 viewmat ->
-    the Warp viewmat backward."""
+    built into a 4x4 INSIDE jax, then grad with respect to the 6-vector. It must be
+    finite and match a directional FD, validating the grad flowing from se3 to the
+    4x4 viewmat to the Warp viewmat backward."""
 
     def skew(v: jax.Array) -> jax.Array:
         return jnp.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
@@ -379,10 +332,7 @@ def test_pose_chain_rule_fd() -> None:
 
     def loss(xi: jax.Array) -> jax.Array:
         return jnp.mean(
-            w
-            * _render_diff(
-                means, scales, quats, colors, opac, bg, se3(xi) @ vm, H, W, ("viewmat",)
-            )
+            w * _render(means, scales, quats, colors, opac, bg, se3(xi) @ vm, H, W)
         )
 
     g = np.asarray(jax.grad(loss)(xi0))
@@ -401,8 +351,8 @@ def test_pose_chain_rule_fd() -> None:
 
 
 def test_viewmat_grad_under_vmap_matches_sequential() -> None:
-    """The viewmat backward is batch-native (Phase 6f): grad under vmap over B distinct
-    camera poses recovers per-pose camera gradients matching the sequential loop -- the
+    """The viewmat backward is batch-native. Grad under vmap over B distinct
+    camera poses recovers per-pose camera gradients matching the sequential loop, the
     core of scripts/optimize_pose.py --batch."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=9)
@@ -412,12 +362,10 @@ def test_viewmat_grad_under_vmap_matches_sequential() -> None:
     vms = vms.at[:, 3, :].set(jnp.array([0.0, 0.0, 0.0, 1.0]))
 
     def loss(v: jax.Array) -> jax.Array:
-        return jnp.sum(
-            _render_diff(means, scales, quats, colors, opac, bg, v, H, W, ("viewmat",))
-        )
+        return jnp.sum(_render(means, scales, quats, colors, opac, bg, v, H, W))
 
     gv = np.asarray(jax.vmap(jax.grad(loss))(vms))
     gs = np.stack([np.asarray(jax.grad(loss)(vms[i])) for i in range(B)])
     # The rasterize backward accumulates with atomics, so even the sequential
-    # path jitters up to ~2e-4 rel against itself run-to-run; 1e-4 flaked.
+    # path jitters up to ~2e-4 rel against itself run-to-run. 1e-4 flaked.
     assert np.allclose(gv, gs, rtol=2e-3, atol=1e-4)

@@ -13,11 +13,11 @@ still get MCMC-style training:
   means every step (annealed by the caller via ``scaler``), so low-opacity
   gaussians random-walk to explore while high-opacity ones stay put.
 
-Every op is a mask + gather + scatter on the full ``N`` -- no dynamic shapes --
+Every op is a mask + gather + scatter on the full ``N`` with no dynamic shapes,
 so it composes with ``jax.jit`` and a fixed optax state. Ports the CUDA
 ``relocation_kernel`` (gsplat/cuda/csrc/RelocationCUDA.cu) and the PyTorch
-``relocate`` / ``inject_noise_to_position`` (gsplat/strategy/ops.py) faithfully;
-see ``tests/test_mcmc.py`` for the parity check against a direct transcription of
+``relocate`` / ``inject_noise_to_position`` (gsplat/strategy/ops.py) faithfully.
+``tests/test_mcmc.py`` holds the parity check against a direct transcription of
 the CUDA Eq. 9 loop.
 """
 
@@ -58,7 +58,7 @@ def compute_relocation(
     new_opac = 1.0 - (1.0 - opacities) ** (1.0 / ratios)
     k = jnp.arange(n_max, dtype=jnp.float32)
     sign_sqrt = ((-1.0) ** k) / jnp.sqrt(k + 1.0)  # (-1)^k / sqrt(k+1)
-    # cb[m, k] = sum_{i=1..m+1} binoms[i-1, k]; sum_{i=1..n} binoms[i-1, k] = cb[n-1, k]
+    # cb[m, k] = sum_{i=1..m+1} binoms[i-1, k], so sum_{i=1..n} binoms[i-1, k] = cb[n-1, k]
     cb = jnp.cumsum(binoms, axis=0)
     cbr = cb[ratios - 1]  # (N, n_max)
     powers = new_opac[:, None] ** (k + 1.0)  # new_opac^(k+1)
@@ -77,12 +77,12 @@ def relocate(
     binoms: jax.Array,
     min_opacity: float = 0.005,
 ) -> tuple[dict[str, jax.Array], jax.Array]:
-    """Relocate dead gaussians onto alive ones (fixed ``N``); port of gsplat ``relocate``.
+    """Relocate dead gaussians onto alive ones at fixed ``N``, a port of gsplat ``relocate``.
 
     Operates on the *raw* training parameters (opacity/scale stored as
     logit/log). Dead = ``sigmoid(opac_logit) <= min_opacity``. Every gaussian
     samples a source among the alive ones with probability proportional to
-    opacity; dead gaussians copy their source's mean/quat/color and take the
+    opacity. Dead gaussians copy their source's mean/quat/color and take the
     Eq.-9-corrected opacity/scale, while a source chosen by ``c`` dead gaussians
     has its own opacity/scale corrected for the resulting multiplicity ``c + 1``.
     Alive, unchosen gaussians pass through untouched (``ratio == 1``).
@@ -156,13 +156,13 @@ def inject_noise(
 
     ``noise = Sigma @ (randn * op_sigmoid(1 - opacity) * scaler)`` with
     ``Sigma = R diag(scale^2) R^T`` and ``op_sigmoid(x) = sigmoid(100 (x - 0.995))``
-    -- low-opacity gaussians get near-full noise, high-opacity ones ~zero. The
+    so low-opacity gaussians get near-full noise and high-opacity ones ~zero. The
     caller anneals via ``scaler = means_lr(step) * noise_lr``. Returns new means.
     """
     opac = jax.nn.sigmoid(opac_logit).reshape(means.shape[0])
     scales = jnp.exp(log_scales)
     rot = _quat_to_rotmat(quats)
-    m = rot * scales[:, None, :]  # R diag(scale); Sigma = m m^T
+    m = rot * scales[:, None, :]  # R diag(scale) with Sigma = m m^T
     op_sig = jax.nn.sigmoid(100.0 * ((1.0 - opac) - 0.995))
     noise = jax.random.normal(key, means.shape) * (op_sig * scaler)[:, None]
     noise = jnp.einsum("nij,nkj,nk->ni", m, m, noise)  # Sigma @ noise

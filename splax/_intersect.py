@@ -1,0 +1,723 @@
+"""Tile intersection, sort keys, and bin edges shared by projection and rasterization.
+
+The opacity-aware tight tile intersection is a port of gsplat's SpeedySplat path
+(SNUGBOX plus AccuTile, ProjectionEWA3DGSFused.cu and IntersectTile.cu). Instead of
+an isotropic 3-sigma bbox, each gaussian gets a tight ellipse at the opacity-aware
+isocontour level t = min(EXTEND^2, 2 ln(opacity / ALPHA)). Outside that level the
+gaussian's alpha drops below 1/255, so tiles past it are invisible. The AccuTile
+walk marches the ellipse column by column and emits only the tiles its boundary
+spans. Projection counts tiles with the same walk that rasterization uses to emit
+sort keys, so the counted and emitted totals agree bit for bit. This is required,
+otherwise the per-gaussian sort buffer offsets in cum_tiles_hit corrupt.
+
+Sort keys come in two widths. When image and tile ids leave at least 16 low bits,
+the whole key packs into one non-negative int32 (iid | tile_id | quantized depth),
+halving the radix sort passes and quartering the bytes moved. The sort stage drops
+2.7 to 3.1x on large frames. Otherwise the 64 bit key
+(iid | tile_id) << 32 | depth_bits is the automatic fallback.
+"""
+
+import warp as wp
+
+wp.init()
+
+# One 16x16 pixel tile is processed by one 256-thread block. Tile shapes must be
+# static, so these are compile-time constants and the only supported geometry.
+BLOCK_WIDTH = wp.constant(16)
+BLOCK_SIZE = wp.constant(256)
+
+GAUSSIAN_EXTEND_SQ = wp.constant(3.33 * 3.33)  # (max ellipse extent in sigma)^2
+ALPHA_THRESHOLD = wp.constant(1.0 / 255.0)
+
+
+@wp.struct
+class _Ellipse:
+    """Opacity-aware ellipse and its tile walk state (gsplat SNUGBOX + AccuTile)."""
+
+    valid: wp.int32  # 1 if the ellipse's tile rectangle is non-empty
+    A: wp.float32  # conic (inverse 2d covariance upper triangle)
+    B: wp.float32
+    C: wp.float32
+    disc: wp.float32  # B*B - A*C, negative for a real ellipse
+    t: wp.float32  # opacity-aware isocontour level
+    px: wp.float32  # ellipse center in image pixels, un-swapped
+    py: wp.float32
+    # bbox_* and rect_* store the walk's outer axis in component [0]. An x-major
+    # walk (isY=0) keeps (x, y), a y-major walk swaps them.
+    bbox_min: wp.vec2
+    bbox_max: wp.vec2
+    bbox_argmin: wp.vec2
+    bbox_argmax: wp.vec2
+    rect_min: wp.vec2i
+    rect_max: wp.vec2i
+    isY: wp.int32  # 1 if the walk marches over the y tiles (shorter span outer)
+
+
+@wp.func
+def _ellipse_intersection(
+    A: wp.float32,
+    B: wp.float32,
+    C: wp.float32,
+    disc: wp.float32,
+    t: wp.float32,
+    px: wp.float32,
+    py: wp.float32,
+    isY: wp.int32,
+    coord: wp.float32,
+) -> wp.vec2:
+    # Where the boundary line u=coord meets the ellipse, giving the [lower, upper]
+    # extent of the cross axis at that line.
+    if isY != 0:
+        p_u = py
+        p_v = px
+        coeff = A
+    else:
+        p_u = px
+        p_v = py
+        coeff = C
+    h = coord - p_u
+    sqrt_term = wp.sqrt(disc * h * h + t * coeff)
+    return wp.vec2(
+        (-B * h - sqrt_term) / coeff + p_v, (-B * h + sqrt_term) / coeff + p_v
+    )
+
+
+@wp.func
+def _ellipse_setup(
+    A: wp.float32,
+    B: wp.float32,
+    C: wp.float32,
+    t: wp.float32,
+    px: wp.float32,
+    py: wp.float32,
+    tile_width: wp.int32,
+    tile_height: wp.int32,
+) -> _Ellipse:
+    # Tight AABB of the ellipse plus its tile rectangle, then pick the shorter tile
+    # span as the walk's outer axis. Faithful to IntersectTile.cu:210-252.
+    s = _Ellipse()
+    s.valid = wp.int32(0)
+    s.A = A
+    s.B = B
+    s.C = C
+    s.t = t
+    s.px = px
+    s.py = py
+    disc = B * B - A * C
+    s.disc = disc
+    neg_t_over_disc = -t / disc
+    x_extent = wp.sqrt(neg_t_over_disc * C)
+    y_extent = wp.sqrt(neg_t_over_disc * A)
+    bbox_min = wp.vec2(px - x_extent, py - y_extent)
+    bbox_max = wp.vec2(px + x_extent, py + y_extent)
+    Bx_over_C = B * x_extent / C
+    By_over_A = B * y_extent / A
+    bbox_argmin = wp.vec2(py + Bx_over_C, px + By_over_A)
+    bbox_argmax = wp.vec2(py - Bx_over_C, px - By_over_A)
+    ts = wp.float32(BLOCK_WIDTH)
+    rminx = wp.max(0, wp.min(tile_width, wp.int32(bbox_min[0] / ts)))
+    rminy = wp.max(0, wp.min(tile_height, wp.int32(bbox_min[1] / ts)))
+    rmaxx = wp.max(0, wp.min(tile_width, wp.int32(bbox_max[0] / ts + 1.0)))
+    rmaxy = wp.max(0, wp.min(tile_height, wp.int32(bbox_max[1] / ts + 1.0)))
+    x_span = rmaxx - rminx
+    y_span = rmaxy - rminy
+    if y_span * x_span == 0:
+        return s
+    isY = wp.int32(0)
+    if y_span < x_span:
+        isY = wp.int32(1)
+    s.isY = isY
+    if isY != 0:
+        s.rect_min = wp.vec2i(rminy, rminx)
+        s.rect_max = wp.vec2i(rmaxy, rmaxx)
+        s.bbox_min = wp.vec2(bbox_min[1], bbox_min[0])
+        s.bbox_max = wp.vec2(bbox_max[1], bbox_max[0])
+        s.bbox_argmin = wp.vec2(bbox_argmin[1], bbox_argmin[0])
+        s.bbox_argmax = wp.vec2(bbox_argmax[1], bbox_argmax[0])
+    else:
+        s.rect_min = wp.vec2i(rminx, rminy)
+        s.rect_max = wp.vec2i(rmaxx, rmaxy)
+        s.bbox_min = bbox_min
+        s.bbox_max = bbox_max
+        s.bbox_argmin = bbox_argmin
+        s.bbox_argmax = bbox_argmax
+    s.valid = wp.int32(1)
+    return s
+
+
+@wp.func
+def _ellipse_init_span(s: _Ellipse) -> wp.vec2:
+    # Cross-axis extent carried into the first column. The boundary at the rect's
+    # leading line, or a degenerate default when that line lies outside the bbox.
+    min_line0 = wp.float32(s.rect_min[0]) * wp.float32(BLOCK_WIDTH)
+    if s.bbox_min[0] <= min_line0:
+        return _ellipse_intersection(
+            s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, min_line0
+        )
+    return wp.vec2(s.bbox_max[1], s.bbox_min[1])
+
+
+@wp.func
+def _ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
+    # One outer column of the walk. Returns (min_tile_v, max_tile_v, I_max) where
+    # I_max feeds the next column as its I_min (gsplat's rolling intersect lines).
+    # The cross-axis tile range is [min_v, max_v).
+    block = wp.float32(BLOCK_WIDTH)
+    min_line = wp.float32(u) * block
+    max_line = min_line + block
+    if max_line <= s.bbox_max[0]:
+        I_max = _ellipse_intersection(
+            s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, max_line
+        )
+    else:
+        I_max = I_min
+    if (min_line <= s.bbox_argmin[1]) and (s.bbox_argmin[1] < max_line):
+        ellipse_min = s.bbox_min[1]
+    else:
+        ellipse_min = wp.min(I_min[0], I_max[0])
+    if (min_line <= s.bbox_argmax[1]) and (s.bbox_argmax[1] < max_line):
+        ellipse_max = s.bbox_max[1]
+    else:
+        ellipse_max = wp.max(I_min[1], I_max[1])
+    min_v = wp.max(s.rect_min[1], wp.min(s.rect_max[1], wp.int32(ellipse_min / block)))
+    max_v = wp.min(
+        s.rect_max[1], wp.max(s.rect_min[1], wp.int32(ellipse_max / block + 1.0))
+    )
+    return wp.vec4(wp.float32(min_v), wp.float32(max_v), I_max[0], I_max[1])
+
+
+@wp.func
+def _ellipse_tile_count(s: _Ellipse) -> wp.int32:
+    # Total tiles the ellipse touches, written to num_tiles_hit by projection.
+    if s.valid == 0:
+        return wp.int32(0)
+    I_min = _ellipse_init_span(s)
+    count = wp.int32(0)
+    for u in range(s.rect_min[0], s.rect_max[0]):
+        r = _ellipse_column(u, s, I_min)
+        count = count + (wp.int32(r[1]) - wp.int32(r[0]))
+        I_min = wp.vec2(r[2], r[3])
+    return count
+
+
+def _bits_for_count(count: int) -> int:
+    """Bits needed to index [0, count)."""
+    return 0 if count <= 1 else (count - 1).bit_length()
+
+
+# Persistent grow-only scratch cache. The pipeline needs three buffers
+# whose sizes depend on the data-dependent intersection count:
+#   isect_ids / gaussian_ids  radix sort key and value ping-pong buffers. Warp's
+#     radix_sort_pairs mandates a 2*count backing array because it drives a
+#     cub::DoubleBuffer internally.
+#   tile_bins  per (image, tile) bin edges of length B*num_tiles.
+# Re-allocating from the mempool every frame costs a cold ~14 ms re-malloc of ~3 GB
+# at B=8/1M/1080p. One set of buffers is kept per device, keyed on the static shape
+# signature (B, N, num_tiles). Callers invoke this from jitted functions, so the
+# signature is fixed per compiled executable and repeated calls reuse stable
+# buffers. A signature change drops everything, so a big config's scratch never
+# lingers into a smaller one. Within one signature the sort buffers track the
+# running max intersection count with 1.25x headroom.
+# The sort buffers are fully overwritten in their valid prefix every frame, so
+# there is no stale-data hazard. tile_bins is the exception. The bin-edge kernel
+# only touches bins that own intersections, so the used prefix must be zeroed
+# each frame.
+_SCRATCH_HEADROOM = 1.25
+_scratch_cache: dict = {}
+
+# Cached post-sync CUDA graphs (see _rasterize._forward_graph). A graph
+# records the addresses of the scratch buffers, so any scratch reallocation makes
+# every cached graph dangling and the cache must be purged. Graphs are destroyed
+# before the scratch refs drop, so each is torn down while the buffers it
+# recorded are still alive. The "gen" counter in each scratch entry bumps on
+# every sort-buffer reallocation and is part of the graph cache key.
+_graph_cache: dict = {}
+
+
+def clear_graph_cache() -> None:
+    """Release all cached post-sync CUDA graphs on all devices."""
+    _graph_cache.clear()
+
+
+def _get_scratch(
+    device: wp.Device | None,
+    sig: tuple,
+    isect_need: int,
+    bins_need: int,
+    isect_dtype: type = wp.int64,
+) -> dict:
+    key = str(device)  # wp.Device is unhashable, its string alias is stable
+    entry = _scratch_cache.get(key)
+    if entry is None or entry["sig"] != sig:
+        # New workload signature. Drop everything first so the peak is the new
+        # size, not old plus new. Purge the graphs first, they hold the old
+        # addresses.
+        _graph_cache.clear()
+        _scratch_cache.pop(key, None)
+        entry = {
+            "sig": sig,
+            "isect_cap": 0,
+            "isect_dtype": isect_dtype,
+            "isect_ids": None,
+            "gaussian_ids": None,
+            "tile_bins": wp.empty(bins_need, dtype=wp.vec2i, device=device),
+            "depth_mm": wp.empty(2 * max(sig[0], 1), dtype=wp.float32, device=device),
+            "gen": 0,
+        }
+        _scratch_cache[key] = entry
+    if entry["isect_cap"] < isect_need or entry["isect_dtype"] != isect_dtype:
+        cap = max(int(isect_need * _SCRATCH_HEADROOM) + 1, entry["isect_cap"])
+        entry["gen"] += 1
+        _graph_cache.clear()  # sort buffers move on realloc, graphs go stale
+        # Free before allocating larger, avoiding an old plus new transient peak.
+        entry["isect_ids"] = None
+        entry["gaussian_ids"] = None
+        entry["isect_cap"] = 0
+        entry["isect_dtype"] = isect_dtype
+        entry["isect_ids"] = wp.empty(cap, dtype=isect_dtype, device=device)
+        entry["gaussian_ids"] = wp.empty(cap, dtype=wp.int32, device=device)
+        entry["isect_cap"] = cap
+    return entry
+
+
+def clear_scratch() -> None:
+    """Release the persistent sort and bin scratch buffers on all devices.
+
+    The backend caches grow-only scratch across renders. Call this to reclaim that
+    memory, for example before switching to a very different workload size. Also
+    purges the post-sync CUDA graph cache, whose graphs reference the freed
+    scratch addresses.
+    """
+    _graph_cache.clear()
+    _scratch_cache.clear()
+
+
+# Each thread privately reduces this many gaussians before one atomic pair,
+# cutting global atomics and their contention by the same factor.
+_MINMAX_CHUNK = wp.constant(32)
+
+
+@wp.kernel
+def _seed_minmax(out_mm: wp.array[wp.float32]):
+    b = wp.tid()  # one thread per image
+    out_mm[2 * b] = 1.0e30
+    out_mm[2 * b + 1] = -1.0e30
+
+
+@wp.kernel
+def _depth_minmax(
+    depths: wp.array[wp.float32],
+    radii: wp.array[wp.int32],
+    total: wp.int32,
+    num_gaussians: wp.int32,
+    # output, per-image [min, max] pairs of length 2*B, pre-seeded by _seed_minmax
+    out_mm: wp.array[wp.float32],
+):
+    # The range is kept per image (image = idx // n) so a batched render quantizes
+    # each view exactly as the corresponding unbatched render would. A chunk spans
+    # at most one image boundary (n >> 32), handled by flushing the accumulator
+    # when the image changes.
+    tid = wp.tid()
+    base = tid * _MINMAX_CHUNK
+    img_cur = wp.int32(-1)
+    lo = wp.float32(1.0e30)
+    hi = wp.float32(-1.0e30)
+    for k in range(_MINMAX_CHUNK):
+        idx = base + k
+        if idx < total:
+            if radii[idx] > 0:  # culled gaussians emit no keys, exclude from range
+                im = idx // num_gaussians
+                if im != img_cur:
+                    if img_cur >= 0:
+                        wp.atomic_min(out_mm, 2 * img_cur, lo)
+                        wp.atomic_max(out_mm, 2 * img_cur + 1, hi)
+                    img_cur = im
+                    lo = depths[idx]
+                    hi = depths[idx]
+                else:
+                    lo = wp.min(lo, depths[idx])
+                    hi = wp.max(hi, depths[idx])
+    if img_cur >= 0:
+        wp.atomic_min(out_mm, 2 * img_cur, lo)
+        wp.atomic_max(out_mm, 2 * img_cur + 1, hi)
+
+
+@wp.kernel
+def _map_intersects_32bit(
+    xys: wp.array[wp.vec2],
+    depths: wp.array[wp.float32],
+    radii: wp.array[wp.int32],
+    conics: wp.array[wp.vec3],
+    map_opacities: wp.array[wp.float32],
+    cum_tiles_hit: wp.array[wp.int32],
+    depth_mm: wp.array[wp.float32],
+    num_gaussians: wp.int32,
+    opac_mod: wp.int32,
+    tile_n_bits: wp.int32,
+    depth_bits: wp.int32,
+    tile_bounds_x: wp.int32,
+    tile_bounds_y: wp.int32,
+    # outputs
+    isect_ids: wp.array[wp.int32],
+    gaussian_ids: wp.array[wp.int32],
+):
+    # Packed 32 bit key. The key is (iid | tile_id | quant_depth) with
+    # depth_bits = 31 - (image_n_bits + tile_n_bits), at least 16 when this kernel
+    # is selected. The sign bit stays 0, so cub's signed radix sort orders the keys
+    # as plain unsigned ascending over 4 passes instead of 8.
+    # quant_depth linearly quantizes the camera depth into depth_bits buckets over
+    # the per-image [dmin, dmax] range, which is monotone in depth. Near-coincident
+    # gaussians in the same bucket keep gaussian-id order under the stable sort,
+    # a perceptually negligible blend-order change (80+ dB vs the 64 bit key).
+    # Linear-over-range beats truncating the float mantissa. It spends every bucket
+    # inside the scene's actual depth span.
+    idx = wp.tid()
+    if radii[idx] <= 0:
+        return
+    n = num_gaussians
+    bid = idx // n
+    center = xys[idx]
+
+    cur_idx = wp.int32(0)
+    if idx > 0:
+        cur_idx = cum_tiles_hit[idx - 1]
+
+    dmin = depth_mm[2 * bid]
+    drange = depth_mm[2 * bid + 1] - dmin
+    maxq = wp.float32((wp.int32(1) << depth_bits) - wp.int32(1))
+    depth_q = wp.int32(0)
+    if drange > 0.0:
+        f = (depths[idx] - dmin) / drange
+        depth_q = wp.clamp(
+            wp.int32(f * maxq), wp.int32(0), (wp.int32(1) << depth_bits) - wp.int32(1)
+        )
+    iid_enc = bid << (depth_bits + tile_n_bits)
+
+    # The same ellipse walk as projection's tile count, emitting exactly
+    # num_tiles_hit keys per gaussian so the cum offsets stay valid.
+    # map_opacities is the raw opacity projection counted with. When the blend uses
+    # a compensated opacity (antialiased mode) this stays raw so the emitted key
+    # total still matches cum_tiles_hit exactly.
+    opac = map_opacities[idx % opac_mod]
+    t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
+    conic = conics[idx]
+    setup = _ellipse_setup(
+        conic[0],
+        conic[1],
+        conic[2],
+        t,
+        center[0],
+        center[1],
+        tile_bounds_x,
+        tile_bounds_y,
+    )
+    if setup.valid == 0:
+        return
+    I_min = _ellipse_init_span(setup)
+    for u in range(setup.rect_min[0], setup.rect_max[0]):
+        rc = _ellipse_column(u, setup, I_min)
+        mn = wp.int32(rc[0])
+        mx = wp.int32(rc[1])
+        for v in range(mn, mx):
+            if setup.isY != 0:
+                tile_id = u * tile_bounds_x + v
+            else:
+                tile_id = v * tile_bounds_x + u
+            isect_ids[cur_idx] = iid_enc | (tile_id << depth_bits) | depth_q
+            gaussian_ids[cur_idx] = idx
+            cur_idx = cur_idx + 1
+        I_min = wp.vec2(rc[2], rc[3])
+
+
+@wp.kernel
+def _map_intersects_64bit(
+    xys: wp.array[wp.vec2],
+    depths_int: wp.array[wp.int32],
+    radii: wp.array[wp.int32],
+    conics: wp.array[wp.vec3],
+    map_opacities: wp.array[wp.float32],
+    cum_tiles_hit: wp.array[wp.int32],
+    num_gaussians: wp.int32,
+    opac_mod: wp.int32,
+    tile_n_bits: wp.int32,
+    tile_bounds_x: wp.int32,
+    tile_bounds_y: wp.int32,
+    # outputs
+    isect_ids: wp.array[wp.int64],
+    gaussian_ids: wp.array[wp.int32],
+):
+    # 64 bit twin of _map_intersects_32bit for the too-many-tiles case. The key is
+    # (iid | tile_id) << 32 | depth_bits, with the positive float depth's raw bits
+    # sorting correctly as ints. Identical tile emission, only the key differs.
+    idx = wp.tid()
+    if radii[idx] <= 0:
+        return
+    n = num_gaussians
+    bid = idx // n
+    center = xys[idx]
+
+    cur_idx = wp.int32(0)
+    if idx > 0:
+        cur_idx = cum_tiles_hit[idx - 1]
+
+    depth_id = wp.int64(depths_int[idx])
+    iid_enc = wp.int64(bid) << (wp.int64(32) + wp.int64(tile_n_bits))
+
+    opac = map_opacities[idx % opac_mod]
+    t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
+    conic = conics[idx]
+    setup = _ellipse_setup(
+        conic[0],
+        conic[1],
+        conic[2],
+        t,
+        center[0],
+        center[1],
+        tile_bounds_x,
+        tile_bounds_y,
+    )
+    if setup.valid == 0:
+        return
+    I_min = _ellipse_init_span(setup)
+    for u in range(setup.rect_min[0], setup.rect_max[0]):
+        rc = _ellipse_column(u, setup, I_min)
+        mn = wp.int32(rc[0])
+        mx = wp.int32(rc[1])
+        for v in range(mn, mx):
+            if setup.isY != 0:
+                tile_id = wp.int64(u * tile_bounds_x + v)
+            else:
+                tile_id = wp.int64(v * tile_bounds_x + u)
+            isect_ids[cur_idx] = iid_enc | (tile_id << wp.int64(32)) | depth_id
+            gaussian_ids[cur_idx] = idx
+            cur_idx = cur_idx + 1
+        I_min = wp.vec2(rc[2], rc[3])
+
+
+@wp.kernel
+def _tile_bin_edges_32bit(
+    num_intersects: wp.int32,
+    isect_ids_sorted: wp.array[wp.int32],
+    num_tiles: wp.int32,
+    tile_n_bits: wp.int32,
+    depth_bits: wp.int32,
+    # output
+    tile_bins: wp.array[wp.vec2i],
+):
+    # Per (image, tile) bin edges into a [B*num_tiles] array. The flat bin index is
+    # iid*num_tiles + tile_id, decoded from the key field above the depth bits.
+    idx = wp.tid()
+    if idx >= num_intersects:
+        return
+    mask = (wp.int32(1) << tile_n_bits) - wp.int32(1)
+    key = isect_ids_sorted[idx] >> depth_bits
+    cur_bin = (key >> tile_n_bits) * num_tiles + (key & mask)
+    if idx == 0:
+        tile_bins[cur_bin][0] = 0
+        return
+    if idx == num_intersects - 1:
+        tile_bins[cur_bin][1] = num_intersects
+    keyp = isect_ids_sorted[idx - 1] >> depth_bits
+    prev_bin = (keyp >> tile_n_bits) * num_tiles + (keyp & mask)
+    if prev_bin != cur_bin:
+        tile_bins[prev_bin][1] = idx
+        tile_bins[cur_bin][0] = idx
+
+
+@wp.kernel
+def _tile_bin_edges_32bit_dev(
+    count_arr: wp.array[wp.int32],
+    count_idx: wp.int32,
+    isect_ids_sorted: wp.array[wp.int32],
+    num_tiles: wp.int32,
+    tile_n_bits: wp.int32,
+    depth_bits: wp.int32,
+    # output
+    tile_bins: wp.array[wp.vec2i],
+):
+    # Device-count-guarded twin of _tile_bin_edges_32bit for the captured-graph
+    # path. The real intersection count is read from device memory
+    # (count_arr[count_idx] == cum_tiles_hit[total-1]) at replay time, not baked
+    # into the graph. The sort runs over the padded bucket with 0x7FFFFFFF
+    # sentinel keys at the tail, and this guard makes every thread past the real
+    # count return, so the writes are byte-identical to _tile_bin_edges_32bit
+    # launched at dim=count. The blend reads only real bins.
+    idx = wp.tid()
+    num_intersects = count_arr[count_idx]
+    if idx >= num_intersects:
+        return
+    mask = (wp.int32(1) << tile_n_bits) - wp.int32(1)
+    key = isect_ids_sorted[idx] >> depth_bits
+    cur_bin = (key >> tile_n_bits) * num_tiles + (key & mask)
+    if idx == 0:
+        tile_bins[cur_bin][0] = 0
+        return
+    if idx == num_intersects - 1:
+        tile_bins[cur_bin][1] = num_intersects
+    keyp = isect_ids_sorted[idx - 1] >> depth_bits
+    prev_bin = (keyp >> tile_n_bits) * num_tiles + (keyp & mask)
+    if prev_bin != cur_bin:
+        tile_bins[prev_bin][1] = idx
+        tile_bins[cur_bin][0] = idx
+
+
+@wp.kernel
+def _tile_bin_edges_64bit(
+    num_intersects: wp.int32,
+    isect_ids_sorted: wp.array[wp.int64],
+    num_tiles: wp.int32,
+    tile_n_bits: wp.int32,
+    # output
+    tile_bins: wp.array[wp.vec2i],
+):
+    # 64 bit twin of _tile_bin_edges_32bit. The (iid | tile) field sits above bit 32.
+    idx = wp.tid()
+    if idx >= num_intersects:
+        return
+    mask = (wp.int64(1) << wp.int64(tile_n_bits)) - wp.int64(1)
+    key = isect_ids_sorted[idx] >> wp.int64(32)
+    cur_bin = wp.int32(key >> wp.int64(tile_n_bits)) * num_tiles + wp.int32(key & mask)
+    if idx == 0:
+        tile_bins[cur_bin][0] = 0
+        return
+    if idx == num_intersects - 1:
+        tile_bins[cur_bin][1] = num_intersects
+    keyp = isect_ids_sorted[idx - 1] >> wp.int64(32)
+    prev_bin = wp.int32(keyp >> wp.int64(tile_n_bits)) * num_tiles + wp.int32(
+        keyp & mask
+    )
+    if prev_bin != cur_bin:
+        tile_bins[prev_bin][1] = idx
+        tile_bins[cur_bin][0] = idx
+
+
+def _use_32bit_keys(depth_bits: int) -> bool:
+    # The packed key needs at least 16 depth bits below the image and tile ids.
+    # Tests patch this to force the 64 bit path on small scenes.
+    return depth_bits >= 16
+
+
+def _sort_and_bin(
+    device: wp.Device | None,
+    xys: wp.array,
+    depths: wp.array,
+    radii: wp.array,
+    conics: wp.array,
+    map_opacities: wp.array,
+    cum_tiles_hit: wp.array,
+    n: int,
+    B: int,
+    tile_bounds_x: int,
+    tile_bounds_y: int,
+    num_intersects: int | None = None,
+) -> tuple[wp.array, wp.array, int]:
+    """Emit per (image, tile, gaussian) sort keys, sort them once globally, and
+    build the per (image, tile) bin edges in the signature-keyed scratch.
+
+    Used by the forward blend and by the backward pass, which recomputes the
+    identical sort from the saved cum_tiles_hit. The sort is deterministic, so it
+    reproduces the forward gaussian_ids and tile_bins and the saved final_idx stays
+    valid. num_intersects may be passed in when the caller already read it back
+    (the graph eligibility check), avoiding a second host sync. Returns
+    (gaussian_ids, tile_bins, num_intersects).
+    """
+    num_tiles = tile_bounds_x * tile_bounds_y
+    tile_n_bits = _bits_for_count(num_tiles)
+    image_n_bits = _bits_for_count(B)
+    upper_bits = image_n_bits + tile_n_bits
+    depth_bits = 31 - upper_bits
+    packed = _use_32bit_keys(depth_bits)
+    if not packed and upper_bits > 32:
+        raise ValueError(
+            f"batched intersection key overflow: image_n_bits({image_n_bits}) + "
+            f"tile_n_bits({tile_n_bits}) = {upper_bits} > 32 "
+            f"(batch B={B}, n_tiles={num_tiles}). Reduce batch size or resolution."
+        )
+    total = B * n
+    bins_len = B * num_tiles
+    opac_mod = map_opacities.shape[0]
+
+    # The one legitimate device to host sync, the total intersection count.
+    if num_intersects is None:
+        num_intersects = int(cum_tiles_hit[total - 1 : total].numpy()[0])
+
+    isect_dtype = wp.int32 if packed else wp.int64
+    scratch = _get_scratch(
+        device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
+    )
+    tile_bins = scratch["tile_bins"][:bins_len]
+    tile_bins.zero_()
+
+    if num_intersects == 0:
+        return scratch["gaussian_ids"][:1], tile_bins, 0
+
+    isect_ids = scratch["isect_ids"][: 2 * num_intersects]
+    gaussian_ids = scratch["gaussian_ids"][: 2 * num_intersects]
+    if packed:
+        # Device-side per-image [dmin, dmax] for the depth quantization, no host sync.
+        depth_mm = scratch["depth_mm"]
+        wp.launch(_seed_minmax, dim=B, inputs=[depth_mm], device=device)
+        wp.launch(
+            _depth_minmax,
+            dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
+            inputs=[depths, radii, total, n, depth_mm],
+            device=device,
+        )
+        wp.launch(
+            _map_intersects_32bit,
+            dim=total,
+            inputs=[
+                xys,
+                depths,
+                radii,
+                conics,
+                map_opacities,
+                cum_tiles_hit,
+                depth_mm,
+                n,
+                opac_mod,
+                tile_n_bits,
+                depth_bits,
+                tile_bounds_x,
+                tile_bounds_y,
+            ],
+            outputs=[isect_ids, gaussian_ids],
+            device=device,
+        )
+        wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
+        wp.launch(
+            _tile_bin_edges_32bit,
+            dim=num_intersects,
+            inputs=[num_intersects, isect_ids, num_tiles, tile_n_bits, depth_bits],
+            outputs=[tile_bins],
+            device=device,
+        )
+    else:
+        wp.launch(
+            _map_intersects_64bit,
+            dim=total,
+            inputs=[
+                xys,
+                depths.view(wp.int32),
+                radii,
+                conics,
+                map_opacities,
+                cum_tiles_hit,
+                n,
+                opac_mod,
+                tile_n_bits,
+                tile_bounds_x,
+                tile_bounds_y,
+            ],
+            outputs=[isect_ids, gaussian_ids],
+            device=device,
+        )
+        wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
+        wp.launch(
+            _tile_bin_edges_64bit,
+            dim=num_intersects,
+            inputs=[num_intersects, isect_ids, num_tiles, tile_n_bits],
+            outputs=[tile_bins],
+            device=device,
+        )
+    return gaussian_ids[:num_intersects], tile_bins, num_intersects

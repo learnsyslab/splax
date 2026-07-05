@@ -18,9 +18,9 @@ kernels):
   frames (+ optional expected-depth maps via ``splax.render(render_depth=True)``)
   so ~500-1000 views never sit on device as float32.
 - ``distill`` re-fits an ``n_student``-gaussian student on the synthetic frames
-  with the phase-6d MCMC recipe (L1 + D-SSIM, per-group Adam, MCMC relocation +
-  noise, opacity/scale regs -- the same recipe ``scripts/train_colmap.py`` fits
-  with), plus optional dense depth distillation against the teacher depth maps.
+  with the MCMC recipe (L1 + D-SSIM, per-group Adam, MCMC relocation + noise,
+  opacity/scale regs, the same recipe ``scripts/train_colmap.py`` fits with),
+  plus optional dense depth distillation against the teacher depth maps.
 
 The student parameters are in *render space* (the tensors ``splax.render`` and
 ``splax.write_ply`` consume) both on input (``teacher``) and output.
@@ -85,10 +85,10 @@ def _lookat_viewmats(
 ) -> np.ndarray:
     """Build (n,4,4) world-to-camera matrices (OpenCV +z-forward) from eye/target.
 
-    Rows of R are the camera axes in world coords (x right, y down, z forward);
-    t = -R @ eye. Roll is arbitrary (an ``up`` hint that flips to an alternate
-    when parallel to the view direction) -- it does not affect distillation, which
-    renders teacher and student through the *same* matrices.
+    Rows of R are the camera axes in world coords (x right, y down, z forward)
+    and t = -R @ eye. Roll is arbitrary (an ``up`` hint that flips to an
+    alternate when parallel to the view direction). It does not affect
+    distillation, which renders teacher and student through the same matrices.
     """
     up = np.asarray(up, np.float64)
     n = eyes.shape[0]
@@ -195,18 +195,16 @@ def render_views(
     c: tuple[float, float],
     depth: bool = False,
     background: np.ndarray | None = None,
-    block_size: int = 16,
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
 ) -> tuple[np.ndarray, np.ndarray | None]:
-    """Render the teacher from ``viewmats`` (n,4,4), host-side, memory-safe.
+    """Render the teacher from ``viewmats`` (n,4,4), host-side and memory-safe.
 
-    Returns ``(images, depths)``: a ``uint8`` array ``(n, H, W, 3)`` of frames,
-    plus -- with ``depth=True`` -- a ``float16`` ``(n, H, W)`` expected-depth stack
-    (teacher depth targets for depth distillation), ``None`` otherwise. Renders one
-    view at a time with the grad-free inference path (depth uses
-    ``splax.render(render_depth=True)``, whose forward is identical), so 500-1000
-    views never hold float32 on device.
+    Returns ``(images, depths)`` where images is a uint8 (n, H, W, 3) array and
+    depths is a float16 (n, H, W) expected-depth stack with ``depth=True``, else
+    None. Renders one view at a time with the grad-free inference path (depth
+    uses ``splax.render(render_depth=True)``, whose forward is identical), so
+    hundreds of views never hold float32 on device.
     """
     means, scales, quats, colors, opac = _as_teacher(teacher)
     means = jnp.asarray(means, jnp.float32)
@@ -238,7 +236,6 @@ def render_views(
                 c=c,
                 glob_scale=glob_scale,
                 clip_thresh=clip_thresh,
-                block_size=block_size,
             )
             depths[i] = np.asarray(d, np.float16)
         else:
@@ -255,7 +252,6 @@ def render_views(
                 c=c,
                 glob_scale=glob_scale,
                 clip_thresh=clip_thresh,
-                block_size=block_size,
             )
         imgs[i] = (np.clip(np.asarray(img), 0.0, 1.0) * 255.0).astype(np.uint8)
     return imgs, depths
@@ -436,7 +432,7 @@ def _make_step(
             p, gt, vm, gt_depth
         )
         updates, opt_state = opt.update(grads, opt_state, p)
-        # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
+        # apply_updates is typed as the broad optax ArrayTree, the params stay a dict
         new_p = cast(dict[str, jax.Array], optax.apply_updates(p, updates))
         return new_p, opt_state, l1
 
@@ -490,7 +486,7 @@ def distill(
     with ``curve`` / ``wall`` / ``n_views`` / ``teacher_n``.
 
     ``batch`` views/step averages the loss over the batch and scales all LRs by
-    sqrt(batch) (gsplat ``batch_size``); at ``batch==1`` the recipe is the default.
+    sqrt(batch) (gsplat ``batch_size``). At ``batch==1`` the recipe is the default.
     """
     H, W = img_shape
     intr = (f[0], f[1], c[0], c[1])

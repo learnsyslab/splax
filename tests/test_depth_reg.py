@@ -1,4 +1,4 @@
-"""Depth-render + depth-regularization gradient tests (survey T2).
+"""Depth-render + depth-regularization gradient tests.
 
 Covers the opt-in expected-depth channel D(p) = Σ wᵢ dᵢ (``splax.rasterize_depth`` /
 ``splax.render(..., render_depth=True)``) added for COLMAP sparse-point depth
@@ -14,11 +14,11 @@ regularization (gsplat ``depth_loss``). Four things are checked:
      as ``test_warp_grad.py``): a depth-only loss and a mixed colour+depth loss both
      match a central-difference directional derivative. A depth-only loss produces a
      ZERO colour gradient (depth is independent of colours) and nonzero geometry
-     gradients (the v_depths → project chain plus the depth → blend-weight chain).
-  4. grad under jit matches eager; grad under vmap is batch-native (matches the
+     gradients (the v_depths to project chain plus the depth to blend-weight chain).
+  4. grad under jit matches eager. grad under vmap is batch-native (matches the
      per-sample sequential loop).
 
-FD bound follows the existing splat FD tests (8e-2 rel): the hard 1/255-cull and
+FD bound follows the existing splat FD tests (8e-2 rel). The hard 1/255-cull and
 early-termination discontinuities that FD steps cross are the intrinsic residual.
 """
 
@@ -49,7 +49,6 @@ class _PK(TypedDict):
 class _Common(_PK):
     viewmat: jax.Array
     background: jax.Array
-    block_size: int
 
 
 def _pk(H: int, W: int) -> _PK:
@@ -103,7 +102,6 @@ def test_depth_render_single_gaussian() -> None:
         opac,
         viewmat=vm,
         background=black,
-        block_size=16,
         **_pk(H, W),
     )
     A = img[..., 0]
@@ -116,7 +114,6 @@ def test_depth_render_single_gaussian() -> None:
         viewmat=vm,
         background=black,
         render_depth=True,
-        block_size=16,
         **_pk(H, W),
     )
     A = np.asarray(A)
@@ -133,7 +130,7 @@ def test_offpath_image_byte_identical() -> None:
     """The depth path's image is bit-for-bit the plain rasterize image."""
     n, H, W = 4000, 128, 128
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=1)
-    common: _Common = {"viewmat": vm, "background": bg, "block_size": 16, **_pk(H, W)}
+    common: _Common = {"viewmat": vm, "background": bg, **_pk(H, W)}
     img_plain, _ = splax.render(means, scales, quats, colors, opac, **common)
     img_depth, _d = splax.render(
         means, scales, quats, colors, opac, render_depth=True, **common
@@ -144,8 +141,8 @@ def test_offpath_image_byte_identical() -> None:
 @pytest.mark.parametrize("mode", ["depth_only", "mixed"])
 def test_depth_grad_finite_difference(mode: str) -> None:
     """Central-difference directional-derivative check of the depth gradient chain,
-    across all five splat params at once. depth-only isolates the v_depths + depth→
-    blend-weight chains; mixed adds the colour channel."""
+    across all five splat params at once. depth-only isolates the v_depths and
+    depth-to-blend-weight chains, mixed adds the colour channel."""
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)
     wd = jax.random.uniform(jax.random.key(9), (H, W))
@@ -163,7 +160,6 @@ def test_depth_grad_finite_difference(mode: str) -> None:
             viewmat=vm,
             background=bg,
             render_depth=True,
-            block_size=16,
             **_pk(H, W),
         )
         assert depth is not None  # render_depth=True fills the depth slot
@@ -174,7 +170,7 @@ def test_depth_grad_finite_difference(mode: str) -> None:
     grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
 
     if mode == "depth_only":
-        # depth is independent of colours -> exactly zero colour gradient.
+        # depth is independent of colours, so exactly zero colour gradient.
         assert float(jnp.linalg.norm(grads[3])) == 0.0
     # geometry gradients are nonzero (the whole point of the regularizer).
     assert float(jnp.linalg.norm(grads[0])) > 0.0
@@ -209,7 +205,6 @@ def test_depth_grad_under_jit() -> None:
             viewmat=vm,
             background=bg,
             render_depth=True,
-            block_size=16,
             **_pk(H, W),
         )
         assert depth is not None  # render_depth=True fills the depth slot
@@ -222,7 +217,7 @@ def test_depth_grad_under_jit() -> None:
 
 
 def test_depth_grad_under_vmap_matches_sequential() -> None:
-    """The depth backward is batch-native (shares the batched image_id indexing): grad
+    """The depth backward is batch-native (shares the batched image_id indexing). Grad
     under vmap over a batched gaussian input matches the per-sample sequential grad."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
@@ -239,7 +234,6 @@ def test_depth_grad_under_vmap_matches_sequential() -> None:
             viewmat=vm,
             background=bg,
             render_depth=True,
-            block_size=16,
             **_pk(H, W),
         )
         assert depth is not None  # render_depth=True fills the depth slot

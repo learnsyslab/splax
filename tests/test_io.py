@@ -1,14 +1,14 @@
-"""Phase 6c: PLY export round-trips and the inference/training split parity.
+"""PLY export round-trips and the inference/training split parity.
 
 ``splax.io.write_ply`` must be the exact inverse of ``splax.io.load_ply``.
 Two round-trips assert that:
 
-1. random render-space splats -> write_ply -> load_ply reproduce the inputs, and
-2. a real scene (lego.ply) -> write copy -> reload renders to the same image
-   (fit-free: no training, just the load/write/load/render loop),
+1. random render-space splats through write_ply then load_ply reproduce the inputs, and
+2. a real scene (lego.ply) written to a copy then reloaded renders to the same image
+   (fit-free, no training, just the load/write/load/render loop),
 
 plus that ``splax.inference.render`` and ``splax.training.render`` produce the
-identical forward image (the Phase 6c split is numerically zero-cost).
+identical forward image (the split is numerically zero-cost).
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typing import TypedDict
 import numpy as np
 import jax
 import jax.numpy as jnp
-import pytest
 
 import splax
 from splax import load_ply
@@ -95,7 +94,7 @@ def _random_splats(
 
 
 def test_write_ply_is_load_ply_inverse(tmp_path: Path) -> None:
-    """Random splats -> write_ply -> load_ply reproduce the render-space inputs."""
+    """Random splats through write_ply then load_ply reproduce the render-space inputs."""
     means, scales, quats, colors, opac = _random_splats(seed=0, n=5000)
     out = tmp_path / "rand.ply"
     splax.write_ply(out, means, scales, quats, colors, opac)
@@ -104,16 +103,15 @@ def test_write_ply_is_load_ply_inverse(tmp_path: Path) -> None:
 
     np.testing.assert_allclose(lm, means, rtol=0, atol=1e-6)
     np.testing.assert_allclose(ls, scales, rtol=1e-5, atol=1e-6)
-    # quats are normalized on both sides; compare up to sign is unnecessary since
+    # quats are normalized on both sides, compare up to sign is unnecessary since
     # write_ply preserves the stored raw quat direction and load re-normalizes.
     np.testing.assert_allclose(lq, quats, rtol=0, atol=1e-6)
     np.testing.assert_allclose(lc, colors, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(lo, opac, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.skipif(not LEGO_PLY.exists(), reason="lego.ply reference not present")
 def test_ply_render_roundtrip(tmp_path: Path) -> None:
-    """Fit-free: load lego.ply -> write copy -> reload -> identical render."""
+    """Fit-free: load lego.ply, write copy, reload, identical render."""
     splats = load_ply(LEGO_PLY)
     copy = tmp_path / "lego_copy.ply"
     splax.write_ply(copy, *splats)
@@ -128,15 +126,14 @@ def test_ply_render_roundtrip(tmp_path: Path) -> None:
     H = W = 200
     img1 = np.asarray(_render(splats, viewmat, H, W))
     img2 = np.asarray(_render(splats2, viewmat, H, W))
-    # Activation round-trip (log/exp, logit/sigmoid) is ULP-level; the render is
+    # Activation round-trip (log/exp, logit/sigmoid) is ULP-level, the render is
     # essentially identical. Splatting's hard 1/255 cull can flip a handful of
     # pixels, so bound by max abs diff rather than requiring bit-exactness.
     assert np.max(np.abs(img1 - img2)) < 1e-3
 
 
-@pytest.mark.skipif(not LEGO_PLY.exists(), reason="lego.ply reference not present")
 def test_inference_equals_training_forward() -> None:
-    """The Phase 6c split is numerically zero-cost: identical forward image."""
+    """The split is numerically zero-cost: identical forward image."""
     splats = load_ply(LEGO_PLY)
     center = np.asarray(splats[0].mean(axis=0))
     radius = float(

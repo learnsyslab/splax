@@ -4,16 +4,18 @@
 The compensation multiplies a per-gaussian factor ρ = √(det Σ₂D / det(Σ₂D+εI))
 into the opacity before the blend, cancelling the area inflation the ε=0.3 screen
 dilation grants thin gaussians. ρ is computed in JAX from the projection's own
-``conics`` output (``splax.opacity_compensation``); its gradient chains to
-scales/quats/means through project's existing conic→covariance vjp.
+``conics`` output (``splax.opacity_compensation``). Its gradient chains to
+scales/quats/means through project's existing conic-to-covariance vjp.
 
 Checks:
-  1. Closed form: ρ from the conic equals the direct det ratio; ρ∈[0,1]; culled→1.
+  1. Closed form: ρ from the conic equals the direct det ratio, ρ∈[0,1], and culled
+     gaussians give 1.
   2. Off == plain: ``antialiased=False`` is byte-identical (forward + grad) to the
-     pre-change tight path; the ``map_opacities`` split is a no-op when equal.
+     plain grad-free path. The ``map_opacities`` split is a no-op when equal.
   3. On changes the render (ρ<1 for real gaussians).
   4. Finite-difference directional-derivative self-consistency of the antialiased
-     grads over all five splat params (same style/bound as the phase-6 FD tests).
+     grads over all five splat params (same style and bound as the finite-difference
+     gradient tests).
 """
 
 from __future__ import annotations
@@ -69,11 +71,11 @@ def _pk(H: int, W: int) -> _PK:
 
 
 def test_compensation_closed_form() -> None:
-    """ρ from the conic matches the direct det-ratio; bounded to [0,1]; culled→1."""
+    """ρ from the conic matches the direct det-ratio, bounded to [0,1], culled gaussians give 1."""
     n, H, W = 3000, 128, 128
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=1)
     xys, depths, radii, conics, _nth, _cum = splax.project(
-        means, scales, quats, vm, **_pk(H, W), block_width=16, opacities=opac.reshape(n)
+        means, scales, quats, vm, **_pk(H, W), opacities=opac.reshape(n)
     )
     rho = np.asarray(splax.opacity_compensation(conics, radii))
     conics = np.asarray(conics).reshape(n, 3)
@@ -98,10 +100,10 @@ def test_compensation_closed_form() -> None:
 
 
 def test_antialiased_off_matches_plain() -> None:
-    """antialiased=False is byte-identical (forward) to the grad-free tight path, and
-    passing map_opacities=opac explicitly matches map_opacities=None: the split is a
-    no-op when the two opacities are equal. Forward is byte-identical; grads agree to
-    the backward's intrinsic atomic-add jitter (the repo's documented ~2e-4)."""
+    """antialiased=False is byte-identical (forward) to the plain grad-free inference
+    path, and passing map_opacities=opac explicitly matches map_opacities=None, the
+    split is a no-op when the two opacities are equal. Forward is byte-identical. Grads
+    agree to the backward's intrinsic atomic-add jitter (the documented ~2e-4)."""
     n, H, W = 2500, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
     pk = _pk(H, W)
@@ -131,9 +133,9 @@ def test_antialiased_off_matches_plain() -> None:
         "antialiased=False must be byte-identical to the plain inference forward"
     )
 
-    # rasterize-level: map_opacities=opac vs None -> byte-identical forward + grad.
+    # At the rasterize level, map_opacities=opac vs None gives byte-identical forward + grad.
     xys, depths, radii, conics, _nth, cum = splax.project(
-        means, scales, quats, vm, **pk, block_width=16, opacities=opac.reshape(n)
+        means, scales, quats, vm, **pk, opacities=opac.reshape(n)
     )
 
     def rast(map_opac: jax.Array | None) -> Callable[[jax.Array], jax.Array]:
@@ -149,8 +151,6 @@ def test_antialiased_off_matches_plain() -> None:
                     conics,
                     cum,
                     img_shape=(H, W),
-                    block_width=16,
-                    tight=True,
                     map_opacities=map_opac,
                 )
             )
@@ -202,7 +202,7 @@ def test_antialiased_finite_difference() -> None:
     """Directional-derivative FD check of the antialiased gradients over all five
     splat params (mirrors test_warp_grad::test_finite_difference). The ρ chain adds a
     conic-covariance term to the scale/quat/mean grads and a ρ factor to the opacity
-    grad; both must be consistent with central differences to a few percent."""
+    grad. Both must be consistent with central differences to a few percent."""
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)
     w = jax.random.uniform(jax.random.key(5), (H, W, 3))

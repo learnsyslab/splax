@@ -23,11 +23,11 @@ handled inside one launch.
 ## Batched gradients
 
 `jax.vmap(jax.grad(render))` over `splax.training.render` runs a single batched
-backward launch for every `diff_wrt` selection, matching per-sample sequential
-gradients. The reduction depends on how an input is batched:
+backward launch for every gradient selection, matching per-sample sequential
+gradients. The reduction depends on how an input is batched.
 
 - Broadcast inputs, shared across the batch, get their gradients summed over the batch axis.
-- Per-image inputs, for example a batch of camera poses under `diff_wrt=("viewmat",)`, get per-image gradients.
+- Per-image inputs, for example a batch of camera poses differentiated with `jax.grad(loss, argnums=viewmat)`, get per-image gradients.
 
 ## Memory trade at large batch
 
