@@ -16,6 +16,9 @@ dependencies = [
     "dm-pix>=0.4.5",
 ]
 
+[project.optional-dependencies]
+viewer = ["viser>=1.0"]
+
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -70,6 +73,7 @@ platforms = ["linux-64-cuda"]
 
 [tool.pixi.pypi-dependencies]
 splax = { path = "./", editable = true }
+viser = ">=1.0"
 
 [tool.pixi.feature.docs.dependencies]
 python = ">=3.12,<3.13"

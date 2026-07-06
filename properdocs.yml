@@ -45,6 +45,7 @@ nav:
     - Training: user-guide/training.md
     - Batching: user-guide/batching.md
     - IO: user-guide/io.md
+    - Viewer: user-guide/viewer.md
   - API Reference: api/
 
 plugins:
