@@ -203,6 +203,16 @@ def test_render_under_jit_matches_eager() -> None:
     assert np.array_equal(eager, jitted)
 
 
+def test_principal_point_defaults_to_center() -> None:
+    """Omitting c is byte-identical to passing the image center explicitly."""
+    (splats, kw) = _render_scene(10_000, 256, 256, seed=42)
+    explicit = np.asarray(splax.render(*splats, **kw)[0])
+    kw_no_c = dict(kw)
+    del kw_no_c["c"]
+    defaulted = np.asarray(splax.render(*splats, **kw_no_c)[0])
+    assert np.array_equal(explicit, defaulted)
+
+
 # --- splax-internal scratch invariants (no external reference) ----------------
 
 

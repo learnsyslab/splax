@@ -31,7 +31,7 @@ def render(
     background: jax.Array,
     img_shape: tuple[int, int],
     f: tuple[float, float],
-    c: tuple[float, float],
+    c: tuple[float, float] | None = None,
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
     antialiased: bool = False,

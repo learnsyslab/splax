@@ -13,7 +13,7 @@ over a stack of view matrices renders one image per camera.
 frames = jax.vmap(lambda vm: splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=vm, background=jnp.ones(3), img_shape=(H, W),
-    f=(fx, fy), c=(W // 2, H // 2), glob_scale=1.0, clip_thresh=0.01,
+    f=(fx, fy),
 ))(viewmats)  # (B, H, W, 3)
 ```
 

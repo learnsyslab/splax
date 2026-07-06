@@ -56,7 +56,7 @@ def render(
     background: jax.Array,
     img_shape: tuple[int, int],
     f: tuple[float, float],
-    c: tuple[float, float],
+    c: tuple[float, float] | None = None,
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
     antialiased: bool = False,
@@ -81,6 +81,8 @@ def render(
     """
     n = means3d.shape[0]
     H, W = img_shape
+    if c is None:
+        c = (W / 2, H / 2)
 
     if (gaussian_transforms is None) != (gaussian_slices is None):
         raise ValueError(

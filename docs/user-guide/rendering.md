@@ -9,8 +9,7 @@ design. For gradients use [`splax.training.render`](training.md).
 img = splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
-    img_shape=(H, W), f=(fx, fy), c=(W // 2, H // 2),
-    glob_scale=1.0, clip_thresh=0.01,
+    img_shape=(H, W), f=(fx, fy),
 )  # (H, W, 3)
 ```
 
@@ -67,7 +66,7 @@ is never copied.
 img = splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
-    img_shape=(H, W), f=(fx, fy), c=(W // 2, H // 2),
+    img_shape=(H, W), f=(fx, fy),
     gaussian_transforms=poses,             # (K, 4, 4)
     gaussian_slices=((100, 1000), (1000, 1500)),
 )
@@ -81,7 +80,7 @@ one launch covers the whole batch.
 render_at = lambda poses: splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
-    img_shape=(H, W), f=(fx, fy), c=(W // 2, H // 2),
+    img_shape=(H, W), f=(fx, fy),
     gaussian_transforms=poses, gaussian_slices=slices,
 )
 imgs = jax.vmap(render_at)(pose_batch)  # (B, K, 4, 4) -> (B, H, W, 3)

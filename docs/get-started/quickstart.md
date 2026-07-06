@@ -18,8 +18,7 @@ means, scales, quats, colors, opacities = splax.load_ply("scene.ply")
 img = splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),
-    img_shape=(H, W), f=(fx, fy), c=(W // 2, H // 2),
-    glob_scale=1.0, clip_thresh=0.01,
+    img_shape=(H, W), f=(fx, fy),
 )  # (H, W, 3)
 ```
 
@@ -38,7 +37,7 @@ import jax
 frames = jax.vmap(lambda vm: splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=vm, background=jnp.ones(3), img_shape=(H, W),
-    f=(fx, fy), c=(W // 2, H // 2), glob_scale=1.0, clip_thresh=0.01,
+    f=(fx, fy),
 ))(viewmats)  # (B, H, W, 3)
 ```
 
@@ -55,7 +54,7 @@ def loss(means, scales, quats, colors, opacities):
     img, _ = splax.render(
         means, scales, quats, colors, opacities,
         viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W),
-        f=(fx, fy), c=(W // 2, H // 2), glob_scale=1.0, clip_thresh=0.01,
+        f=(fx, fy),
     )
     return jnp.mean((img - target) ** 2)
 
