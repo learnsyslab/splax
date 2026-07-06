@@ -13,10 +13,20 @@ consumes) and writes the inverse activation-space fields so a subsequent
 ``load_ply`` reproduces them. Normals are zeroed and ``f_rest`` (higher-order SH)
 is omitted. ``load_ply`` reads neither, so a written file round-trips exactly
 through it (SH degree 0 only, which is all splax renders).
+
+``fetch`` downloads remote assets (e.g. scene ``.ply`` files) into a local cache
+and returns the cached path, so examples and tests can pull scenes on demand.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
+import shutil
+import tempfile
+import urllib.parse
+import urllib.request
+from contextlib import ExitStack
 from pathlib import Path
 
 import jax
@@ -28,9 +38,55 @@ from plyfile import PlyData, PlyElement
 _C0 = 0.28209479177387814
 
 
-def load_ply(
-    path: str | Path,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def fetch(
+    url: str, *, sha256: str | None = None, cache: Path | None = None, force: bool = False
+) -> Path:
+    """Download ``url`` into a local cache and return the path to the cached file.
+
+    If the file is already cached and ``force`` is False, it is returned without
+    touching the network, so ``sha256`` is only verified on actual downloads, not
+    on cache hits. The cache directory defaults to ``$SPLAX_CACHE`` if set, else
+    ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``; ``cache`` overrides
+    all three. Cached files are named ``sha256(url)[:16] + "-" + basename`` so
+    entries are unique per URL yet human-recognizable, and downloads are atomic
+    (streamed to a temp file in the cache directory, then renamed into place).
+
+    Args:
+        url: URL to download.
+        sha256: Expected hex digest of the downloaded bytes, checked on download.
+        cache: Cache directory, overriding the environment-based default.
+        force: Re-download and overwrite the cached copy even if it exists.
+
+    Returns:
+        Path to the cached file.
+
+    Raises:
+        ValueError: If ``sha256`` is given and the downloaded bytes don't match.
+    """
+    if cache is None:
+        loc = os.environ.get("SPLAX_CACHE", os.environ.get("XDG_CACHE_HOME"))
+        cache = Path(loc) if loc is not None else Path.home() / ".cache/splax"
+    assert isinstance(cache, Path), f"cache must be a Path, got {type(cache)}"
+    name = Path(urllib.parse.urlparse(url).path).name or "download"
+    path = cache / (hashlib.sha256(url.encode()).hexdigest()[:16] + "-" + name)
+    if path.exists() and not force:
+        return path
+    cache.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(dir=cache, delete=False)
+    with ExitStack() as stack:  # Ensure tmp is deleted when an exception occurs before os.replace
+        stack.callback(Path(tmp.name).unlink, missing_ok=True)
+        with tmp, urllib.request.urlopen(url) as src:
+            shutil.copyfileobj(src, tmp)
+        if sha256 is not None:
+            digest = hashlib.sha256(Path(tmp.name).read_bytes()).hexdigest()
+            if digest != sha256:
+                raise ValueError(f"sha256 mismatch for {url}: expected {sha256}, got {digest}")
+        os.replace(tmp.name, path)
+        stack.pop_all()
+    return path
+
+
+def load_ply(path: str | Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Read a 3DGS ``.ply`` into the five render-space arrays ``render`` consumes.
 
     Returns (means, scales, quats, colors, opacities) as float32 jax arrays,
@@ -38,20 +94,16 @@ def load_ply(
     ignored). Exact inverse of ``write_ply``.
     """
     v = PlyData.read(path)["vertex"]
-    means = np.stack([v["x"], v["y"], v["z"]], axis=-1)
-    scales = np.exp(np.stack([v[f"scale_{i}"] for i in range(3)], axis=-1))
-    quats = np.stack([v[f"rot_{i}"] for i in range(4)], axis=-1)
-    quats /= np.linalg.norm(quats, axis=-1, keepdims=True)
-    sh0 = np.stack([v[f"f_dc_{i}"] for i in range(3)], axis=-1)
-    colors = np.clip(sh0 * _C0 + 0.5, 0.0, 1.0)
-    opacities = 1.0 / (1.0 + np.exp(-v["opacity"]))[..., None]
-    return (
-        jnp.asarray(means, jnp.float32),
-        jnp.asarray(scales, jnp.float32),
-        jnp.asarray(quats, jnp.float32),
-        jnp.asarray(colors, jnp.float32),
-        jnp.asarray(opacities, jnp.float32),
+    means = jnp.asarray(np.stack([v["x"], v["y"], v["z"]], axis=-1), jnp.float32)
+    scales = jnp.asarray(
+        np.exp(np.stack([v[f"scale_{i}"] for i in range(3)], axis=-1)), jnp.float32
     )
+    quats = jnp.asarray(np.stack([v[f"rot_{i}"] for i in range(4)], axis=-1), jnp.float32)
+    quats /= jnp.linalg.norm(quats, axis=-1, keepdims=True)
+    sh0 = jnp.asarray(np.stack([v[f"f_dc_{i}"] for i in range(3)], axis=-1), jnp.float32)
+    colors = jnp.clip(sh0 * _C0 + 0.5, 0.0, 1.0)
+    opacities = 1.0 / (1.0 + jnp.exp(-v["opacity"]))[..., None]
+    return means, scales, quats, colors, opacities
 
 
 def write_ply(
@@ -110,11 +162,7 @@ def write_ply(
     verts = np.empty(n, dtype=[(f, "f4") for f in fields])
     verts["x"], verts["y"], verts["z"] = means[:, 0], means[:, 1], means[:, 2]
     verts["nx"] = verts["ny"] = verts["nz"] = 0.0
-    verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"] = (
-        f_dc[:, 0],
-        f_dc[:, 1],
-        f_dc[:, 2],
-    )
+    verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"] = f_dc[:, 0], f_dc[:, 1], f_dc[:, 2]
     verts["opacity"] = opacity
     verts["scale_0"], verts["scale_1"], verts["scale_2"] = (
         log_scales[:, 0],

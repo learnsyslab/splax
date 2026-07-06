@@ -7,24 +7,20 @@ and with exactly the (1/3)ln(n/m) log-space magnitude. See ``init_from_points``.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
+import importlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import types
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_module() -> types.ModuleType:
-    sys.path.insert(0, str(ROOT / "scripts"))
-    spec = importlib.util.spec_from_file_location(
-        "train_colmap", ROOT / "scripts" / "train_colmap.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return importlib.import_module("scripts.train_colmap")
 
 
 def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
@@ -68,8 +64,7 @@ def test_correction_scales_with_padding_ratio() -> None:
 
 
 def test_subsample_branch_has_no_correction() -> None:
-    """When n<=m the init subsamples and applies NO density correction: the log-scales
-    are exactly the knn scales of the selected subset (reproduced with the same seed)."""
+    """Check that subsampling skips density correction when n is not padded."""
     tc = _load_module()
     m, n = 4000, 500
     xyz, rgb = _cloud(m)

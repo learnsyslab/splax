@@ -31,15 +31,15 @@ Convention differences, documented once here (they hold for every test):
 
 from __future__ import annotations
 
+import gsplat
 import jax
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 # torch and gsplat are required test dependencies. A missing install fails
 # collection loudly instead of skipping the parity tests.
 import torch
-import gsplat
 
 _PROBE = None
 
@@ -113,7 +113,7 @@ def project(
     glob_scale: float,
     clip_thresh: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """gsplat ``fully_fused_projection`` in splax.project's terms.
+    """Gsplat ``fully_fused_projection`` in splax.project's terms.
 
     Returns numpy (radii, means2d, depths, conics), each aligned to the N input
     gaussians (camera axis squeezed). ``radii`` is gsplat's per-axis pixel radius
@@ -155,7 +155,7 @@ def render(
     glob_scale: float,
     clip_thresh: float,
 ) -> np.ndarray:
-    """gsplat ``rasterization`` in splax.render's terms. Returns numpy (H, W, 3)."""
+    """Gsplat ``rasterization`` in splax.render's terms. Returns numpy (H, W, 3)."""
     H, W = img_shape
     out, alpha, _meta = gsplat.rasterization(
         _ft(means),
@@ -193,7 +193,7 @@ def grad(
     clip_thresh: float,
     weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """gsplat grads with respect to (means, scales, quats, colors, opacities).
+    """Gsplat grads with respect to (means, scales, quats, colors, opacities).
 
     ``weight is None`` gives loss = sum(image), otherwise loss = mean(weight * image**2),
     the same two scalar losses the splax grad-parity test uses. Returns a tuple of

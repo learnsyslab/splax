@@ -1,5 +1,4 @@
-"""Kernel-dispatch tests proving the symbolic-zeros backward launches only the
-kernels the requested gradients need.
+"""Validate symbolic zeros kernel dispatch.
 
 The projection backward is a single jax.custom_vjp with symbolic_zeros. Its
 forward rule records statically which inputs are perturbed (any of
@@ -17,15 +16,11 @@ The wrappers call through, so the recorded run is also numerically valid.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from typing import TypedDict
+from typing import Callable, ParamSpec, TypedDict, TypeVar
 
 import jax
 import jax.numpy as jnp
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import splax
 from splax import _project
@@ -37,6 +32,10 @@ class _PK(TypedDict):
     c: tuple[float, float]
     glob_scale: float
     clip_thresh: float
+
+
+FnParams = ParamSpec("FnParams")
+FnReturn = TypeVar("FnReturn")
 
 
 def _pk(H: int, W: int) -> _PK:
@@ -61,20 +60,21 @@ def _scene(
     colors = jax.random.uniform(k[3], (n, 3))
     opac = jax.random.uniform(k[4], (n, 1), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(k[5], (3,))
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
 
 
 @pytest.fixture
 def record(monkeypatch: pytest.MonkeyPatch) -> set[str]:
-    """Swap the three backward FFI callables for recording wrappers that still
-    call through and return the set of names that fired."""
+    """Record projection backward call sites.
+
+    Swap the three backward FFI callables for recording wrappers that still
+    call through and return the set of names that fired.
+    """
     fired: set[str] = set()
 
-    def wrap(name: str, fn):  # type: ignore[no-untyped-def]
-        def wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def wrap(name: str, fn: Callable[FnParams, FnReturn]) -> Callable[FnParams, FnReturn]:
+        def wrapped(*args: FnParams.args, **kwargs: FnParams.kwargs) -> FnReturn:
             fired.add(name)
             return fn(*args, **kwargs)
 
@@ -86,14 +86,10 @@ def record(monkeypatch: pytest.MonkeyPatch) -> set[str]:
         wrap("gaussians", _project._project_bwd_gaussians_ffi),
     )
     monkeypatch.setattr(
-        _project,
-        "_project_bwd_viewmat_ffi",
-        wrap("view", _project._project_bwd_viewmat_ffi),
+        _project, "_project_bwd_viewmat_ffi", wrap("view", _project._project_bwd_viewmat_ffi)
     )
     monkeypatch.setattr(
-        _project,
-        "_project_bwd_joint_ffi",
-        wrap("both", _project._project_bwd_joint_ffi),
+        _project, "_project_bwd_joint_ffi", wrap("both", _project._project_bwd_joint_ffi)
     )
     return fired
 
@@ -109,9 +105,7 @@ def _render(
     H: int,
     W: int,
 ) -> jax.Array:
-    return splax.training.render(m, s, q, c, o, viewmat=v, background=bg, **_pk(H, W))[
-        0
-    ]
+    return splax.training.render(m, s, q, c, o, viewmat=v, background=bg, **_pk(H, W))[0]
 
 
 def test_viewmat_only_launches_view_kernel(record: set[str]) -> None:
@@ -158,8 +152,7 @@ def test_forward_launches_no_backward_kernel(record: set[str]) -> None:
 
 
 def test_colors_only_launches_no_projection_kernel(record: set[str]) -> None:
-    """Colors flow through rasterize, not projection. A colors-only grad perturbs no
-    projection input, so no projection backward kernel fires."""
+    """Check that colors only gradients skip projection backward kernels."""
     n, H, W = 400, 64, 64
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=1)
 

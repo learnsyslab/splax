@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 import warp as wp
 
@@ -69,9 +69,7 @@ def _rand_scene(
 
 
 def _viewmat(dx: float, dy: float = -0.1, dz: float = 5.0) -> jax.Array:
-    return jnp.array(
-        [[1, 0, 0, dx], [0, 1, 0, dy], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32
-    )
+    return jnp.array([[1, 0, 0, dx], [0, 1, 0, dy], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32)
 
 
 N = 8_000
@@ -137,7 +135,7 @@ def test_render_vmap_over_viewmats() -> None:
 
 
 def test_render_vmap_over_splats() -> None:
-    """vmap over batched splat params (shared viewmat) == stacked unbatched."""
+    """Vmap over batched splat params (shared viewmat) == stacked unbatched."""
     scenes = [_rand_scene(N, seed=s) for s in (3, 4, 5)]
     mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
     vm = _viewmat(0.1)
@@ -147,7 +145,7 @@ def test_render_vmap_over_splats() -> None:
 
 
 def test_render_vmap_mixed_both_batched() -> None:
-    """vmap over both splat params AND viewmats (mixed dims in one call)."""
+    """Vmap over both splat params AND viewmats (mixed dims in one call)."""
     scenes = [_rand_scene(N, seed=s) for s in (6, 7, 8)]
     mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
     ref = jnp.stack([_render(*scenes[i], VIEWS[i]) for i in range(3)])
@@ -177,49 +175,28 @@ def test_render_vmap_larger_batch_and_res() -> None:
     """B=8 at a larger resolution: image-id/tile-id key packing stays correct."""
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
-    kw: _KW = {
-        **KW,
-        "img_shape": (hh, ww),
-        "f": (float(hh), float(hh)),
-        "c": (ww // 2, hh // 2),
-    }
+    kw: _KW = {**KW, "img_shape": (hh, ww), "f": (float(hh), float(hh)), "c": (ww // 2, hh // 2)}
     views = jnp.stack([_viewmat(0.1 * i) for i in range(B)])
-    ref = jnp.stack(
-        [splax.render(m, s, q, c, o, viewmat=views[i], **kw)[0] for i in range(B)]
-    )
-    out = jax.jit(
-        jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0])
-    )(views)
+    ref = jnp.stack([splax.render(m, s, q, c, o, viewmat=views[i], **kw)[0] for i in range(B)])
+    out = jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(views)
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
 def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default packed 32-bit key: batch-native render == stacked unbatched, to a tight
-    perceptual bound (not bit-exact, depth_bits shrinks with B, so batched depth
-    quantization is coarser, see the autouse fixture note). Also confirms this config
-    actually takes the packed path (int32 scratch)."""
+    """Match packed batched render output against stacked unbatched output."""
     monkeypatch.setattr(_isect, "_use_32bit_keys", lambda depth_bits: depth_bits >= 16)
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
-    kw: _KW = {
-        **KW,
-        "img_shape": (hh, ww),
-        "f": (float(hh), float(hh)),
-        "c": (ww // 2, hh // 2),
-    }
+    kw: _KW = {**KW, "img_shape": (hh, ww), "f": (float(hh), float(hh)), "c": (ww // 2, hh // 2)}
     views = jnp.stack([_viewmat(0.1 * i) for i in range(B)])
     ref = jnp.stack(
         [splax.render(m, s, q, c, o, viewmat=views[i], **kw)[0] for i in range(B)]
     )  # B=1 renders each pack with depth_bits=21
     splax.clear_scratch()
     out = np.asarray(
-        jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(
-            views
-        )
+        jax.jit(jax.vmap(lambda vm: splax.render(m, s, q, c, o, viewmat=vm, **kw)[0]))(views)
     )  # B=8 render packs with depth_bits=18 (image 3 + tile 10)
-    assert (
-        _isect._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
-    )
+    assert _isect._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
     d = np.abs(out - np.asarray(ref))
     mse = float(np.mean((out - np.asarray(ref)) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)

@@ -16,13 +16,16 @@ moves the same gaussians differently while the splat itself stays broadcast.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 
 from splax._project import _project_call, opacity_compensation
 from splax._rasterize import _rasterize_call
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
@@ -85,9 +88,7 @@ def render(
         c = (W / 2, H / 2)
 
     if (gaussian_transforms is None) != (gaussian_slices is None):
-        raise ValueError(
-            "gaussian_transforms and gaussian_slices must be passed together"
-        )
+        raise ValueError("gaussian_transforms and gaussian_slices must be passed together")
     transform_ids = None
     if gaussian_transforms is not None and gaussian_slices is not None:
         if gaussian_transforms.shape[-3:] != (len(gaussian_slices), 4, 4):
@@ -123,18 +124,7 @@ def render(
         blend_opac = opacities * rho.reshape(opacities.shape)
         map_opac = opacities
     _final_Ts, _final_idx, out_img = _rasterize_call(
-        colors,
-        blend_opac,
-        background,
-        xys,
-        depths,
-        radii,
-        conics,
-        cum_tiles_hit,
-        n,
-        H,
-        W,
-        map_opac,
+        colors, blend_opac, background, xys, depths, radii, conics, cum_tiles_hit, n, H, W, map_opac
     )
     return out_img
 

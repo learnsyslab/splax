@@ -1,4 +1,6 @@
-"""Tests for the anti-aliased opacity compensation (Mip-Splatting / gsplat
+"""Test anti aliased opacity compensation.
+
+Tests for the anti-aliased opacity compensation (Mip-Splatting / gsplat
 ``rasterize_mode="antialiased"``).
 
 The compensation multiplies a per-gaussian factor ρ = √(det Σ₂D / det(Σ₂D+εI))
@@ -20,18 +22,16 @@ Checks:
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Callable
-from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import numpy as np
 
 import splax
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _scene(
@@ -46,9 +46,7 @@ def _scene(
     colors = jax.random.uniform(k[3], (n, 3))
     opac = jax.random.uniform(k[4], (n, 1), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(k[5], (3,))
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
 
 
@@ -100,34 +98,16 @@ def test_compensation_closed_form() -> None:
 
 
 def test_antialiased_off_matches_plain() -> None:
-    """antialiased=False is byte-identical (forward) to the plain grad-free inference
-    path, and passing map_opacities=opac explicitly matches map_opacities=None, the
-    split is a no-op when the two opacities are equal. Forward is byte-identical. Grads
-    agree to the backward's intrinsic atomic-add jitter (the documented ~2e-4)."""
+    """Match plain inference when anti aliasing is off."""
     n, H, W = 2500, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
     pk = _pk(H, W)
 
     off, _ = splax.training.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=vm,
-        background=bg,
-        antialiased=False,
-        **pk,
+        means, scales, quats, colors, opac, viewmat=vm, background=bg, antialiased=False, **pk
     )
     inf = splax.inference.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=vm,
-        background=bg,
-        **pk,
+        means, scales, quats, colors, opac, viewmat=vm, background=bg, **pk
     )
     assert np.array_equal(np.asarray(off), np.asarray(inf)), (
         "antialiased=False must be byte-identical to the plain inference forward"
@@ -171,49 +151,26 @@ def test_antialiased_changes_output() -> None:
     pk = _pk(H, W)
     off = np.asarray(
         splax.render(
-            means,
-            scales,
-            quats,
-            colors,
-            opac,
-            viewmat=vm,
-            background=bg,
-            antialiased=False,
-            **pk,
+            means, scales, quats, colors, opac, viewmat=vm, background=bg, antialiased=False, **pk
         )[0]
     )
     on = np.asarray(
         splax.render(
-            means,
-            scales,
-            quats,
-            colors,
-            opac,
-            viewmat=vm,
-            background=bg,
-            antialiased=True,
-            **pk,
+            means, scales, quats, colors, opac, viewmat=vm, background=bg, antialiased=True, **pk
         )[0]
     )
     assert np.abs(on - off).max() > 1e-3, "antialiased render must differ from plain"
 
 
 def test_antialiased_finite_difference() -> None:
-    """Directional-derivative FD check of the antialiased gradients over all five
-    splat params (mirrors test_warp_grad::test_finite_difference). The ρ chain adds a
-    conic-covariance term to the scale/quat/mean grads and a ρ factor to the opacity
-    grad. Both must be consistent with central differences to a few percent."""
+    """Check anti aliased gradients with finite differences."""
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)
     w = jax.random.uniform(jax.random.key(5), (H, W, 3))
     pk = _pk(H, W)
 
-    def loss(
-        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
-    ) -> jax.Array:
-        img, _ = splax.render(
-            m, s, q, c, o, viewmat=vm, background=bg, antialiased=True, **pk
-        )
+    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
+        img, _ = splax.render(m, s, q, c, o, viewmat=vm, background=bg, antialiased=True, **pk)
         return jnp.mean(w * img)
 
     args = (means, scales, quats, colors, opac)
@@ -227,6 +184,5 @@ def test_antialiased_finite_difference() -> None:
     numeric = (float(loss(*plus)) - float(loss(*minus))) / (2 * eps)
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
     assert rel < 8e-2, (
-        f"antialiased FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} "
-        f"(rel {rel:.2e})"
+        f"antialiased FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
     )

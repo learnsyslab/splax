@@ -21,19 +21,18 @@ in the batched backward is ~1e-4 rel).
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Hashable
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import dm_pix
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from scripts import train_colmap as tc
 
-import train_colmap as tc
+if TYPE_CHECKING:
+    from collections.abc import Hashable
 
 H = W = 48
 INTR = (48.0, 48.0, 24.0, 24.0)
@@ -55,17 +54,14 @@ def _view(seed: int) -> tuple[jax.Array, jax.Array]:
     k = jax.random.split(jax.random.key(100 + seed), 2)
     gt = jax.random.uniform(k[0], (H, W, 3))
     vm = jnp.array(
-        [[1, 0, 0, 0.1 * seed], [0, 1, 0, -0.05 * seed], [0, 0, 1, 4.0], [0, 0, 0, 1]],
-        jnp.float32,
+        [[1, 0, 0, 0.1 * seed], [0, 1, 0, -0.05 * seed], [0, 0, 1, 4.0], [0, 0, 0, 1]], jnp.float32
     )
     return gt, vm
 
 
 def _sgd_opt(params: dict[str, jax.Array]) -> optax.GradientTransformation:
     # lr=1 SGD so apply_updates(p) = p - grad, so grad = p - step(p)  (linear recovery).
-    txs: dict[Hashable, optax.GradientTransformation] = {
-        kk: optax.sgd(1.0) for kk in params
-    }
+    txs: dict[Hashable, optax.GradientTransformation] = {kk: optax.sgd(1.0) for kk in params}
     return optax.multi_transform(txs, {kk: kk for kk in params})
 
 

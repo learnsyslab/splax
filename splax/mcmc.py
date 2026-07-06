@@ -103,9 +103,7 @@ def relocate(
     idx = jnp.arange(n)
     source = jnp.where(dead, src, idx)  # dead pull from src, others self
     ratio = jnp.where(dead, counts[src], counts[idx]) + 1.0
-    new_opac, new_scale = compute_relocation(
-        opac[source], scales[source], ratio, binoms
-    )
+    new_opac, new_scale = compute_relocation(opac[source], scales[source], ratio, binoms)
     new_opac = jnp.clip(new_opac, min_opacity, 1.0 - _EPS)
     new_opac_logit = jnp.log(new_opac / (1.0 - new_opac)).reshape(opac_logit.shape)
     new_log_scales = jnp.log(new_scale)
@@ -117,9 +115,7 @@ def relocate(
         "quats": jnp.where(m, quats[source], quats),
         "colors_logit": jnp.where(m, colors_logit[source], colors_logit),
         "log_scales": jnp.where(m, new_log_scales, log_scales),
-        "opac_logit": jnp.where(
-            reset.reshape(opac_logit.shape), new_opac_logit, opac_logit
-        ),
+        "opac_logit": jnp.where(reset.reshape(opac_logit.shape), new_opac_logit, opac_logit),
     }
     return out, reset
 
@@ -152,7 +148,7 @@ def inject_noise(
     opac_logit: jax.Array,
     scaler: float,
 ) -> jax.Array:
-    """Add covariance/opacity-weighted Gaussian noise to ``means`` (gsplat ``inject_noise_to_position``).
+    """Add covariance weighted Gaussian noise to ``means``.
 
     ``noise = Sigma @ (randn * op_sigmoid(1 - opacity) * scaler)`` with
     ``Sigma = R diag(scale^2) R^T`` and ``op_sigmoid(x) = sigmoid(100 (x - 0.995))``

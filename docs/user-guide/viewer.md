@@ -18,8 +18,8 @@ import splax
 from splax.viewer import Viewer
 
 viewer = Viewer(port=8080, up_direction="+z")
-viewer.add_splats("scene", *splax.load_ply("room.ply"))
-viewer.add_splats("drone", *splax.load_ply("drone.ply"), position=(0.0, 0.0, 1.0))
+viewer.add_splats("scene", *splax.io.load_ply("room.ply"))
+viewer.add_splats("drone", *splax.io.load_ply("drone.ply"), position=(0.0, 0.0, 1.0))
 
 for pos, wxyz in trajectory:  # e.g. from a simulator
     viewer.update_pose("drone", pos, wxyz)

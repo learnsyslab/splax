@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import socket
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
-import jax.numpy as jnp
 
 from splax.viewer import Viewer, covariances
 

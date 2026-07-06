@@ -9,7 +9,7 @@ Viser is an optional dependency that can be installed with ``pip install splax[v
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 try:
     import viser
@@ -18,14 +18,14 @@ except ImportError as e:
         "splax.viewer requires viser. Install it with `pip install splax[viewer]`."
     ) from e
 
-import jax
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+if TYPE_CHECKING:
+    import jax
 
-def covariances(
-    scales: jax.Array | np.ndarray, quats: jax.Array | np.ndarray
-) -> np.ndarray:
+
+def covariances(scales: jax.Array | np.ndarray, quats: jax.Array | np.ndarray) -> np.ndarray:
     """Covariance matrices of gaussians from render-space scales and quats.
 
     Args:
@@ -75,12 +75,7 @@ class Viewer:
         opacities: jax.Array | np.ndarray,
         *,
         position: jax.Array | np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
-        wxyz: jax.Array | np.ndarray | tuple[float, float, float, float] = (
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-        ),
+        wxyz: jax.Array | np.ndarray | tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
     ) -> None:
         """Upload one rigid object's gaussians to the viewer under ``name``.
 
@@ -105,10 +100,7 @@ class Viewer:
         )
 
     def update_pose(
-        self,
-        name: str,
-        position: jax.Array | np.ndarray,
-        wxyz: jax.Array | np.ndarray,
+        self, name: str, position: jax.Array | np.ndarray, wxyz: jax.Array | np.ndarray
     ) -> None:
         """Set the world pose of the object ``name``.
 

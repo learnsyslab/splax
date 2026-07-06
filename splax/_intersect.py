@@ -77,9 +77,7 @@ def _ellipse_intersection(
         coeff = C
     h = coord - p_u
     sqrt_term = wp.sqrt(disc * h * h + t * coeff)
-    return wp.vec2(
-        (-B * h - sqrt_term) / coeff + p_v, (-B * h + sqrt_term) / coeff + p_v
-    )
+    return wp.vec2((-B * h - sqrt_term) / coeff + p_v, (-B * h + sqrt_term) / coeff + p_v)
 
 
 @wp.func
@@ -149,9 +147,7 @@ def _ellipse_init_span(s: _Ellipse) -> wp.vec2:
     # leading line, or a degenerate default when that line lies outside the bbox.
     min_line0 = wp.float32(s.rect_min[0]) * wp.float32(BLOCK_WIDTH)
     if s.bbox_min[0] <= min_line0:
-        return _ellipse_intersection(
-            s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, min_line0
-        )
+        return _ellipse_intersection(s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, min_line0)
     return wp.vec2(s.bbox_max[1], s.bbox_min[1])
 
 
@@ -164,9 +160,7 @@ def _ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
     min_line = wp.float32(u) * block
     max_line = min_line + block
     if max_line <= s.bbox_max[0]:
-        I_max = _ellipse_intersection(
-            s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, max_line
-        )
+        I_max = _ellipse_intersection(s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, max_line)
     else:
         I_max = I_min
     if (min_line <= s.bbox_argmin[1]) and (s.bbox_argmin[1] < max_line):
@@ -178,9 +172,7 @@ def _ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
     else:
         ellipse_max = wp.max(I_min[1], I_max[1])
     min_v = wp.max(s.rect_min[1], wp.min(s.rect_max[1], wp.int32(ellipse_min / block)))
-    max_v = wp.min(
-        s.rect_max[1], wp.max(s.rect_min[1], wp.int32(ellipse_max / block + 1.0))
-    )
+    max_v = wp.min(s.rect_max[1], wp.max(s.rect_min[1], wp.int32(ellipse_max / block + 1.0)))
     return wp.vec4(wp.float32(min_v), wp.float32(max_v), I_max[0], I_max[1])
 
 
@@ -400,14 +392,7 @@ def _map_intersects_32bit(
     t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
     conic = conics[idx]
     setup = _ellipse_setup(
-        conic[0],
-        conic[1],
-        conic[2],
-        t,
-        center[0],
-        center[1],
-        tile_bounds_x,
-        tile_bounds_y,
+        conic[0], conic[1], conic[2], t, center[0], center[1], tile_bounds_x, tile_bounds_y
     )
     if not setup.valid:
         return
@@ -465,14 +450,7 @@ def _map_intersects_64bit(
     t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
     conic = conics[idx]
     setup = _ellipse_setup(
-        conic[0],
-        conic[1],
-        conic[2],
-        t,
-        center[0],
-        center[1],
-        tile_bounds_x,
-        tile_bounds_y,
+        conic[0], conic[1], conic[2], t, center[0], center[1], tile_bounds_x, tile_bounds_y
     )
     if not setup.valid:
         return
@@ -581,9 +559,7 @@ def _tile_bin_edges_64bit(
     if idx == num_intersects - 1:
         tile_bins[cur_bin][1] = num_intersects
     keyp = isect_ids_sorted[idx - 1] >> wp.int64(32)
-    prev_bin = wp.int32(keyp >> wp.int64(tile_n_bits)) * num_tiles + wp.int32(
-        keyp & mask
-    )
+    prev_bin = wp.int32(keyp >> wp.int64(tile_n_bits)) * num_tiles + wp.int32(keyp & mask)
     if prev_bin != cur_bin:
         tile_bins[prev_bin][1] = idx
         tile_bins[cur_bin][0] = idx
@@ -609,8 +585,7 @@ def _sort_and_bin(
     tile_bounds_y: int,
     num_intersects: int | None = None,
 ) -> tuple[wp.array, wp.array, int]:
-    """Emit per (image, tile, gaussian) sort keys, sort them once globally, and
-    build the per (image, tile) bin edges in the signature-keyed scratch.
+    """Emit sorted intersection keys and tile bins for one batched launch.
 
     Used by the forward blend and by the backward pass, which recomputes the
     identical sort from the saved cum_tiles_hit. The sort is deterministic, so it

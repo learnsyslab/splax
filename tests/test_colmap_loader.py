@@ -8,25 +8,21 @@ needed).
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
+import importlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import types
 
 ROOT = Path(__file__).resolve().parent.parent
 SPARSE = ROOT / "data" / "drone" / "sparse" / "0"
 
 
 def _load_module() -> types.ModuleType:
-    sys.path.insert(0, str(ROOT / "scripts"))
-    spec = importlib.util.spec_from_file_location(
-        "train_colmap", ROOT / "scripts" / "train_colmap.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return importlib.import_module("scripts.train_colmap")
 
 
 def test_parsers_and_conventions() -> None:

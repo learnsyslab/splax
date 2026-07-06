@@ -22,17 +22,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
 import splax
-from train_colmap import load_scene, psnr  # reuse the COLMAP loader + metric
+from scripts.train_colmap import load_scene, psnr  # reuse the COLMAP loader + metric
 
 
 def _student_render(
@@ -60,11 +58,10 @@ def _student_render(
 
 
 def main() -> dict:
+    """Run teacher to student distillation and return summary metrics."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--teacher-ply", default="data/scenes/drone_1p5M.ply")
-    ap.add_argument(
-        "--data", default="data/drone", help="COLMAP scene the teacher was trained on"
-    )
+    ap.add_argument("--data", default="data/drone", help="COLMAP scene the teacher was trained on")
     ap.add_argument("--sparse-model", type=int, default=0)
     ap.add_argument("--n-student", type=int, default=150_000)
     ap.add_argument("--n-views", type=int, default=500, help="synthetic teacher views")
@@ -77,9 +74,7 @@ def main() -> dict:
         help="dense teacher-depth distillation weight (0 = off)",
     )
     ap.add_argument("--init", choices=["prune", "random"], default="prune")
-    ap.add_argument(
-        "--downscale", type=int, default=2, help="eval (real-view) downscale"
-    )
+    ap.add_argument("--downscale", type=int, default=2, help="eval (real-view) downscale")
     ap.add_argument(
         "--synth-downscale",
         type=int,
@@ -97,16 +92,10 @@ def main() -> dict:
 
     # --- scene (eval intrinsics + real held-out views), same normalized frame ----
     scene = load_scene(
-        args.data,
-        args.downscale,
-        args.eval_every,
-        seed=args.seed,
-        sparse_model=args.sparse_model,
+        args.data, args.downscale, args.eval_every, seed=args.seed, sparse_model=args.sparse_model
     )
     H, W, intr = scene["H"], scene["W"], scene["intr"]
-    eval_vms = [
-        jnp.asarray(scene["eval_vms"][i]) for i in range(len(scene["eval_names"]))
-    ]
+    eval_vms = [jnp.asarray(scene["eval_vms"][i]) for i in range(len(scene["eval_names"]))]
     eval_imgs = [scene["eval_imgs"][i] for i in range(len(eval_vms))]
     eval_idxs = list(range(min(args.n_eval, len(eval_imgs))))
     train_vms = np.asarray(scene["train_vms"])
@@ -123,25 +112,23 @@ def main() -> dict:
     )
 
     # --- teacher (render-space) + ceiling ---------------------------------------
-    tm, ts, tq, tc, to = splax.load_ply(args.teacher_ply)
+    tm, ts, tq, tc, to = splax.io.load_ply(args.teacher_ply)
     teacher = {"means": tm, "scales": ts, "quats": tq, "colors": tc, "opacities": to}
     print(f"teacher {tm.shape[0]} gaussians from {args.teacher_ply}")
     teacher_pf = [
-        psnr(_student_render(teacher, eval_vms[i], H, W, intr), eval_imgs[i])
-        for i in eval_idxs
+        psnr(_student_render(teacher, eval_vms[i], H, W, intr), eval_imgs[i]) for i in eval_idxs
     ]
     teacher_psnr = float(np.mean(teacher_pf))
     print(
-        f"teacher held-out PSNR (ceiling): {teacher_psnr:.2f} dB {[round(x, 2) for x in teacher_pf]}"
+        "teacher held-out PSNR (ceiling): "
+        f"{teacher_psnr:.2f} dB {[round(x, 2) for x in teacher_pf]}"
     )
 
     def eval_hook(student: dict[str, jax.Array]) -> float:
         return float(
             np.mean(
                 [
-                    psnr(
-                        _student_render(student, eval_vms[i], H, W, intr), eval_imgs[i]
-                    )
+                    psnr(_student_render(student, eval_vms[i], H, W, intr), eval_imgs[i])
                     for i in eval_idxs
                 ]
             )
@@ -171,8 +158,7 @@ def main() -> dict:
     total_wall = time.perf_counter() - t0
 
     per_frame = [
-        psnr(_student_render(student, eval_vms[i], H, W, intr), eval_imgs[i])
-        for i in eval_idxs
+        psnr(_student_render(student, eval_vms[i], H, W, intr), eval_imgs[i]) for i in eval_idxs
     ]
     final = float(np.mean(per_frame))
     for c in info["curve"]:
@@ -187,7 +173,7 @@ def main() -> dict:
 
     if args.out_ply:
         Path(args.out_ply).parent.mkdir(parents=True, exist_ok=True)
-        splax.write_ply(
+        splax.io.write_ply(
             args.out_ply,
             student["means"],
             student["scales"],

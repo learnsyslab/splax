@@ -43,6 +43,7 @@ nav:
   - User Guide:
     - Rendering: user-guide/rendering.md
     - Training: user-guide/training.md
+    - COLMAP Workflow: user-guide/colmap.md
     - Batching: user-guide/batching.md
     - IO: user-guide/io.md
     - Viewer: user-guide/viewer.md

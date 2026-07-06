@@ -24,16 +24,12 @@ early-termination discontinuities that FD steps cross are the intrinsic residual
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import splax
 
@@ -72,37 +68,24 @@ def _scene(
     colors = jax.random.uniform(key[3], (n, 3))
     opac = jax.random.uniform(key[4], (n, 1), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(key[5], (3,))
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
 
 
 def test_depth_render_single_gaussian() -> None:
-    """Single gaussian: D(p) = pvz · A(p) exactly (A = accumulated alpha), and empty
-    pixels are 0. Validates the forward expected-depth accumulator against the colour
-    blend it mirrors."""
+    """Match single gaussian expected depth against accumulated alpha."""
     H = W = 64
     means = jnp.array([[0.1, -0.05, 0.0]])
     scales = jnp.array([[0.12, 0.12, 0.12]])
     quats = jnp.array([[1.0, 0.0, 0.0, 0.0]])
     opac = jnp.array([[0.9]])
-    vm = jnp.array(
-        [[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 4.0], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 4.0], [0, 0, 0, 1]], jnp.float32)
     pvz = float((vm[:3, :3] @ means[0] + vm[:3, 3])[2])  # camera-space depth
     black = jnp.zeros(3)
 
     # accumulated alpha A = Σ wᵢ : unit colour over a black background.
     img, _ = splax.render(
-        means,
-        scales,
-        quats,
-        jnp.ones((1, 3)),
-        opac,
-        viewmat=vm,
-        background=black,
-        **_pk(H, W),
+        means, scales, quats, jnp.ones((1, 3)), opac, viewmat=vm, background=black, **_pk(H, W)
     )
     A = img[..., 0]
     _img, depth = splax.render(
@@ -119,9 +102,7 @@ def test_depth_render_single_gaussian() -> None:
     A = np.asarray(A)
     depth = np.asarray(depth)
     # covered region: D == pvz · A. Empty region: both 0.
-    assert np.allclose(depth, pvz * A, atol=1e-4), (
-        f"max dev {np.abs(depth - pvz * A).max():.2e}"
-    )
+    assert np.allclose(depth, pvz * A, atol=1e-4), f"max dev {np.abs(depth - pvz * A).max():.2e}"
     assert depth[0, 0] == 0.0 and A[0, 0] == 0.0  # corner is background
     assert depth.max() > 0.5 * pvz  # gaussian actually contributes
 
@@ -132,35 +113,21 @@ def test_offpath_image_byte_identical() -> None:
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=1)
     common: _Common = {"viewmat": vm, "background": bg, **_pk(H, W)}
     img_plain, _ = splax.render(means, scales, quats, colors, opac, **common)
-    img_depth, _d = splax.render(
-        means, scales, quats, colors, opac, render_depth=True, **common
-    )
+    img_depth, _d = splax.render(means, scales, quats, colors, opac, render_depth=True, **common)
     assert np.array_equal(np.asarray(img_plain), np.asarray(img_depth))
 
 
 @pytest.mark.parametrize("mode", ["depth_only", "mixed"])
 def test_depth_grad_finite_difference(mode: str) -> None:
-    """Central-difference directional-derivative check of the depth gradient chain,
-    across all five splat params at once. depth-only isolates the v_depths and
-    depth-to-blend-weight chains, mixed adds the colour channel."""
+    """Check depth gradient chain with central finite differences."""
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)
     wd = jax.random.uniform(jax.random.key(9), (H, W))
     wc = jax.random.uniform(jax.random.key(10), (H, W, 3))
 
-    def loss(
-        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
-    ) -> jax.Array:
+    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
         img, depth = splax.render(
-            m,
-            s,
-            q,
-            c,
-            o,
-            viewmat=vm,
-            background=bg,
-            render_depth=True,
-            **_pk(H, W),
+            m, s, q, c, o, viewmat=vm, background=bg, render_depth=True, **_pk(H, W)
         )
         assert depth is not None  # render_depth=True fills the depth slot
         dl = jnp.mean(wd * depth)
@@ -182,9 +149,7 @@ def test_depth_grad_finite_difference(mode: str) -> None:
     minus = [a - eps * d for a, d in zip(args, dirs)]
     numeric = (float(loss(*plus)) - float(loss(*minus))) / (2 * eps)
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, (
-        f"{mode} FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
-    )
+    assert rel < 8e-2, f"{mode} FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
 
 
 def test_depth_grad_under_jit() -> None:
@@ -193,19 +158,9 @@ def test_depth_grad_under_jit() -> None:
     wd = jax.random.uniform(jax.random.key(4), (H, W))
     args = (means, scales, quats, colors, opac)
 
-    def loss(
-        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
-    ) -> jax.Array:
+    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
         _img, depth = splax.render(
-            m,
-            s,
-            q,
-            c,
-            o,
-            viewmat=vm,
-            background=bg,
-            render_depth=True,
-            **_pk(H, W),
+            m, s, q, c, o, viewmat=vm, background=bg, render_depth=True, **_pk(H, W)
         )
         assert depth is not None  # render_depth=True fills the depth slot
         return jnp.mean(wd * depth)
@@ -217,8 +172,7 @@ def test_depth_grad_under_jit() -> None:
 
 
 def test_depth_grad_under_vmap_matches_sequential() -> None:
-    """The depth backward is batch-native (shares the batched image_id indexing). Grad
-    under vmap over a batched gaussian input matches the per-sample sequential grad."""
+    """Match vmap depth grads against sequential depth grads."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
     bmeans = means + 0.02 * jax.random.normal(jax.random.key(1), (B, n, 3))

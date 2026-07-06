@@ -25,10 +25,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
-import jax.numpy as jnp
-import pytest
 import imageio.v3 as iio
+import jax.numpy as jnp
+import numpy as np
+import pytest
 
 import splax
 
@@ -41,23 +41,18 @@ KNOWN_PSNR = {0: 30.89, 25: 31.43, 50: 32.08}
 SLACK = 0.05
 
 
-def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
-    """NeRF c2w (OpenGL, -z forward) to w2c viewmat (OpenCV, +z forward)."""
-    c2w = np.array(frame["transform_matrix"], np.float64)
-    c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
-    return np.linalg.inv(c2w).astype(np.float32)
-
-
 @pytest.mark.parametrize("frame_idx", [0, 25, 50])
 def test_lego_render_psnr_regression(frame_idx: int) -> None:
     meta = json.loads((LEGO / "transforms_test.json").read_text())
-    means, scales, quats, colors, opac = splax.load_ply(PLY)
+    means, scales, quats, colors, opac = splax.io.load_ply(PLY)
 
     frame = meta["frames"][frame_idx]
     gt = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png"))
     H, W = gt.shape[:2]
     gt = gt.astype(np.float32) / 255.0
     gt = gt[..., :3] * gt[..., 3:] + (1.0 - gt[..., 3:])  # composite on white
+    viewmat = np.array(frame["transform_matrix"], np.float64)
+    viewmat = np.linalg.inv(viewmat @ np.diag([1.0, -1.0, -1.0, 1.0])).astype(np.float32)
 
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
     img = splax.inference.render(
@@ -66,7 +61,7 @@ def test_lego_render_psnr_regression(frame_idx: int) -> None:
         quats,
         colors,
         opac,
-        viewmat=jnp.asarray(_nerf_camera(frame)),
+        viewmat=jnp.asarray(viewmat),
         background=jnp.ones(3),
         img_shape=(H, W),
         f=(float(ff), float(ff)),
@@ -78,6 +73,4 @@ def test_lego_render_psnr_regression(frame_idx: int) -> None:
     psnr = -10.0 * np.log10(float(np.mean((img - gt) ** 2)))
 
     floor = KNOWN_PSNR[frame_idx] - SLACK
-    assert psnr >= floor, (
-        f"frame {frame_idx} PSNR {psnr:.3f} dB below floor {floor:.3f}"
-    )
+    assert psnr >= floor, f"frame {frame_idx} PSNR {psnr:.3f} dB below floor {floor:.3f}"

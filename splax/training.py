@@ -14,10 +14,13 @@ per-image inputs such as a batch of camera poses get per-image gradients.
 
 from __future__ import annotations
 
-import jax
+from typing import TYPE_CHECKING
 
 from splax._project import opacity_compensation, project
 from splax._rasterize import rasterize, rasterize_depth
+
+if TYPE_CHECKING:
+    import jax
 
 
 def render(

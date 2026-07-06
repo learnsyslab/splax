@@ -40,6 +40,63 @@ docs = [
 dist = ["build", "twine"]
 dev = ["ruff", { include-group = "tests" }, { include-group = "docs" }, { include-group = "lint" }]
 
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".git",
+    ".git-rewrite",
+    ".ipynb_checkpoints",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "build",
+    "dist",
+    "site-packages",
+    "venv",
+    "docs/conf.py",
+]
+
+line-length = 100
+indent-width = 4
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D", "TCH", "ANN"]
+ignore = ["ANN401"]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.isort]  # Prevent ruff from reporting conflicting settings with isort
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"benchmark/*" = ["D100", "D103"]
+"tests/*" = ["D100", "D103", "D104"]
+"examples/*" = ["D100", "D103"]
+"tutorials/*" = ["D", "ANN"]
+# TODO: Remove once everything is stable and document
+"crazyflow/*" = ["D100", "D101", "D102", "D104", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+suppress-dummy-args = true
+suppress-none-returning = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
 [tool.uv]
 # gsplat compiles a CUDA extension against torch, so it must build without isolation
 no-build-isolation-package = ["gsplat"]
@@ -60,7 +117,7 @@ exclude = ["splax/_intersect.py", "splax/_project.py", "splax/_rasterize.py"]
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = [
-    { name = "linux-64-cpu", platform = "linux-64" },
+    { name = "linux-64", platform = "linux-64" },
     { name = "linux-64-cuda", platform = "linux-64", cuda = "12" },
 ]
 
@@ -81,7 +138,7 @@ properdocs = ">=1.5.0"
 mkdocs-material = ">=9.5.0"
 
 [tool.pixi.feature.docs]
-platforms = ["linux-64-cpu"]
+platforms = ["linux-64"]
 
 [tool.pixi.feature.docs.pypi-dependencies]
 mkdocstrings = { extras = ["python"], version = ">=0.26.0" }
@@ -93,6 +150,19 @@ mkdocs-autorefs = ">=1.2.0"
 [tool.pixi.feature.docs.tasks]
 docs-build = { cmd = "properdocs build --strict", description = "Build the documentation" }
 docs-serve = { cmd = "properdocs serve --livereload", description = "Serve the documentation locally" }
+
+# COLMAP feature: SfM preprocessing tools in a dedicated environment.
+[tool.pixi.feature.colmap.dependencies]
+python = ">=3.12,<3.13"
+colmap = "*"
+
+[tool.pixi.feature.colmap]
+platforms = ["linux-64"]
+
+[tool.pixi.feature.colmap.tasks]
+colmap-features = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap feature_extractor --database_path ./database.db --image_path ./images --ImageReader.single_camera 1 --ImageReader.camera_model OPENCV' --", description = "Run COLMAP feature extraction in a scene folder" }
+colmap-match = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap sequential_matcher --database_path ./database.db' --", description = "Run COLMAP sequential matching in a scene folder" }
+colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse' --", description = "Run COLMAP mapper in a scene folder" }
 
 # Tests feature: pytest plus gsplat as external reference. gsplat JIT-compiles its
 # CUDA extension on first use, so the environment carries the matching CUDA 12.8
@@ -141,6 +211,7 @@ upload = { cmd = "twine upload dist/*", description = "Upload to PyPI" }
 [tool.pixi.environments]
 default = { features = ["cuda"], solve-group = "default" }
 docs = { features = ["docs"], solve-group = "docs" }
+colmap = { features = ["colmap"], solve-group = "colmap" }
 tests = { features = ["cuda", "tests"], solve-group = "default" }
 lint = { features = ["cuda", "lint"], solve-group = "default" }
 dist = { features = ["cuda", "dist"], solve-group = "default" }

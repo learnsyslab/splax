@@ -16,24 +16,13 @@ Two CPU-checkable properties of the pose sampler and one end-to-end smoke test o
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
 import splax
-from splax.distillation import (
-    sample_poses,
-    render_views,
-    distill,
-    _cam_centers,
-    _opacity_bbox,
-)
+from splax.distillation import _cam_centers, _opacity_bbox, distill, render_views, sample_poses
 
 
 def _random_teacher(n: int, seed: int = 0) -> dict[str, np.ndarray]:
@@ -44,13 +33,7 @@ def _random_teacher(n: int, seed: int = 0) -> dict[str, np.ndarray]:
     quats /= np.linalg.norm(quats, axis=1, keepdims=True)
     colors = rng.uniform(0.1, 0.9, size=(n, 3)).astype(np.float32)
     opac = rng.uniform(0.2, 0.95, size=(n, 1)).astype(np.float32)
-    return {
-        "means": means,
-        "scales": scales,
-        "quats": quats,
-        "colors": colors,
-        "opacities": opac,
-    }
+    return {"means": means, "scales": scales, "quats": quats, "colors": colors, "opacities": opac}
 
 
 def test_poses_inside_bbox_and_proper_rotation() -> None:
@@ -72,8 +55,7 @@ def test_poses_inside_bbox_and_proper_rotation() -> None:
 
 
 def test_poses_look_at_gaussians() -> None:
-    """The look-at target sits in front of the camera and on the optical axis, and a
-    real fraction of the cloud falls inside the frustum, the views point at the splat."""
+    """Check that sampled poses look at the gaussian cloud."""
     t = _random_teacher(4000, seed=3)
     means = t["means"].astype(np.float64)
     vms = sample_poses(t["means"], t["opacities"], 120, seed=4, min_dist=0.2)
@@ -99,14 +81,10 @@ def test_trajectory_bias_moves_cameras() -> None:
     """Passing viewmats biases a fraction of the eyes toward the trajectory centers."""
     t = _random_teacher(2000, seed=5)
     # a trajectory sitting well outside the cloud bbox
-    traj_centers = np.array(
-        [[3.0, 0, 0], [3.1, 0.2, 0.1], [2.9, -0.1, 0.05]], np.float32
-    )
+    traj_centers = np.array([[3.0, 0, 0], [3.1, 0.2, 0.1], [2.9, -0.1, 0.05]], np.float32)
     traj = np.broadcast_to(np.eye(4, dtype=np.float32), (3, 4, 4)).copy()
     traj[:, :3, 3] = -traj_centers  # R = I so center = -t
-    vms = sample_poses(
-        t["means"], t["opacities"], 300, seed=6, viewmats=traj, traj_frac=0.5
-    )
+    vms = sample_poses(t["means"], t["opacities"], 300, seed=6, viewmats=traj, traj_frac=0.5)
     centers = _cam_centers(vms)
     # ~half the eyes should be pulled toward x~3 (far outside the unit-ish cloud)
     near_traj = (centers[:, 0] > 1.5).mean()
@@ -127,8 +105,7 @@ def test_render_views_shapes_and_depth() -> None:
 
 @pytest.mark.parametrize("init", ["prune", "random"])
 def test_distill_smoke(init: str) -> None:
-    """distill runs end to end on a tiny teacher and returns a valid, smaller student
-    whose synthetic training loss decreases."""
+    """Run tiny end to end distillation and validate outputs."""
     teacher = _random_teacher(2000, seed=11)
     info = {}
     curve = []

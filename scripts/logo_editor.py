@@ -524,9 +524,12 @@ fetch(`/tiles?path=${encodeURIComponent(filePath)}`).then(r => r.json()).then(d 
 
 
 class Handler(BaseHTTPRequestHandler):
+    """Serve the logo editor page and tile endpoints."""
+
     tile_file: Path
 
     def _reply(self, code: int, body: bytes, ctype: str) -> None:
+        """Send an HTTP response with explicit content metadata."""
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -534,12 +537,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _resolve(self, path: str | None) -> Path:
+        """Resolve a requested tile path against the repository root."""
         if path is None:
             return self.tile_file
         p = Path(path).expanduser()
         return p if p.is_absolute() else ROOT / p
 
     def do_GET(self) -> None:  # noqa: N802
+        """Serve editor HTML or tile JSON."""
         url = urllib.parse.urlparse(self.path)
         if url.path == "/":
             page = PAGE.replace("__DEFAULT_FILE__", json.dumps(str(self.tile_file)))
@@ -561,6 +566,7 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:  # noqa: N802
+        """Persist updated tile JSON from the editor."""
         if self.path != "/tiles":
             self._reply(404, b"not found", "text/plain")
             return
@@ -575,11 +581,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._reply(200, b'{"ok": true}', "application/json")
 
-    def log_message(self, *args: object) -> None:
+    def log_message(self, format: str, *args: object) -> None:
+        """Silence default HTTP request logging."""
         pass
 
 
 def _validate(data: dict) -> list[dict]:
+    """Validate and normalize tile payload data."""
     tiles = []
     for t in data["tiles"]:
         ok = (
@@ -595,12 +603,9 @@ def _validate(data: dict) -> list[dict]:
 
 
 def main() -> None:
+    """Run the local logo tile editor server."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--file",
-        type=Path,
-        default=ROOT / "docs/assets/logo_tiles.json",
-    )
+    parser.add_argument("--file", type=Path, default=ROOT / "docs/assets/logo_tiles.json")
     parser.add_argument("--port", type=int, default=8642)
     args = parser.parse_args()
     Handler.tile_file = args.file.resolve()

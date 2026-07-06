@@ -7,14 +7,14 @@ share the same five gaussian arrays: `means` `(N, 3)`, `scales` `(N, 3)`, `quats
 
 ## Render a scene
 
-`splax.load_ply` reads a 3DGS `.ply` into the five render-space arrays.
+`splax.io.load_ply` reads a 3DGS `.ply` into the five render-space arrays.
 `splax.inference.render` is the pure, grad-free forward path.
 
 ```python
 import jax.numpy as jnp
 import splax
 
-means, scales, quats, colors, opacities = splax.load_ply("scene.ply")
+means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
 img = splax.inference.render(
     means, scales, quats, colors, opacities,
     viewmat=viewmat, background=jnp.ones(3),

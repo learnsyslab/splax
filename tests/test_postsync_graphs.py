@@ -9,16 +9,18 @@ plain launches, and any scratch reallocation purges the graph cache.
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-import pytest
+import numpy as np
 
 import splax
 import splax._intersect as _isect
 import splax._rasterize as _rast
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class _KW(TypedDict):
@@ -31,9 +33,7 @@ class _KW(TypedDict):
     clip_thresh: float
 
 
-def _scene(
-    n: int, seed: int = 0
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def _scene(n: int, seed: int = 0) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     k = jax.random.split(jax.random.key(seed), 5)
     means = jax.random.normal(k[0], (n, 3))
     scales = jax.random.uniform(k[1], (n, 3), minval=0.005, maxval=0.05)
@@ -45,9 +45,7 @@ def _scene(
 
 
 def _kw(H: int, W: int) -> _KW:
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return {
         "viewmat": vm,
         "background": jnp.zeros(3),
@@ -60,8 +58,7 @@ def _kw(H: int, W: int) -> _KW:
 
 
 def test_graph_replay_matches_plain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The captured-graph forward is byte-identical to the plain path, and a
-    repeated jitted call replays a cached graph instead of re-capturing."""
+    """Match captured graph output against plain output and replay cache."""
     splats = _scene(20_000, seed=3)
     kw = _kw(256, 256)
 

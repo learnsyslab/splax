@@ -23,25 +23,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
-from collections.abc import Callable, Hashable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import dm_pix
 import imageio.v3 as iio
+import jax
+import jax.numpy as jnp
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import jax
-import jax.numpy as jnp
 import optax
 
 matplotlib.use("Agg")
 
-sys.path.insert(0, str(Path(__file__).parent))
 import splax
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Hashable
 
 LEGO = Path("data/nerf_synthetic/lego")
 
@@ -55,10 +55,7 @@ def nerf_camera(frame: dict) -> np.ndarray:
 
 def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
     """Load a frame's image (composited on white) at `res`x`res` and its viewmat."""
-    img = (
-        iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32)
-        / 255.0
-    )
+    img = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32) / 255.0
     img = img[..., :3] * img[..., 3:] + (1.0 - img[..., 3:])  # composite on white
     H = img.shape[0]
     if H != res:
@@ -73,24 +70,16 @@ def load_view_alpha(frame: dict, res: int) -> tuple[jax.Array, jax.Array, jax.Ar
     Used only by the ``--random-bkgd`` path: keeps the straight-alpha PNG channels
     apart so the caller can composite over a different background color each step.
     """
-    img = (
-        iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32)
-        / 255.0
-    )
+    img = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32) / 255.0
     H = img.shape[0]
     if H != res:
         f = H // res
-        img = img.reshape(res, f, res, f, 4).mean(
-            (1, 3)
-        )  # box downsample (rgba jointly)
-    return (
-        jnp.asarray(img[..., :3]),
-        jnp.asarray(img[..., 3:]),
-        jnp.asarray(nerf_camera(frame)),
-    )
+        img = img.reshape(res, f, res, f, 4).mean((1, 3))  # box downsample (rgba jointly)
+    return (jnp.asarray(img[..., :3]), jnp.asarray(img[..., 3:]), jnp.asarray(nerf_camera(frame)))
 
 
 def init_params(n: int, seed: int = 0) -> dict[str, jax.Array]:
+    """Initialize smoke mode splat parameters."""
     k = jax.random.split(jax.random.key(seed), 5)
     return {
         # means uniform in the lego scene bounds ([-1.3, 1.3]^3-ish)
@@ -105,7 +94,7 @@ def init_params(n: int, seed: int = 0) -> dict[str, jax.Array]:
 def init_params_mcmc(
     n: int, init_scale: float, init_opa: float, seed: int = 0
 ) -> dict[str, jax.Array]:
-    """gsplat MCMC-preset init: half-opacity, uniform in the cube, ~knn scale."""
+    """Gsplat MCMC-preset init: half-opacity, uniform in the cube, ~knn scale."""
     k = jax.random.split(jax.random.key(seed), 5)
     return {
         "means": jax.random.uniform(k[0], (n, 3), minval=-1.3, maxval=1.3),
@@ -124,6 +113,7 @@ def render_params(
     background: jax.Array | None = None,
     antialiased: bool = False,
 ) -> jax.Array:
+    """Render one image from the parameter dictionary."""
     means = p["means"]
     scales = jnp.exp(p["log_scales"])
     quats = p["quats"] / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8)
@@ -149,19 +139,19 @@ def render_params(
 
 
 def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
+    """Compute PSNR from two images in [0, 1]."""
     mse = float(np.mean((np.clip(np.asarray(a), 0, 1) - np.asarray(b)) ** 2))
     return -10 * np.log10(mse) if mse > 0 else float("inf")
 
 
 def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
+    """Write fitted parameters to a 3DGS PLY file."""
     scales = jnp.exp(params["log_scales"])
-    quats = params["quats"] / (
-        jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8
-    )
+    quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
     colors = jax.nn.sigmoid(params["colors_logit"])
     opac = jax.nn.sigmoid(params["opac_logit"])
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    splax.write_ply(path, params["means"], scales, quats, colors, opac)
+    splax.io.write_ply(path, params["means"], scales, quats, colors, opac)
     print(f"wrote {path}")
 
 
@@ -169,6 +159,7 @@ def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
 # smoke mode (Phase 6a, unchanged)                                            #
 # --------------------------------------------------------------------------- #
 def run_smoke(args: argparse.Namespace) -> None:
+    """Run the smoke training configuration."""
     train_meta = json.loads((LEGO / "transforms_train.json").read_text())
     test_meta = json.loads((LEGO / "transforms_test.json").read_text())
     res = args.res
@@ -190,9 +181,7 @@ def run_smoke(args: argparse.Namespace) -> None:
         "colors_logit": 1e-2,
         "opac_logit": 3e-2,
     }
-    opt = optax.multi_transform(
-        {k: optax.adam(v) for k, v in lrs.items()}, {k: k for k in params}
-    )
+    opt = optax.multi_transform({k: optax.adam(v) for k, v in lrs.items()}, {k: k for k in params})
     opt_state = opt.init(params)
 
     def loss_fn(p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array) -> jax.Array:
@@ -206,16 +195,10 @@ def run_smoke(args: argparse.Namespace) -> None:
         loss, grads = jax.value_and_grad(loss_fn)(p, gt, vm)
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-        return (
-            cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
-            opt_state,
-            loss,
-        )
+        return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, loss)
 
     aa = args.antialiased
-    before = np.clip(
-        np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1
-    )
+    before = np.clip(np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1)
     p0 = psnr(before, test_img)
     print(f"random-init test PSNR: {p0:.2f} dB")
 
@@ -229,19 +212,11 @@ def run_smoke(args: argparse.Namespace) -> None:
         if it % 100 == 0 or it == args.steps:
             loss.block_until_ready()
             tp = psnr(render_params(params, test_vm, res, f, antialiased=aa), test_img)
-            traj.append(
-                {
-                    "step": it,
-                    "test_psnr": round(tp, 3),
-                    "train_l1": round(float(loss), 5),
-                }
-            )
+            traj.append({"step": it, "test_psnr": round(tp, 3), "train_l1": round(float(loss), 5)})
             print(f"step {it:5d}  train L1 {float(loss):.4f}  test PSNR {tp:5.2f} dB")
     wall = time.perf_counter() - t0
 
-    after = np.clip(
-        np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1
-    )
+    after = np.clip(np.asarray(render_params(params, test_vm, res, f, antialiased=aa)), 0, 1)
     p_final = psnr(after, test_img)
     print(
         f"\nfinal test PSNR: {p_final:.2f} dB  ({args.steps} steps in {wall:.1f}s, "
@@ -251,12 +226,10 @@ def run_smoke(args: argparse.Namespace) -> None:
     Path("results").mkdir(exist_ok=True)
     gt = np.asarray(test_img)
     iio.imwrite(
-        "results/train_lego_before.png",
-        (np.concatenate([before, gt], 1) * 255).astype(np.uint8),
+        "results/train_lego_before.png", (np.concatenate([before, gt], 1) * 255).astype(np.uint8)
     )
     iio.imwrite(
-        "results/train_lego_after.png",
-        (np.concatenate([after, gt], 1) * 255).astype(np.uint8),
+        "results/train_lego_after.png", (np.concatenate([after, gt], 1) * 255).astype(np.uint8)
     )
     out = {
         "n": args.n,
@@ -323,23 +296,15 @@ def _make_step(
         bg: jax.Array,
         vm: jax.Array,
     ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
-        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-            p, gt_rgb, gt_alpha, bg, vm
-        )
+        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(p, gt_rgb, gt_alpha, bg, vm)
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-        return (
-            cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
-            opt_state,
-            l1,
-        )
+        return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, l1)
 
     return step
 
 
-def _reset_opt_state(
-    opt_state: optax.OptState, reset_mask: jax.Array
-) -> optax.OptState:
+def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.OptState:
     """Zero Adam moments (leading-dim == N leaves) at relocated rows."""
     n = reset_mask.shape[0]
     keep = (~reset_mask).astype(jnp.float32)
@@ -353,32 +318,26 @@ def _reset_opt_state(
 
 
 def run_quality(args: argparse.Namespace) -> dict:
+    """Run the quality training configuration and return metrics."""
     train_meta = json.loads((LEGO / "transforms_train.json").read_text())
     test_meta = json.loads((LEGO / "transforms_test.json").read_text())
     cax = train_meta["camera_angle_x"]
 
     # phase schedule: train at args.res, optionally fine-tune the tail at res_ft
     res_ft = args.res_ft or args.res
-    ft_start = (
-        int(args.steps * (1.0 - args.ft_frac)) if res_ft != args.res else args.steps
-    )
+    ft_start = int(args.steps * (1.0 - args.ft_frac)) if res_ft != args.res else args.steps
 
     def frames_at(res: int) -> tuple[jax.Array, jax.Array]:
-        """imgs pre-composited on white, vms; used when --random-bkgd is off."""
+        """Imgs pre-composited on white, vms; used when --random-bkgd is off."""
         imgs, vms = zip(*[load_view(fr, res) for fr in train_meta["frames"]])
         return jnp.stack(imgs), jnp.stack(vms)
 
     def frames_at_alpha(res: int) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """raw (rgb, alpha) + vms; used to re-composite over a random bg each step."""
-        rgb, alpha, vms = zip(
-            *[load_view_alpha(fr, res) for fr in train_meta["frames"]]
-        )
+        """Raw (rgb, alpha) + vms; used to re-composite over a random bg each step."""
+        rgb, alpha, vms = zip(*[load_view_alpha(fr, res) for fr in train_meta["frames"]])
         return jnp.stack(rgb), jnp.stack(alpha), jnp.stack(vms)
 
-    print(
-        f"loading {len(train_meta['frames'])} train views "
-        f"(random_bkgd={args.random_bkgd}) ..."
-    )
+    print(f"loading {len(train_meta['frames'])} train views (random_bkgd={args.random_bkgd}) ...")
     if args.random_bkgd:
         train = {args.res: frames_at_alpha(args.res)}
         if res_ft != args.res:
@@ -403,12 +362,7 @@ def run_quality(args: argparse.Namespace) -> dict:
 
     def eval_psnr() -> tuple[float, list[float]]:
         ps = [
-            psnr(
-                render_params(
-                    params, vm, eval_res, f_eval, antialiased=args.antialiased
-                ),
-                gt,
-            )
+            psnr(render_params(params, vm, eval_res, f_eval, antialiased=args.antialiased), gt)
             for gt, vm in zip(eval_imgs, eval_vms)
         ]
         return float(np.mean(ps)), ps
@@ -446,9 +400,7 @@ def run_quality(args: argparse.Namespace) -> dict:
         return new, _reset_opt_state(opt_state, reset)
 
     @jax.jit
-    def add_noise(
-        p: dict[str, jax.Array], key: jax.Array, scaler: float
-    ) -> dict[str, jax.Array]:
+    def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
         m = splax.mcmc.inject_noise(
             key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler
         )
@@ -488,9 +440,7 @@ def run_quality(args: argparse.Namespace) -> dict:
         else:
             bg = white
             alpha = gt_alpha  # single (res,res,1) ones template, shared across views
-        params, opt_state, l1 = steppers[res](
-            params, opt_state, imgs[vi], alpha, bg, vms[vi]
-        )
+        params, opt_state, l1 = steppers[res](params, opt_state, imgs[vi], alpha, bg, vms[vi])
 
         # MCMC relocation (every refine_every steps, in a refine window)
         if (
@@ -516,16 +466,9 @@ def run_quality(args: argparse.Namespace) -> dict:
             l1.block_until_ready()
             ep, _ = eval_psnr()
             curve.append(
-                {
-                    "step": it,
-                    "eval_psnr": round(ep, 3),
-                    "train_l1": round(float(l1), 5),
-                    "res": res,
-                }
+                {"step": it, "eval_psnr": round(ep, 3), "train_l1": round(float(l1), 5), "res": res}
             )
-            print(
-                f"step {it:5d}  res {res}  train L1 {float(l1):.4f}  eval PSNR {ep:5.2f} dB"
-            )
+            print(f"step {it:5d}  res {res}  train L1 {float(l1):.4f}  eval PSNR {ep:5.2f} dB")
     wall = time.perf_counter() - t0
 
     ep_final, per_frame = eval_psnr()
@@ -542,24 +485,17 @@ def run_quality(args: argparse.Namespace) -> dict:
     # side-by-side render|GT for each eval frame at 800x800
     for fi, (gt, vm) in zip(args.eval_frames, zip(eval_imgs, eval_vms)):
         r = np.clip(
-            np.asarray(
-                render_params(
-                    params, vm, eval_res, f_eval, antialiased=args.antialiased
-                )
-            ),
+            np.asarray(render_params(params, vm, eval_res, f_eval, antialiased=args.antialiased)),
             0,
             1,
         )
         iio.imwrite(
-            f"results/lego_fit_6d_f{fi}.png",
-            (np.concatenate([r, gt], 1) * 255).astype(np.uint8),
+            f"results/lego_fit_6d_f{fi}.png", (np.concatenate([r, gt], 1) * 255).astype(np.uint8)
         )
     # keep the smoke output names populated too (frame 0)
     r0 = np.clip(
         np.asarray(
-            render_params(
-                params, eval_vms[0], eval_res, f_eval, antialiased=args.antialiased
-            )
+            render_params(params, eval_vms[0], eval_res, f_eval, antialiased=args.antialiased)
         ),
         0,
         1,
@@ -581,9 +517,7 @@ def run_quality(args: argparse.Namespace) -> dict:
         "ms_per_step": round(wall / args.steps * 1000, 3),
         "init_eval_psnr": round(p0, 3),
         "final_eval_psnr": round(ep_final, 3),
-        "per_frame_psnr": {
-            fi: round(x, 3) for fi, x in zip(args.eval_frames, per_frame)
-        },
+        "per_frame_psnr": {fi: round(x, 3) for fi, x in zip(args.eval_frames, per_frame)},
         "hparams": {
             k: getattr(args, k)
             for k in (
@@ -619,9 +553,8 @@ def run_quality(args: argparse.Namespace) -> dict:
     return out
 
 
-def _plot_curve(
-    curve: list[dict], ft_start: int | None, wall: float, final: float
-) -> None:
+def _plot_curve(curve: list[dict], ft_start: int | None, wall: float, final: float) -> None:
+    """Plot and save the lego quality PSNR curve."""
     steps = [c["step"] for c in curve]
     ps = [c["eval_psnr"] for c in curve]
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -641,10 +574,9 @@ def _plot_curve(
 
 
 def main() -> None:
+    """Parse CLI args and dispatch smoke or quality training."""
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--quality", action="store_true", help="run the Phase 6d MCMC recipe"
-    )
+    ap.add_argument("--quality", action="store_true", help="run the Phase 6d MCMC recipe")
     ap.add_argument("--n", type=int, default=None)
     ap.add_argument("--res", type=int, default=400)
     ap.add_argument("--steps", type=int, default=None)
@@ -654,16 +586,10 @@ def main() -> None:
         action="store_true",
         help="Mip-Splatting opacity compensation (gsplat rasterize_mode=antialiased)",
     )
-    ap.add_argument(
-        "--out-ply", help="optional path to save the fitted splats as a 3DGS .ply"
-    )
+    ap.add_argument("--out-ply", help="optional path to save the fitted splats as a 3DGS .ply")
     # quality-only knobs (gsplat-derived defaults)
-    ap.add_argument(
-        "--res-ft", type=int, default=800, help="fine-tune resolution (tail)"
-    )
-    ap.add_argument(
-        "--ft-frac", type=float, default=0.25, help="fraction of steps at res-ft"
-    )
+    ap.add_argument("--res-ft", type=int, default=800, help="fine-tune resolution (tail)")
+    ap.add_argument("--ft-frac", type=float, default=0.25, help="fraction of steps at res-ft")
     ap.add_argument("--eval-res", type=int, default=800)
     ap.add_argument("--eval-frames", type=int, nargs="+", default=[0, 25, 50])
     ap.add_argument("--eval-every", type=int, default=200)

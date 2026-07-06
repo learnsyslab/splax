@@ -1,4 +1,4 @@
-"""PLY export round-trips and the inference/training split parity.
+"""PLY export round-trips, asset fetching, and the inference/training split parity.
 
 ``splax.io.write_ply`` must be the exact inverse of ``splax.io.load_ply``.
 Two round-trips assert that:
@@ -9,19 +9,30 @@ Two round-trips assert that:
 
 plus that ``splax.inference.render`` and ``splax.training.render`` produce the
 identical forward image (the split is numerically zero-cost).
+
+``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral
+port: download, cache hit, force re-download, sha256 verification, and the
+``SPLAX_CACHE`` environment fallback.
 """
 
 from __future__ import annotations
 
+import hashlib
+import http.server
+import threading
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 
 import splax
-from splax import load_ply
+from splax.io import fetch, load_ply
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Array:
@@ -52,11 +63,7 @@ class _RenderKw(TypedDict):
     clip_thresh: float
 
 
-RENDER_KW: _RenderKw = {
-    "background": jnp.ones(3),
-    "glob_scale": 1.0,
-    "clip_thresh": 0.01,
-}
+RENDER_KW: _RenderKw = {"background": jnp.ones(3), "glob_scale": 1.0, "clip_thresh": 0.01}
 
 
 def _render(
@@ -97,7 +104,7 @@ def test_write_ply_is_load_ply_inverse(tmp_path: Path) -> None:
     """Random splats through write_ply then load_ply reproduce the render-space inputs."""
     means, scales, quats, colors, opac = _random_splats(seed=0, n=5000)
     out = tmp_path / "rand.ply"
-    splax.write_ply(out, means, scales, quats, colors, opac)
+    splax.io.write_ply(out, means, scales, quats, colors, opac)
 
     lm, ls, lq, lc, lo = (np.asarray(x) for x in load_ply(out))
 
@@ -114,13 +121,11 @@ def test_ply_render_roundtrip(tmp_path: Path) -> None:
     """Fit-free: load lego.ply, write copy, reload, identical render."""
     splats = load_ply(LEGO_PLY)
     copy = tmp_path / "lego_copy.ply"
-    splax.write_ply(copy, *splats)
+    splax.io.write_ply(copy, *splats)
     splats2 = load_ply(copy)
 
     center = np.asarray(splats[0].mean(axis=0))
-    radius = float(
-        np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90)
-    )
+    radius = float(np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
     viewmat = lookat_viewmats(center, radius, 1)[0]
 
     H = W = 200
@@ -136,9 +141,7 @@ def test_inference_equals_training_forward() -> None:
     """The split is numerically zero-cost: identical forward image."""
     splats = load_ply(LEGO_PLY)
     center = np.asarray(splats[0].mean(axis=0))
-    radius = float(
-        np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90)
-    )
+    radius = float(np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
     viewmat = lookat_viewmats(center, radius, 1)[0]
     means, scales, quats, colors, opac = splats
 
@@ -168,3 +171,105 @@ def test_inference_equals_training_forward() -> None:
         **RENDER_KW,
     )
     np.testing.assert_array_equal(np.asarray(inf_img), np.asarray(train_img))
+
+
+@pytest.fixture
+def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
+    """Serve ``tmp_path/srv`` over HTTP on 127.0.0.1 with an ephemeral port.
+
+    Yields (served directory, base url, list of requested paths).
+    """
+    srv_dir = tmp_path / "srv"
+    srv_dir.mkdir()
+    requests: list[str] = []
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args: object, **kwargs: object):
+            super().__init__(*args, directory=str(srv_dir), **kwargs)
+
+        def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+            requests.append(self.path)
+            super().do_GET()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass  # Keep pytest output clean.
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    yield srv_dir, url, requests
+    server.shutdown()
+    server.server_close()
+
+
+def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+    """First fetch downloads the file into the cache dir with matching bytes."""
+    srv_dir, url, _ = file_server
+    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+    cache = tmp_path / "cache"
+
+    path = fetch(f"{url}/scene.ply", cache=cache)
+
+    assert path.parent == cache
+    assert path.name.endswith("-scene.ply")
+    assert path.read_bytes() == b"splat bytes"
+
+
+def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+    """Second fetch returns the same path without touching the network."""
+    srv_dir, url, requests = file_server
+    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+    cache = tmp_path / "cache"
+
+    first = fetch(f"{url}/scene.ply", cache=cache)
+    assert len(requests) == 1
+    second = fetch(f"{url}/scene.ply", cache=cache)
+
+    assert second == first
+    assert len(requests) == 1  # No new request on the cache hit.
+
+
+def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+    """force=True re-downloads and overwrites the cached copy."""
+    srv_dir, url, _ = file_server
+    (srv_dir / "scene.ply").write_bytes(b"old bytes")
+    cache = tmp_path / "cache"
+
+    path = fetch(f"{url}/scene.ply", cache=cache)
+    (srv_dir / "scene.ply").write_bytes(b"new bytes")
+    assert fetch(f"{url}/scene.ply", cache=cache).read_bytes() == b"old bytes"
+
+    forced = fetch(f"{url}/scene.ply", cache=cache, force=True)
+
+    assert forced == path
+    assert forced.read_bytes() == b"new bytes"
+
+
+def test_fetch_sha256(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+    """A correct digest passes, a wrong one raises and leaves no cached file."""
+    srv_dir, url, _ = file_server
+    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+    cache = tmp_path / "cache"
+    digest = hashlib.sha256(b"splat bytes").hexdigest()
+
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        fetch(f"{url}/scene.ply", sha256="0" * 64, cache=cache)
+    assert not any(cache.iterdir())  # No final file, no leftover temp file.
+
+    path = fetch(f"{url}/scene.ply", sha256=digest, cache=cache)
+    assert path.read_bytes() == b"splat bytes"
+
+
+def test_fetch_env_cache(
+    file_server: tuple[Path, str, list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an explicit cache the file lands in $SPLAX_CACHE."""
+    srv_dir, url, _ = file_server
+    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+    env_cache = tmp_path / "env_cache"
+    monkeypatch.setenv("SPLAX_CACHE", str(env_cache))
+
+    path = fetch(f"{url}/scene.ply")
+
+    assert path.parent == env_cache
+    assert path.read_bytes() == b"splat bytes"

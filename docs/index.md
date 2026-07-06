@@ -14,7 +14,7 @@ splax renders and trains 3D gaussian splats inside JAX. Projection, rasterizatio
 import jax.numpy as jnp
 import splax
 
-means, scales, quats, colors, opacities = splax.load_ply("scene.ply")
+means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
 img = splax.inference.render(
     means, scales, quats, colors, opacities, viewmat=viewmat,
     background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),

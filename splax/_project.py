@@ -15,7 +15,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import warp as wp
-from warp.jax_experimental.ffi import jax_callable, JaxCallableGraphMode
+from warp.jax_experimental.ffi import JaxCallableGraphMode, jax_callable
 
 from splax._intersect import (
     ALPHA_THRESHOLD,
@@ -205,17 +205,7 @@ def _project_kernel(
     ty = tz * wp.min(lim_y, wp.max(-lim_y, ty / tz))
     rz = 1.0 / tz
     rz2 = rz * rz
-    J = wp.mat33(
-        fx * rz,
-        0.0,
-        -fx * tx * rz2,
-        0.0,
-        fy * rz,
-        -fy * ty * rz2,
-        0.0,
-        0.0,
-        0.0,
-    )
+    J = wp.mat33(fx * rz, 0.0, -fx * tx * rz2, 0.0, fy * rz, -fy * ty * rz2, 0.0, 0.0, 0.0)
     T = J * W
     cov = T * V3 * wp.transpose(T)
     # 0.3 px screen-space dilation, the standard 3DGS low-pass guard
@@ -256,9 +246,7 @@ def _project_kernel(
         or center_y - radius_y >= wp.float32(img_h)
     ):
         return
-    setup = _ellipse_setup(
-        conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y
-    )
+    setup = _ellipse_setup(conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y)
     count = _ellipse_tile_count(setup)
     if count <= 0:
         return
@@ -352,10 +340,7 @@ def _project_launch(
 # array dim, and the callable launches once over B*N. A non-vmapped call keeps
 # base rank and reduces to the unbatched path exactly.
 _project_ffi = jax_callable(
-    _project_launch,
-    num_outputs=6,
-    graph_mode=JaxCallableGraphMode.WARP,
-    vmap_method="expand_dims",
+    _project_launch, num_outputs=6, graph_mode=JaxCallableGraphMode.WARP, vmap_method="expand_dims"
 )
 
 
@@ -427,17 +412,7 @@ def _recompute_geom(
     g.tz = tz
     g.rz2 = rz2
     g.rz3 = rz2 * rz
-    J = wp.mat33(
-        fx * rz,
-        0.0,
-        -fx * tx * rz2,
-        0.0,
-        fy * rz,
-        -fy * ty * rz2,
-        0.0,
-        0.0,
-        0.0,
-    )
+    J = wp.mat33(fx * rz, 0.0, -fx * tx * rz2, 0.0, fy * rz, -fy * ty * rz2, 0.0, 0.0, 0.0)
     g.J = J
     g.T = J * W
     R = _quat_to_rotmat(quat)
@@ -486,13 +461,8 @@ def _vcov2d_from_conic(conic: wp.vec3, v_conic: wp.vec3) -> wp.vec3:
 
 @wp.func
 def _proj_vjp(
-    g: _Geom,
-    fx: wp.float32,
-    fy: wp.float32,
-    v_xy: wp.vec2,
-    v_depth: wp.float32,
-    vcov2d: wp.vec3,
-):
+    g: _Geom, fx: wp.float32, fy: wp.float32, v_xy: wp.vec2, v_depth: wp.float32, vcov2d: wp.vec3
+) -> tuple[wp.vec3, wp.mat33, wp.mat33]:
     # Returns (v_p, v_T, v_V). v_p is the gradient wrt the camera-space position
     # (pixel + depth + EWA terms), used by the world-mean grad and the viewmat
     # translation grad. v_T is the gradient wrt T = J W, used by the viewmat
@@ -512,15 +482,7 @@ def _proj_vjp(
     # the depth cotangent adds onto the z component of the position grad
     vvz = vvz + v_depth
     v_cov = wp.mat33(
-        vcov2d[0],
-        0.5 * vcov2d[1],
-        0.0,
-        0.5 * vcov2d[1],
-        vcov2d[2],
-        0.0,
-        0.0,
-        0.0,
-        0.0,
+        vcov2d[0], 0.5 * vcov2d[1], 0.0, 0.5 * vcov2d[1], vcov2d[2], 0.0, 0.0, 0.0, 0.0
     )
     Tt = wp.transpose(g.T)
     v_V = Tt * v_cov * g.T
@@ -539,7 +501,9 @@ def _proj_vjp(
 
 
 @wp.func
-def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float32):
+def _scale_quat_vjp(
+    g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float32
+) -> tuple[wp.vec3, wp.vec4]:
     # Returns (v_scale, v_quat)
     vc0 = v_V[0, 0]
     vc1 = v_V[0, 1] + v_V[1, 0]
@@ -547,17 +511,7 @@ def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float
     vc3 = v_V[1, 1]
     vc4 = v_V[1, 2] + v_V[2, 1]
     vc5 = v_V[2, 2]
-    v_Vc = wp.mat33(
-        vc0,
-        0.5 * vc1,
-        0.5 * vc2,
-        0.5 * vc1,
-        vc3,
-        0.5 * vc4,
-        0.5 * vc2,
-        0.5 * vc4,
-        vc5,
-    )
+    v_Vc = wp.mat33(vc0, 0.5 * vc1, 0.5 * vc2, 0.5 * vc1, vc3, 0.5 * vc4, 0.5 * vc2, 0.5 * vc4, vc5)
     v_M = (v_Vc * g.M) * 2.0
     R = g.R
     v_scale = wp.vec3(
@@ -581,9 +535,7 @@ def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float
     y = quat[2]
     z = quat[3]
     vq_w = 2.0 * (
-        x * (v_R[2, 1] - v_R[1, 2])
-        + y * (v_R[0, 2] - v_R[2, 0])
-        + z * (v_R[1, 0] - v_R[0, 1])
+        x * (v_R[2, 1] - v_R[1, 2]) + y * (v_R[0, 2] - v_R[2, 0]) + z * (v_R[1, 0] - v_R[0, 1])
     )
     vq_x = 2.0 * (
         -2.0 * x * (v_R[1, 1] + v_R[2, 2])
@@ -607,7 +559,7 @@ def _scale_quat_vjp(g: _Geom, quat: wp.vec4, v_V: wp.mat33, glob_scale: wp.float
 
 
 @wp.func
-def _load_W_trans(viewmat: wp.array2d[wp.float32], vb: wp.int32):
+def _load_W_trans(viewmat: wp.array2d[wp.float32], vb: wp.int32) -> tuple[wp.mat33, wp.vec3]:
     # Upper-left 3x3 W and translation from the viewmat row block starting at vb
     W = wp.mat33(
         viewmat[vb + 0, 0],
@@ -625,7 +577,7 @@ def _load_W_trans(viewmat: wp.array2d[wp.float32], vb: wp.int32):
 
 
 @wp.func
-def _view_grad(g: _Geom, mean: wp.vec3, v_p: wp.vec3, v_T: wp.mat33):
+def _view_grad(g: _Geom, mean: wp.vec3, v_p: wp.vec3, v_T: wp.mat33) -> tuple[wp.mat33, wp.vec3]:
     # v_R = outer(v_p, mean) + J^T v_T and v_trans = v_p, see header derivation
     v_R = wp.outer(v_p, mean) + wp.transpose(g.J) * v_T
     return v_R, v_p
@@ -746,13 +698,9 @@ def _project_bwd_viewmat_kernel(
         vb = wp.where(sel_view, image_id, 0) * 4
         mean = means3d[m_idx]
         W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(
-            mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy
-        )
+        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
         vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
-        v_p, v_T, _v_V = _proj_vjp(
-            g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d
-        )
+        v_p, v_T, _v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
         v_R, v_t = _view_grad(g, mean, v_p, v_T)
     ob = image_id * 4
     for i in range(3):
@@ -819,13 +767,9 @@ def _project_bwd_joint_kernel(
         vb = wp.where(sel_view, image_id, 0) * 4
         mean = means3d[m_idx]
         W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(
-            mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy
-        )
+        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
         vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
-        v_p, v_T, v_V = _proj_vjp(
-            g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d
-        )
+        v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
         v_mean3d[idx] = wp.transpose(g.W) * v_p
         vs, vq = _scale_quat_vjp(g, quats[q_idx], v_V, glob_scale)
         v_scale[idx] = vs
@@ -864,7 +808,7 @@ def _bwd_selectors(
     # the geometry is fully batched, e.g. the depth cotangent of an image loss.
     def sel(a: "wp.array | wp.array2d[wp.float32]", base: int) -> bool:
         # every operand is a real wp.array at runtime, array2d is a stub-only alias
-        return cast(wp.array, a).shape[0] > base
+        return cast("wp.array", a).shape[0] > base
 
     return (
         sel(means3d, n),
@@ -899,9 +843,7 @@ def _project_bwd_gaussians_launch(
 ) -> None:
     n = num_gaussians
     B = v_mean3d.shape[0] // n
-    sels = _bwd_selectors(
-        n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic
-    )
+    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
     v_mean3d.zero_()
     v_scale.zero_()
     v_quat.zero_()
@@ -947,9 +889,7 @@ def _project_bwd_viewmat_launch(
 ) -> None:
     n = num_gaussians
     B = v_viewmat.shape[0] // 4
-    sels = _bwd_selectors(
-        n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic
-    )
+    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
     v_viewmat.zero_()
     blocks_per_image = (n + _BWD_BLOCK - 1) // _BWD_BLOCK
     wp.launch_tiled(
@@ -999,9 +939,7 @@ def _project_bwd_joint_launch(
 ) -> None:
     n = num_gaussians
     B = v_mean3d.shape[0] // n
-    sels = _bwd_selectors(
-        n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic
-    )
+    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
     v_mean3d.zero_()
     v_scale.zero_()
     v_quat.zero_()
@@ -1137,16 +1075,14 @@ def _project_fwd_rule(
     # tile counts. The opacity gradient flows through rasterize.
     m, s, q = mean3ds.value, scales.value, quats.value
     vm, op = viewmat.value, opac.value
-    pert_gaussians = (
-        () if (mean3ds.perturbed or scales.perturbed or quats.perturbed) else None
-    )
+    pert_gaussians = () if (mean3ds.perturbed or scales.perturbed or quats.perturbed) else None
     pert_viewmat = () if viewmat.perturbed else None
     out = _project_call(m, s, q, vm, op, n, img_shape, f, c, glob_scale, clip_thresh)
     _xys, _depths, radii, conics, _nth, _cum = out
     return out, (m, s, q, vm, radii, conics, pert_gaussians, pert_viewmat)
 
 
-def _materialize(ct: object) -> jax.Array:
+def _materialize(ct: jax.Array | jax.custom_derivatives.SymbolicZero) -> jax.Array:
     # symbolic_zeros hands the backward rule SymbolicZero objects for cotangents
     # not involved in differentiation, e.g. the depth channel under a plain image
     # loss. The Warp kernels need concrete arrays, so those become dense zeros of
@@ -1154,7 +1090,7 @@ def _materialize(ct: object) -> jax.Array:
     # the zeros away.
     if isinstance(ct, jax.custom_derivatives.SymbolicZero):
         return jnp.zeros(ct.aval.shape, ct.aval.dtype)
-    return cast(jax.Array, ct)
+    return cast("jax.Array", ct)
 
 
 def _project_bwd_rule(
@@ -1216,20 +1152,7 @@ def _project_bwd_rule(
         )
     elif pert_gaussians is not None:
         v_mean, v_scale, v_quat = _project_bwd_gaussians_ffi(
-            m,
-            s,
-            q,
-            vm,
-            r,
-            conics,
-            vx,
-            vd,
-            vc,
-            int(n),
-            fx,
-            fy,
-            float(glob_scale),
-            output_dims=n,
+            m, s, q, vm, r, conics, vx, vd, vc, int(n), fx, fy, float(glob_scale), output_dims=n
         )
     return (v_mean, v_scale, v_quat, v_viewmat, None)
 
@@ -1249,28 +1172,14 @@ def _project_differentiable(
     clip_thresh: float,
 ) -> _ProjOut:
     return _project_call(
-        mean3ds,
-        scales,
-        quats,
-        viewmat,
-        opac,
-        n,
-        img_shape,
-        f,
-        c,
-        glob_scale,
-        clip_thresh,
+        mean3ds, scales, quats, viewmat, opac, n, img_shape, f, c, glob_scale, clip_thresh
     )
 
 
-_project_differentiable.defvjp(
-    _project_fwd_rule, _project_bwd_rule, symbolic_zeros=True
-)
+_project_differentiable.defvjp(_project_fwd_rule, _project_bwd_rule, symbolic_zeros=True)
 
 
-def opacity_compensation(
-    conics: jax.Array, radii: jax.Array, eps: float = 0.3
-) -> jax.Array:
+def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) -> jax.Array:
     """Mip-Splatting anti-aliased opacity compensation factor per gaussian.
 
     The factor is sqrt(det(cov2d) / det(cov2d + eps I)), the det ratio of the

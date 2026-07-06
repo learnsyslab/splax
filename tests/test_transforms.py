@@ -19,9 +19,9 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import splax
@@ -36,9 +36,7 @@ class _KW(TypedDict):
     c: tuple[float, float]
 
 
-def _scene(
-    n: int, seed: int = 0
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def _scene(n: int, seed: int = 0) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     k = jax.random.split(jax.random.key(seed), 5)
     means = jax.random.normal(k[0], (n, 3)) * 0.5
     scales = jax.random.uniform(k[1], (n, 3), minval=0.02, maxval=0.08)
@@ -50,9 +48,7 @@ def _scene(
 
 
 def _kw(H: int, W: int) -> _KW:
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return {
         "viewmat": vm,
         "background": jnp.zeros(3),
@@ -62,9 +58,7 @@ def _kw(H: int, W: int) -> _KW:
     }
 
 
-def _euler_T(
-    rx: float, ry: float, rz: float, t: tuple[float, float, float]
-) -> np.ndarray:
+def _euler_T(rx: float, ry: float, rz: float, t: tuple[float, float, float]) -> np.ndarray:
     """4x4 rigid transform from XYZ Euler angles in radians plus a translation."""
 
     def rot(axis: int, a: float) -> np.ndarray:
@@ -153,14 +147,7 @@ def test_projection_matches_manual_transform() -> None:
     args = (n, kw["img_shape"], kw["f"], kw["c"], 1.0, 0.01)
     tf_ids = jnp.full((n,), -1, jnp.int32).at[:1000].set(0)
     a = _project_call(
-        means,
-        scales,
-        quats,
-        kw["viewmat"],
-        opac.reshape(n),
-        *args,
-        jnp.asarray(T)[None],
-        tf_ids,
+        means, scales, quats, kw["viewmat"], opac.reshape(n), *args, jnp.asarray(T)[None], tf_ids
     )
     m2, q2 = _manual_move(means, quats, T, 0, 1000)
     b = _project_call(m2, scales, q2, kw["viewmat"], opac.reshape(n), *args)
@@ -168,20 +155,15 @@ def test_projection_matches_manual_transform() -> None:
     ra, rb = np.asarray(a[2]).ravel(), np.asarray(b[2]).ravel()
     np.testing.assert_array_equal(ra > 0, rb > 0)
     live = ra > 0
-    np.testing.assert_allclose(
-        np.asarray(a[0])[live], np.asarray(b[0])[live], atol=5e-2
-    )
+    np.testing.assert_allclose(np.asarray(a[0])[live], np.asarray(b[0])[live], atol=5e-2)
     np.testing.assert_allclose(
         np.asarray(a[1]).ravel()[live], np.asarray(b[1]).ravel()[live], atol=1e-3
     )
-    np.testing.assert_allclose(
-        np.asarray(a[3])[live], np.asarray(b[3])[live], atol=1e-3
-    )
+    np.testing.assert_allclose(np.asarray(a[3])[live], np.asarray(b[3])[live], atol=1e-3)
 
 
 def test_render_matches_manual_transform() -> None:
-    """Full render vs the manual reference, bounded perceptually. Rounding flips
-    a handful of pixels at blend cull and order boundaries."""
+    """Match transformed render against manual reference."""
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=3)
     kw = _kw(128, 128)
@@ -209,14 +191,11 @@ def test_render_matches_manual_transform() -> None:
 
 
 def test_vmap_over_transforms_matches_sequential() -> None:
-    """One shared splat, per-batch transforms. vmap equals the sequential loop
-    bit-exactly, every element moves the slice differently."""
+    """Match vmap transform output against sequential output."""
     n, B = 4000, 3
     means, scales, quats, colors, opac = _scene(n, seed=4)
     kw = _kw(96, 96)
-    Ts = np.stack(
-        [_euler_T(0.0, 0.0, 0.3 * i, (0.05 * i, -0.03 * i, 0.0)) for i in range(B)]
-    )
+    Ts = np.stack([_euler_T(0.0, 0.0, 0.3 * i, (0.05 * i, -0.03 * i, 0.0)) for i in range(B)])
     tfs = jnp.asarray(Ts)[:, None]  # (B, 1, 4, 4)
 
     def render_tf(tf: jax.Array) -> jax.Array:
@@ -239,8 +218,7 @@ def test_vmap_over_transforms_matches_sequential() -> None:
 
 
 def test_two_objects_move_independently() -> None:
-    """Two slices with distinct transforms equal the manual reference applying
-    both, and swapping the transforms changes the image."""
+    """Move two slices independently and match the manual reference."""
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=5)
     kw = _kw(128, 128)
@@ -288,9 +266,7 @@ def test_invalid_transform_inputs_raise() -> None:
     eye = jnp.eye(4, dtype=jnp.float32)[None]
 
     with pytest.raises(ValueError, match="together"):
-        splax.inference.render(
-            means, scales, quats, colors, opac, **kw, gaussian_transforms=eye
-        )
+        splax.inference.render(means, scales, quats, colors, opac, **kw, gaussian_transforms=eye)
     with pytest.raises(ValueError, match="does not match"):
         splax.inference.render(
             means,

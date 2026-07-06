@@ -40,26 +40,28 @@ from __future__ import annotations
 import argparse
 import json
 import struct
-import sys
 import time
-from collections.abc import Callable, Hashable
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO, cast
 
 import dm_pix
 import imageio.v3 as iio
+import jax
+import jax.numpy as jnp
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import jax
-import jax.numpy as jnp
 import optax
 from scipy.spatial import KDTree
 
+import splax
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Hashable
+
+
 matplotlib.use("Agg")
 
-sys.path.insert(0, str(Path(__file__).parent))
-import splax
 
 # --------------------------------------------------------------------------- #
 # COLMAP binary readers (hand-parsed; format per colmap/scripts/read_write_model)
@@ -83,9 +85,7 @@ def _r(f: BinaryIO, fmt: str) -> tuple:
     return struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))
 
 
-def read_cameras(
-    path: str | Path,
-) -> dict[int, tuple[str, int, int, tuple[float, ...]]]:
+def read_cameras(path: str | Path) -> dict[int, tuple[str, int, int, tuple[float, ...]]]:
     """Return {camera_id: (model_name, w, h, params-tuple)}."""
     cams = {}
     with open(path, "rb") as f:
@@ -155,11 +155,7 @@ def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]
             xyz.append((x, y, z))
             rgb.append((rr, gg, bb))
             ids.append(pid)
-    return (
-        np.asarray(xyz, np.float64),
-        np.asarray(rgb, np.uint8),
-        np.asarray(ids, np.int64),
-    )
+    return (np.asarray(xyz, np.float64), np.asarray(rgb, np.uint8), np.asarray(ids, np.int64))
 
 
 def quat2mat(q: np.ndarray) -> np.ndarray:
@@ -189,13 +185,13 @@ def _view_depth_targets(
     max_pts: int,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Depth-reg targets for one view (survey T2): pixel coords (downscaled) + the
-    COLMAP sparse-point camera-space depths, to a fixed ``max_pts`` (mask the rest).
+    """Build depth supervision targets for one view.
 
     Returns (uv (max_pts,2) f32, depth (max_pts,) f32, mask (max_pts,) f32). The
     target depth is the sparse point's z in this camera (same normalized units as the
     rendered expected-depth channel). Off-image / behind-camera observations are
-    dropped; if more than max_pts survive, a random subset is kept."""
+    dropped; if more than max_pts survive, a random subset is kept.
+    """
     uv = np.zeros((max_pts, 2), np.float32)
     depth = np.zeros((max_pts,), np.float32)
     mask = np.zeros((max_pts,), np.float32)
@@ -207,13 +203,7 @@ def _view_depth_targets(
     z = X @ vm[:3, :3].T + vm[:3, 3]  # camera-space coords
     cam_z = z[:, 2]
     px = im["obs_xy"][ok] * r  # downscaled pixel coords (x, y)
-    valid = (
-        (cam_z > 1e-3)
-        & (px[:, 0] >= 0)
-        & (px[:, 0] < W)
-        & (px[:, 1] >= 0)
-        & (px[:, 1] < H)
-    )
+    valid = (cam_z > 1e-3) & (px[:, 0] >= 0) & (px[:, 0] < W) & (px[:, 1] >= 0) & (px[:, 1] < H)
     px, cam_z = px[valid], cam_z[valid]
     k = px.shape[0]
     if k == 0:
@@ -374,9 +364,7 @@ def init_from_points(
         # the corrected (smaller) scale too, so the seeded points sit at the target spacing.
         # Only fires when padding (n>m); the subsample branch above is untouched.
         base_ls = base_ls - np.log(n / m) / 3.0
-        jitter = (
-            rng.normal(size=(pad, 3)).astype(np.float32) * np.exp(base_ls[src])[:, None]
-        )
+        jitter = rng.normal(size=(pad, 3)).astype(np.float32) * np.exp(base_ls[src])[:, None]
         xyz_n = np.concatenate([xyz, xyz[src] + jitter], 0)
         rgb_n = np.concatenate([rgb, rgb[src]], 0)
         log_scales = np.concatenate([base_ls, base_ls[src]], 0)
@@ -406,6 +394,7 @@ def render_params(
     antialiased: bool = False,
     render_depth: bool = False,
 ) -> tuple[jax.Array, jax.Array | None]:
+    """Render one view from parameterized splats."""
     fx, fy, cx, cy = intr
     means = p["means"]
     scales = jnp.exp(p["log_scales"])
@@ -436,7 +425,8 @@ def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
     """Bilinearly sample the (H, W) depth map at pixel coords ``uv`` (K, 2) = (x, y).
 
     Pixel (j, i) center is at (j+0.5, i+0.5), so we shift by -0.5 before interpolating.
-    Out-of-range coords are clamped (masked points contribute nothing to the loss)."""
+    Out-of-range coords are clamped (masked points contribute nothing to the loss).
+    """
     H, W = D.shape
     x = jnp.clip(uv[:, 0] - 0.5, 0.0, W - 1.0)
     y = jnp.clip(uv[:, 1] - 0.5, 0.0, H - 1.0)
@@ -497,28 +487,26 @@ def apply_exposure(img: jax.Array, affine: jax.Array) -> jax.Array:
 
 
 def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
+    """Compute PSNR from two images in [0, 1]."""
     mse = float(np.mean((np.clip(np.asarray(a), 0, 1) - np.asarray(b)) ** 2))
     return -10 * np.log10(mse) if mse > 0 else float("inf")
 
 
 def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
+    """Write current parameters to a 3DGS PLY file."""
     scales = jnp.exp(params["log_scales"])
-    quats = params["quats"] / (
-        jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8
-    )
+    quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
     colors = jax.nn.sigmoid(params["colors_logit"])
     opac = jax.nn.sigmoid(params["opac_logit"])
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    splax.write_ply(path, params["means"], scales, quats, colors, opac)
+    splax.io.write_ply(path, params["means"], scales, quats, colors, opac)
     print(f"wrote {path}")
 
 
 # --------------------------------------------------------------------------- #
 # MCMC helpers (generic; mirror scripts/train_lego.py)
 # --------------------------------------------------------------------------- #
-def _reset_opt_state(
-    opt_state: optax.OptState, reset_mask: jax.Array
-) -> optax.OptState:
+def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.OptState:
     n = reset_mask.shape[0]
     keep = (~reset_mask).astype(jnp.float32)
 
@@ -544,7 +532,9 @@ def _make_step(
     exp_tx: optax.GradientTransformation | None = None,
     batch: int = 1,
 ) -> Callable:
-    """Build a jitted train step. ``bg`` is a per-step render-side background color
+    """Build a jitted train step.
+
+    ``bg`` is a per-step render-side background color
     (gsplat ``random_bkgd``; see the ``--random-bkgd`` caveat in ``main()``): unlike
     the lego trainer, COLMAP photos carry no alpha channel, so only the *render* is
     composited over ``bg`` -- the GT photo is fixed real content and is never
@@ -561,18 +551,18 @@ def _make_step(
     optimizer, the step also takes the per-image exposure table ``exp_p`` + its opt
     state + the view index ``vi``, applies that view's 3x4 affine to the render before
     the photometric terms (see ``apply_exposure``), and returns the updated table.
-    When None the exposure branch is never traced — off-path bit-identical.
+    When None the exposure branch is never traced and the off path stays bit identical.
 
     ``batch`` (survey T6, gsplat ``batch_size``): views processed per step. Every
     per-view step arg (``gt``, ``vm``, ``bg``, ``vi``, ``pts_*``) carries a leading axis
     of size ``batch``; ``per_view`` computes one view's photometric + depth terms and is
     ``jax.vmap``-ed over that axis (the shared scene ``p``/``exp_p`` are broadcast, so the
-    grad is ONE batch-native backward launch — Phase 8a). The batch's per-view L1 and
+    grad is one batch native backward launch in Phase 8a). The batch's per-view L1 and
     D-SSIM are *mean-reduced* (gsplat averages the loss over the batch); the opacity/scale
     regularizers are added once per step (they depend only on ``p``). Interactions:
     ``random_bkgd`` draws ``batch`` independent backgrounds; ``depth_loss`` stacks
     ``batch`` target sets; ``exposure-opt`` indexes ``batch`` affine rows (their grads land
-    in their own rows — the vjp of the broadcast ``exp_p`` sums per-view, and each view
+    in their own rows and the vjp of broadcast ``exp_p`` sums per-view, and each view
     touches a distinct row). At ``batch==1`` every per-view arg arrives with a leading
     1-axis holding exactly the arrays the pre-T6 single-view step received, and the
     size-1 vmap+mean is the identity, so the default path is numerically identical.
@@ -592,14 +582,7 @@ def _make_step(
         """Photometric + depth terms for ONE view (vmapped over the batch axis)."""
         if depth_loss:
             img, depth = render_params(
-                p,
-                vm,
-                H,
-                W,
-                intr,
-                background=bg,
-                antialiased=antialiased,
-                render_depth=True,
+                p, vm, H, W, intr, background=bg, antialiased=antialiased, render_depth=True
             )
             assert depth is not None
             dpred = _bilinear_sample(depth, pts_uv)
@@ -609,9 +592,7 @@ def _make_step(
             scale = jnp.sum(pts_mask * pts_depth) / npts + 1e-8
             dl = jnp.sum(pts_mask * jnp.abs(dpred - pts_depth)) / npts / scale
         else:
-            img, _ = render_params(
-                p, vm, H, W, intr, background=bg, antialiased=antialiased
-            )
+            img, _ = render_params(p, vm, H, W, intr, background=bg, antialiased=antialiased)
             dl = jnp.array(0.0, jnp.float32)
         if exp_tx is not None:
             affine = jax.lax.dynamic_index_in_dim(exp_p, vi, axis=0, keepdims=False)
@@ -631,9 +612,9 @@ def _make_step(
         pts_depth: jax.Array,
         pts_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
-        l1s, dssims, dls = jax.vmap(
-            per_view, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0)
-        )(p, exp_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask)
+        l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0))(
+            p, exp_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
+        )
         l1 = jnp.mean(l1s)  # batch-mean photometric (gsplat)
         loss = (1.0 - ssim_lambda) * l1 + ssim_lambda * jnp.mean(dssims)
         loss = loss + opacity_reg * jnp.mean(jax.nn.sigmoid(p["opac_logit"]))
@@ -661,11 +642,7 @@ def _make_step(
             )
             updates, opt_state = opt.update(grads, opt_state, p)
             # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-            return (
-                cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
-                opt_state,
-                l1,
-            )
+            return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, l1)
     else:
 
         @jax.jit
@@ -681,9 +658,7 @@ def _make_step(
             pts_uv: jax.Array,
             pts_depth: jax.Array,
             pts_mask: jax.Array,
-        ) -> tuple[
-            dict[str, jax.Array], optax.OptState, jax.Array, optax.OptState, jax.Array
-        ]:
+        ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array, optax.OptState, jax.Array]:
             (loss, l1), (grads, exp_grads) = jax.value_and_grad(
                 loss_fn, argnums=(0, 1), has_aux=True
             )(p, exp_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask)
@@ -691,9 +666,9 @@ def _make_step(
             exp_updates, exp_state = exp_tx.update(exp_grads, exp_state, exp_p)
             # apply_updates is typed as the broad optax ArrayTree; the pytrees keep their types.
             return (
-                cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
+                cast("dict[str, jax.Array]", optax.apply_updates(p, updates)),
                 opt_state,
-                cast(jax.Array, optax.apply_updates(exp_p, exp_updates)),
+                cast("jax.Array", optax.apply_updates(exp_p, exp_updates)),
                 exp_state,
                 l1,
             )
@@ -705,6 +680,7 @@ def _make_step(
 # Training
 # --------------------------------------------------------------------------- #
 def train(args: argparse.Namespace) -> dict:
+    """Train splats on a COLMAP scene and return metrics."""
     scene = load_scene(
         args.data,
         args.downscale,
@@ -724,9 +700,7 @@ def train(args: argparse.Namespace) -> dict:
         f"{scene['pts_xyz'].shape[0]} sparse points -> {args.n} gaussians"
     )
 
-    params = init_from_points(
-        scene["pts_xyz"], scene["pts_rgb"], args.n, args.init_opa, args.seed
-    )
+    params = init_from_points(scene["pts_xyz"], scene["pts_rgb"], args.n, args.init_opa, args.seed)
 
     # host-side image stacks; move one view per step (keeps GPU memory modest)
     train_imgs = scene["train_imgs"]
@@ -747,9 +721,7 @@ def train(args: argparse.Namespace) -> dict:
     def eval_psnr(idxs: list[int]) -> list[float]:
         return [
             psnr(
-                render_params(
-                    params, eval_vms[i], H, W, intr, antialiased=args.antialiased
-                )[0],
+                render_params(params, eval_vms[i], H, W, intr, antialiased=args.antialiased)[0],
                 eval_imgs[i],
             )
             for i in idxs
@@ -769,15 +741,11 @@ def train(args: argparse.Namespace) -> dict:
     # At B=1 sqrt=1 and //1 are no-ops -> the default recipe is unchanged.
     B = args.batch_size
     lr_scale = float(np.sqrt(B))
-    relocate_every = (
-        max(1, round(args.relocate_every / B)) if args.relocate_every else 0
-    )
+    relocate_every = max(1, round(args.relocate_every / B)) if args.relocate_every else 0
     refine_start = round(args.refine_start / B)
     refine_stop = args.refine_stop  # already 0.9*steps in reduced-step units
     noise_stop_iter = (
-        round(args.noise_stop_iter / B)
-        if args.noise_stop_iter > 0
-        else args.noise_stop_iter
+        round(args.noise_stop_iter / B) if args.noise_stop_iter > 0 else args.noise_stop_iter
     )
     if B > 1:
         print(
@@ -815,9 +783,7 @@ def train(args: argparse.Namespace) -> dict:
         return new, _reset_opt_state(opt_state, reset)
 
     @jax.jit
-    def add_noise(
-        p: dict[str, jax.Array], key: jax.Array, scaler: float
-    ) -> dict[str, jax.Array]:
+    def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
         m = splax.mcmc.inject_noise(
             key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler
         )
@@ -895,18 +861,10 @@ def train(args: argparse.Namespace) -> dict:
         else:
             params, opt_state, l1 = step_fn(params, opt_state, gt, vm, bg, *pt_args)
 
-        if (
-            relocate_every
-            and refine_start < it < refine_stop
-            and it % relocate_every == 0
-        ):
+        if relocate_every and refine_start < it < refine_stop and it % relocate_every == 0:
             key, sk = jax.random.split(key)
             params, opt_state = relocate(params, opt_state, sk)
-        if (
-            args.noise_lr > 0
-            and it < args.steps
-            and (noise_stop_iter < 0 or it < noise_stop_iter)
-        ):
+        if args.noise_lr > 0 and it < args.steps and (noise_stop_iter < 0 or it < noise_stop_iter):
             scaler = float(jnp.asarray(means_sched(it))) * args.noise_lr
             key, sk = jax.random.split(key)
             params = add_noise(params, sk, scaler)
@@ -927,9 +885,7 @@ def train(args: argparse.Namespace) -> dict:
 
     per_frame = eval_psnr(eval_idxs)
     ep_final = float(np.mean(per_frame))
-    print(
-        f"\nfinal held-out PSNR: {ep_final:.2f} dB  {[round(x, 2) for x in per_frame]}"
-    )
+    print(f"\nfinal held-out PSNR: {ep_final:.2f} dB  {[round(x, 2) for x in per_frame]}")
     print(
         f"{args.steps} steps / {args.n} gaussians in {wall:.1f}s "
         f"({wall / args.steps * 1000:.1f} ms/step)"
@@ -940,9 +896,7 @@ def train(args: argparse.Namespace) -> dict:
     for j, i in enumerate(eval_idxs):
         r = np.clip(
             np.asarray(
-                render_params(
-                    params, eval_vms[i], H, W, intr, antialiased=args.antialiased
-                )[0]
+                render_params(params, eval_vms[i], H, W, intr, antialiased=args.antialiased)[0]
             ),
             0,
             1,
@@ -951,9 +905,7 @@ def train(args: argparse.Namespace) -> dict:
             f"results/drone_view{j}.png",
             (np.concatenate([r, eval_imgs[i]], 1) * 255).astype(np.uint8),
         )
-        print(
-            f"  results/drone_view{j}.png  ({scene['eval_names'][i]})  {per_frame[j]:.2f} dB"
-        )
+        print(f"  results/drone_view{j}.png  ({scene['eval_names'][i]})  {per_frame[j]:.2f} dB")
 
     if args.out_ply:
         save_ply(args.out_ply, params)
@@ -983,6 +935,7 @@ def train(args: argparse.Namespace) -> dict:
 
 
 def _plot_curve(curve: list[dict], wall: float, final: float) -> None:
+    """Plot and save the held out PSNR curve."""
     steps = [c["step"] for c in curve]
     ps = [c["eval_psnr"] for c in curve]
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -998,26 +951,16 @@ def _plot_curve(curve: list[dict], wall: float, final: float) -> None:
 
 
 def main() -> None:
+    """Parse CLI args and run COLMAP training."""
     ap = argparse.ArgumentParser()
+    ap.add_argument("--data", help="COLMAP scene dir (has sparse/<i>, images/)")
     ap.add_argument(
-        "--data",
-        default="data/drone",
-        help="COLMAP scene dir (has sparse/<i>, images/)",
+        "--sparse-model", type=int, default=0, help="COLMAP sub-model index under sparse/ "
     )
-    ap.add_argument(
-        "--sparse-model",
-        type=int,
-        default=0,
-        help="COLMAP sub-model index under sparse/ (largest is not always 0)",
-    )
-    ap.add_argument("--out-ply", default="data/scenes/drone.ply")
+    ap.add_argument("--out-ply", default="data/scenes/train.ply")
     ap.add_argument("--downscale", type=int, default=4, help="image downscale factor")
-    ap.add_argument(
-        "--eval-every", type=int, default=8, help="hold out every Nth image"
-    )
-    ap.add_argument(
-        "--n-eval", type=int, default=3, help="held-out views scored/rendered"
-    )
+    ap.add_argument("--eval-every", type=int, default=8, help="hold out every Nth image")
+    ap.add_argument("--n-eval", type=int, default=3, help="held-out views scored/rendered")
     ap.add_argument("--n", type=int, default=150_000)
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument(
@@ -1076,10 +1019,7 @@ def main() -> None:
         "reports/phase8g_depth_reg.md.",
     )
     ap.add_argument(
-        "--depth-lambda",
-        type=float,
-        default=1e-2,
-        help="depth-loss weight (gsplat default 1e-2)",
+        "--depth-lambda", type=float, default=1e-2, help="depth-loss weight (gsplat default 1e-2)"
     )
     ap.add_argument(
         "--max-depth-pts",

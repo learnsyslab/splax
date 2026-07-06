@@ -23,19 +23,17 @@ whole file loudly when gsplat cannot run.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
+import numpy.typing as npt
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tests"))
-
-import _gsplat_ref as gref  # noqa: E402
 import splax  # noqa: E402
+from tests import _gsplat_ref as gref  # noqa: E402
 
 # Every test here needs the gsplat reference, fail the whole module without it.
 gref.require_working(allow_module_level=True)
@@ -61,18 +59,14 @@ PROJ_ARGS: _ProjArgs = {
 REF_ARGS = PROJ_ARGS
 
 
-def _random_inputs(
-    n: int, seed: int = 0
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+def _random_inputs(n: int, seed: int = 0) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     key = jax.random.key(seed)
     k = jax.random.split(key, 3)
     means = jax.random.normal(k[0], (n, 3))
     scales = jax.random.uniform(k[1], (n, 3), minval=0.005, maxval=0.05)
     quats = jax.random.normal(k[2], (n, 4))
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
-    viewmat = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    viewmat = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, viewmat
 
 
@@ -95,9 +89,7 @@ def _assert_parity(
     assert agree > 0.98, f"visibility agreement only {agree:.3%}"
 
     np.testing.assert_allclose(xys_s[mask], xys_g[mask], atol=atol)
-    np.testing.assert_allclose(
-        depths_s.ravel()[mask], depths_g.ravel()[mask], rtol=1e-4, atol=1e-4
-    )
+    np.testing.assert_allclose(depths_s.ravel()[mask], depths_g.ravel()[mask], rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(conics_s[mask], conics_g[mask], atol=atol, rtol=1e-3)
 
 
@@ -112,14 +104,14 @@ def test_parity_random_10k() -> None:
 def test_parity_under_jit() -> None:
     means, scales, quats, viewmat = _random_inputs(10_000, seed=2)
     opac = jnp.full((means.shape[0],), 0.99)
-    a = jax.jit(
-        lambda m, s, q, v: splax.project(m, s, q, v, opacities=opac, **PROJ_ARGS)
-    )(means, scales, quats, viewmat)
+    a = jax.jit(lambda m, s, q, v: splax.project(m, s, q, v, opacities=opac, **PROJ_ARGS))(
+        means, scales, quats, viewmat
+    )
     b = gref.project(means, scales, quats, viewmat, **REF_ARGS)
     _assert_parity(a, b)
 
 
-def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
+def _nerf_camera(frame: dict[str, npt.NDArray[np.float64]]) -> np.ndarray:
     c2w = np.array(frame["transform_matrix"], np.float64)
     c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
     return np.linalg.inv(c2w).astype(np.float32)
@@ -127,7 +119,7 @@ def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
 
 def test_parity_lego_slice() -> None:
     meta = json.loads((LEGO / "transforms_test.json").read_text())
-    means, scales, quats, _colors, _opac = splax.load_ply(ROOT / "data/scenes/lego.ply")
+    means, scales, quats, _colors, _opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
     means, scales, quats = means[:50_000], scales[:50_000], quats[:50_000]
     frame = meta["frames"][0]
     W = H = 800

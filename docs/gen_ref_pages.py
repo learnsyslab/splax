@@ -18,6 +18,7 @@ else:
     SKIP_STEMS = {"distillation", "__main__", "__pycache__"}
 
     def skip(stem: str) -> bool:
+        """Return True for modules excluded from generated docs."""
         if stem in SKIP_STEMS:
             return True
         return stem.startswith("_") and stem != "__init__"

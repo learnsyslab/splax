@@ -18,22 +18,21 @@ projecting splax's onto the same tangent space.
 
 from __future__ import annotations
 
-import sys
-import types
-from collections.abc import Callable
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tests"))
-
-import _gsplat_ref as gref  # noqa: E402
 import splax  # noqa: E402
+from tests import _gsplat_ref as gref  # noqa: E402
+
+if TYPE_CHECKING:
+    import types
+    from collections.abc import Callable
 
 
 @pytest.fixture
@@ -55,9 +54,7 @@ def _scene(
     colors = jax.random.uniform(k[3], (n, 3))
     opac = jax.random.uniform(k[4], (n, 1), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(k[5], (3,))
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
 
 
@@ -90,9 +87,9 @@ def _splax_tight(
     H: int,
     W: int,
 ) -> jax.Array:
-    return splax.render(
-        means, scales, quats, colors, opac, viewmat=vm, background=bg, **_pk(H, W)
-    )[0]
+    return splax.render(means, scales, quats, colors, opac, viewmat=vm, background=bg, **_pk(H, W))[
+        0
+    ]
 
 
 def _losses(
@@ -158,9 +155,7 @@ def test_finite_difference() -> None:
     render = _splax_tight
     w = jax.random.uniform(jax.random.key(5), (H, W, 3))
 
-    def loss(
-        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
-    ) -> jax.Array:
+    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
         # Linear, mean-reduced loss keeps the loss magnitude small (float32 render,
         # so minimal FD cancellation) while giving an O(1) gradient over all five
         # parameter arrays at once (~4800 perturbed entries).
@@ -194,9 +189,7 @@ def test_grad_under_jit() -> None:
     args = (means, scales, quats, colors, opac)
     loss = _losses(H, W)["wmse"]
 
-    def sp(
-        m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array
-    ) -> jax.Array:
+    def sp(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
         return _splax_tight(m, s, q, c, o, bg, vm, H, W)
 
     g_eager = jax.grad(loss(sp), argnums=(0, 1, 2, 3, 4))(*args)
@@ -206,10 +199,7 @@ def test_grad_under_jit() -> None:
 
 
 def test_grad_under_vmap_matches_sequential() -> None:
-    """Batch-native backward: grad under vmap over a batched gaussian input
-    must match per-sample sequential jax.grad (the batched callables are
-    vmap_method='expand_dims'). Full mixed batched/broadcast coverage across every
-    gradient selection is in test_warp_grad_batched.py."""
+    """Match vmap gaussian grads against sequential grads."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
     bmeans = means + 0.02 * jax.random.normal(jax.random.key(1), (B, n, 3))
@@ -242,24 +232,12 @@ def _render(
     W: int,
 ) -> jax.Array:
     return splax.training.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=vm,
-        background=bg,
-        **_pk(H, W),
+        means, scales, quats, colors, opac, viewmat=vm, background=bg, **_pk(H, W)
     )[0]
 
 
 def test_viewmat_finite_difference() -> None:
-    """Directional-derivative FD check of the viewmat gradient (the primary
-    validation, since gsplat's rasterization exposes no directly comparable viewmat
-    grad in this setup). Perturb the 12
-    differentiable viewmat entries along the analytic gradient direction, central
-    differences match grad.direction to a few percent (loose bound for the same
-    hard-cull discontinuities the FD test documents)."""
+    """Check viewmat gradients with directional finite differences."""
     n, H, W = 4000, 120, 120
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=11)
     w = jax.random.uniform(jax.random.key(4), (H, W, 3))
@@ -285,13 +263,7 @@ def test_viewmat_finite_difference() -> None:
 
 
 def test_grad_selection_consistency() -> None:
-    """The joint (gaussians+viewmat) backward must reproduce the gaussian-only
-    gaussian grads and the viewmat-only camera grad. Differentiating with respect to
-    only the means selects the gaussian-grad kernel, differentiating with respect to
-    (means, viewmat) selects the joint kernel. The two must agree to tight tolerance because the
-    joint kernel shares the exact vjp helpers (the tiny residual is FMA scheduling
-    under the different tile-launch geometry, ~1e-9). Likewise viewmat-only vs joint
-    for the camera grad."""
+    """Match joint kernel grads against per path kernel grads."""
     n, H, W = 3000, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=5)
     w = jax.random.uniform(jax.random.key(6), (H, W, 3))
@@ -310,10 +282,7 @@ def test_grad_selection_consistency() -> None:
 
 
 def test_pose_chain_rule_fd() -> None:
-    """jax chain rule: parametrize a pose as a 6-vector (axis-angle + translation)
-    built into a 4x4 INSIDE jax, then grad with respect to the 6-vector. It must be
-    finite and match a directional FD, validating the grad flowing from se3 to the
-    4x4 viewmat to the Warp viewmat backward."""
+    """Validate se3 chain rule gradients with finite differences."""
 
     def skew(v: jax.Array) -> jax.Array:
         return jnp.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
@@ -331,17 +300,14 @@ def test_pose_chain_rule_fd() -> None:
     xi0 = jnp.asarray(np.array([0.03, -0.02, 0.015, 0.04, -0.03, 0.02], np.float32))
 
     def loss(xi: jax.Array) -> jax.Array:
-        return jnp.mean(
-            w * _render(means, scales, quats, colors, opac, bg, se3(xi) @ vm, H, W)
-        )
+        return jnp.mean(w * _render(means, scales, quats, colors, opac, bg, se3(xi) @ vm, H, W))
 
     g = np.asarray(jax.grad(loss)(xi0))
     assert np.all(np.isfinite(g)) and np.linalg.norm(g) > 0
     d = g / (np.linalg.norm(g) + 1e-12)
     eps = 1e-3
     numeric = (
-        float(loss(xi0 + jnp.asarray(d * eps)))
-        - float(loss(xi0 - jnp.asarray(d * eps)))
+        float(loss(xi0 + jnp.asarray(d * eps))) - float(loss(xi0 - jnp.asarray(d * eps)))
     ) / (2 * eps)
     analytic = float(np.dot(g, d))
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
@@ -351,14 +317,10 @@ def test_pose_chain_rule_fd() -> None:
 
 
 def test_viewmat_grad_under_vmap_matches_sequential() -> None:
-    """The viewmat backward is batch-native. Grad under vmap over B distinct
-    camera poses recovers per-pose camera gradients matching the sequential loop, the
-    core of scripts/optimize_pose.py --batch."""
+    """Match vmap viewmat grads against sequential viewmat grads."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=9)
-    vms = jnp.broadcast_to(vm, (B, 4, 4)) + 0.02 * jax.random.normal(
-        jax.random.key(2), (B, 4, 4)
-    )
+    vms = jnp.broadcast_to(vm, (B, 4, 4)) + 0.02 * jax.random.normal(jax.random.key(2), (B, 4, 4))
     vms = vms.at[:, 3, :].set(jnp.array([0.0, 0.0, 0.0, 1.0]))
 
     def loss(v: jax.Array) -> jax.Array:

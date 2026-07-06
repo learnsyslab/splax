@@ -19,25 +19,26 @@ tests/_gsplat_ref.py.
 from __future__ import annotations
 
 import json
-import sys
-import types
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import numpy as np
+import imageio.v3 as iio
 import jax
 import jax.numpy as jnp
+import numpy as np
+import numpy.typing as npt
 import pytest
-import imageio.v3 as iio
+import warp as wp
+
+import splax
+import splax._intersect as _isect
+from splax._intersect import _bits_for_count, _map_intersects_64bit
+from tests import _gsplat_ref as gref
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tests"))
 
-import _gsplat_ref as gref  # noqa: E402
-import splax  # noqa: E402
-import splax._intersect as _isect  # noqa: E402
-import warp as wp  # noqa: E402
-from splax._intersect import _bits_for_count, _map_intersects_64bit  # noqa: E402
+if TYPE_CHECKING:
+    from types import ModuleType
 
 LEGO = ROOT / "data/nerf_synthetic/lego"
 
@@ -86,7 +87,7 @@ class _RenderKWNoView(TypedDict):
 
 
 @pytest.fixture
-def gsplat_ref() -> types.ModuleType:
+def gsplat_ref() -> ModuleType:
     """Fail the test with a clear reason when gsplat cannot run."""
     gref.require_working()
     return gref
@@ -103,9 +104,7 @@ def _random_scene(n: int, H: int, W: int, seed: int = 0) -> _Scene:
     colors = jax.random.uniform(k[3], (n, 3))
     opacities = jax.random.uniform(k[4], (n, 1))
     background = jax.random.uniform(k[5], (3,))
-    viewmat = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    viewmat = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     proj_args: _ProjKW = {
         "img_shape": (H, W),
         "f": (float(H), float(H)),
@@ -159,9 +158,7 @@ def _render_scene(
     colors = jax.random.uniform(k[3], (n, 3))
     opac = jax.random.uniform(k[4], (n, 1))
     background = jax.random.uniform(k[5], (3,))
-    vm = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     kw: _RenderKW = {
         "viewmat": vm,
         "background": background,
@@ -175,7 +172,7 @@ def _render_scene(
 
 
 @pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
-def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: types.ModuleType) -> None:
+def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: ModuleType) -> None:
     """splax.render vs gsplat.rasterization on the same scene.
 
     Different kernels (sort order, blend, opacity-aware tiling), so we bound the
@@ -224,12 +221,7 @@ def test_scratch_reuse_across_sizes() -> None:
     the same scene. A stale sort buffer or an un-zeroed tile_bins prefix would make
     the second render of a smaller scene disagree with its clean-slate render.
     """
-    configs = [
-        (200_000, 300, 400),
-        (10_000, 256, 256),
-        (100_000, 512, 512),
-        (10_000, 256, 256),
-    ]
+    configs = [(200_000, 300, 400), (10_000, 256, 256), (100_000, 512, 512), (10_000, 256, 256)]
     for n, H, W in configs:
         scene = _random_scene(n, H, W, seed=n)
         # render while scratch is warm from previous (differently sized) iterations
@@ -238,23 +230,19 @@ def test_scratch_reuse_across_sizes() -> None:
         splax.clear_scratch()
         cold = _splax_rast(scene)
         assert np.array_equal(warm, cold), (
-            f"scratch reuse changed output at n={n} {H}x{W}: "
-            f"max|d|={np.abs(warm - cold).max():.2e}"
+            f"scratch reuse changed output at n={n} {H}x{W}: max|d|={np.abs(warm - cold).max():.2e}"
         )
 
 
 def test_scratch_dropped_on_signature_change() -> None:
-    """Signature-keyed scratch: switching to a smaller workload must release the
-    big config's sort scratch instead of holding the high-water mark forever."""
+    """Test that switching to a smaller workload releases a bigger sort scratch."""
     dev = wp.get_device()
     splax.clear_scratch()
     _splax_rast(_random_scene(500_000, 1080, 1920, seed=1))
     big = wp.get_mempool_used_mem_current(dev)
     _splax_rast(_random_scene(5_000, 128, 128, seed=2))
     small = wp.get_mempool_used_mem_current(dev)
-    assert small < big * 0.5, (
-        f"scratch not released on signature change: {small} vs {big}"
-    )
+    assert small < big * 0.5, f"scratch not released on signature change: {small} vs {big}"
 
 
 # --- Packed 32-bit sort key ----------------------------------------
@@ -308,12 +296,10 @@ def test_packed_vs_64bit_random() -> None:
 
 def test_packed_vs_64bit_lego() -> None:
     """Packed vs 64-bit on the real lego scene (tight key emission)."""
-    means, scales, quats, colors, opac = splax.load_ply(ROOT / "data/scenes/lego.ply")
+    means, scales, quats, colors, opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
     H, W = 720, 1280
     viewmat = jnp.asarray(
-        np.array(
-            [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 6.0], [0, 0, 0, 1]], np.float32
-        )
+        np.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 6.0], [0, 0, 0, 1]], np.float32)
     )
     xys, depths, radii, conics, _nth, cum = splax.project(
         means,
@@ -383,26 +369,24 @@ def _norm_quats(q: jax.Array) -> jax.Array:
 
 
 def _id_viewmat(dz: float = 5.0) -> jax.Array:
-    return jnp.array(
-        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32
-    )
+    return jnp.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32)
 
 
-def _nerf_camera(frame: dict[str, object]) -> np.ndarray:
+def _nerf_camera(frame: dict[str, npt.NDArray[np.float64]]) -> np.ndarray:
     c2w = np.array(frame["transform_matrix"], np.float64)
     c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
     return np.linalg.inv(c2w).astype(np.float32)
 
 
-def test_render_lego_vs_gsplat(gsplat_ref: types.ModuleType) -> None:
-    """splax vs gsplat full render on the real lego scene, from a dataset pose.
+def test_render_lego_vs_gsplat(gsplat_ref: ModuleType) -> None:
+    """Splax vs gsplat full render on the real lego scene, from a dataset pose.
 
     A realistic-scene perceptual check to complement the random-scene parity and
     the GT-PSNR regression gate (tests/test_lego_regression.py). Different kernels,
     so bounded by PSNR rather than exactly.
     """
     meta = json.loads((LEGO / "transforms_test.json").read_text())
-    means, scales, quats, colors, opac = splax.load_ply(ROOT / "data/scenes/lego.ply")
+    means, scales, quats, colors, opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
     frame = meta["frames"][0]
     gt = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png"))
     H, W = gt.shape[:2]
@@ -432,14 +416,7 @@ def test_render_lego_vs_gsplat(gsplat_ref: types.ModuleType) -> None:
 def _project_tight(
     n: int, H: int, W: int, seed: int
 ) -> tuple[
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    tuple[int, int],
+    jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[int, int]
 ]:
     """splax.project WITH opacities gives SNUGBOX radii + AccuTile num_tiles_hit."""
     key = jax.random.key(seed)
@@ -449,9 +426,7 @@ def _project_tight(
     quats = jax.random.normal(k[2], (n, 4))
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     opacities = jax.random.uniform(k[3], (n, 1))
-    viewmat = jnp.array(
-        [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32
-    )
+    viewmat = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     pk: _ProjKW = {
         "img_shape": (H, W),
         "f": (float(H), float(H)),
@@ -491,16 +466,10 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
 
     dev = "cuda:0"
     xys_w = wp.array(np.asarray(xys), dtype=wp.vec2, device=dev)
-    depths_int = wp.array(
-        np.asarray(depths).ravel().view(np.int32), dtype=wp.int32, device=dev
-    )
-    radii_w = wp.array(
-        np.asarray(radii).ravel().astype(np.int32), dtype=wp.int32, device=dev
-    )
+    depths_int = wp.array(np.asarray(depths).ravel().view(np.int32), dtype=wp.int32, device=dev)
+    radii_w = wp.array(np.asarray(radii).ravel().astype(np.int32), dtype=wp.int32, device=dev)
     conics_w = wp.array(np.asarray(conics), dtype=wp.vec3, device=dev)
-    opac_w = wp.array(
-        np.asarray(opac).ravel().astype(np.float32), dtype=wp.float32, device=dev
-    )
+    opac_w = wp.array(np.asarray(opac).ravel().astype(np.float32), dtype=wp.float32, device=dev)
     cum_w = wp.array(cum_np.astype(np.int32), dtype=wp.int32, device=dev)
 
     SENT = np.int64(-999)
@@ -510,19 +479,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     wp.launch(
         _map_intersects_64bit,
         dim=n,
-        inputs=[
-            xys_w,
-            depths_int,
-            radii_w,
-            conics_w,
-            opac_w,
-            cum_w,
-            n,
-            n,
-            tile_n_bits,
-            tbx,
-            tby,
-        ],
+        inputs=[xys_w, depths_int, radii_w, conics_w, opac_w, cum_w, n, n, tile_n_bits, tbx, tby],
         outputs=[isect, gids],
         device=dev,
     )

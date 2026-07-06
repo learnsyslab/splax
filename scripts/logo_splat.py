@@ -31,24 +31,22 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from pathlib import Path
 from typing import cast
 
 import dm_pix
 import imageio.v3 as iio
+import jax
+import jax.numpy as jnp
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import jax
-import jax.numpy as jnp
 import optax
 from PIL import Image
 
 matplotlib.use("Agg")
 
-sys.path.insert(0, str(Path(__file__).parent))
 import splax
 
 OUT = Path("results/logo_splat")
@@ -189,6 +187,7 @@ VIEWMAT = jnp.eye(4)  # camera at origin, +z forward (OpenCV); slab sits at z~1
 
 
 def render_params(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> jax.Array:
+    """Render the current parameter state into an RGB image."""
     means = p["means"]
     scales = jnp.exp(p["log_scales"])
     quats = p["quats"] / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8)
@@ -211,18 +210,19 @@ def render_params(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> ja
 
 
 def frame(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> np.ndarray:
-    return (np.clip(np.asarray(render_params(p, H, W, bg)), 0, 1) * 255).astype(
-        np.uint8
-    )
+    """Convert a float render to uint8 RGB."""
+    return (np.clip(np.asarray(render_params(p, H, W, bg)), 0, 1) * 255).astype(np.uint8)
 
 
 def psnr(frame_u8: np.ndarray, target01: jax.Array) -> float:
+    """Compute PSNR for uint8 render against float target."""
     a = np.asarray(frame_u8, np.float32) / 255.0
     mse = float(np.mean((a - np.asarray(target01)) ** 2))
     return -10 * np.log10(mse) if mse > 0 else float("inf")
 
 
 def main() -> tuple[float, float]:
+    """Train logo splats and export progression artifacts."""
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--bg",
@@ -231,9 +231,7 @@ def main() -> tuple[float, float]:
         "the target composite and the render background",
     )
     ap.add_argument(
-        "--gif-out",
-        default=str(OUT / "logo_emerges.gif"),
-        help="output path for the animated gif",
+        "--gif-out", default=str(OUT / "logo_emerges.gif"), help="output path for the animated gif"
     )
     args = ap.parse_args()
     bg = parse_bg(args.bg)
@@ -253,9 +251,7 @@ def main() -> tuple[float, float]:
         "colors_logit": 1e-2,
         "opac_logit": 3e-2,
     }
-    opt = optax.multi_transform(
-        {k: optax.adam(v) for k, v in lrs.items()}, {k: k for k in params}
-    )
+    opt = optax.multi_transform({k: optax.adam(v) for k, v in lrs.items()}, {k: k for k in params})
     opt_state = opt.init(params)
 
     def loss_fn(p: dict[str, jax.Array]) -> jax.Array:
@@ -271,11 +267,7 @@ def main() -> tuple[float, float]:
         loss, grads = jax.value_and_grad(loss_fn)(p)
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-        return (
-            cast(dict[str, jax.Array], optax.apply_updates(p, updates)),
-            opt_state,
-            loss,
-        )
+        return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, loss)
 
     render_at = set(STRIP_STEPS) | set(candidate_steps())
     frames = {}  # step -> uint8 HxWx3
@@ -311,19 +303,15 @@ def main() -> tuple[float, float]:
 
 
 def write_progression(frames: dict[int, np.ndarray], bg: np.ndarray) -> None:
+    """Write a labeled progression strip image."""
     face = tuple(float(c) for c in bg)
     # relative luminance decides label color so titles stay readable on dark bg
-    text = (
-        "white" if (0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]) < 0.5 else "black"
-    )
+    text = "white" if (0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]) < 0.5 else "black"
     fig, axes = plt.subplots(2, 5, figsize=(15, 4.2), facecolor=face)
     for ax, s in zip(axes.ravel(), STRIP_STEPS):
         ax.imshow(frames[s])
         ax.set_title(
-            f"step {s}" if s < STEPS else f"step {s} (final)",
-            fontsize=11,
-            pad=4,
-            color=text,
+            f"step {s}" if s < STEPS else f"step {s} (final)", fontsize=11, pad=4, color=text
         )
         ax.axis("off")
     fig.suptitle("splax logo emerging from noise", fontsize=14, y=0.99, color=text)
@@ -333,12 +321,10 @@ def write_progression(frames: dict[int, np.ndarray], bg: np.ndarray) -> None:
 
 
 def write_gif(frames: dict[int, np.ndarray], gif_out: Path) -> None:
+    """Write the emergence gif with perceptual resampling."""
     kept = monotone_filter(candidate_steps(), frames)
     seq, labels, n_blend = perceptual_resample(kept, frames, GIF_N)
-    print(
-        f"gif: {len(kept)} monotone checkpoints -> {len(seq)} frames "
-        f"({n_blend} blended)"
-    )
+    print(f"gif: {len(kept)} monotone checkpoints -> {len(seq)} frames ({n_blend} blended)")
     print(f"gif frame steps: {labels}")
     seq = seq + [frames[STEPS]] * 45  # hold the final frame ~1.5 s
 
@@ -353,8 +339,7 @@ def write_gif(frames: dict[int, np.ndarray], gif_out: Path) -> None:
             break
         h2 = int(round(H * w2 / W))
         small = [
-            np.asarray(Image.fromarray(f).resize((w2, h2), Image.Resampling.LANCZOS))
-            for f in seq
+            np.asarray(Image.fromarray(f).resize((w2, h2), Image.Resampling.LANCZOS)) for f in seq
         ]
         mb = encode(small)
     print(f"gif: {len(seq)} frames incl. hold, {mb:.2f} MB")

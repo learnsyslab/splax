@@ -23,23 +23,24 @@ kernels):
   plus optional dense depth distillation against the teacher depth maps.
 
 The student parameters are in *render space* (the tensors ``splax.render`` and
-``splax.write_ply`` consume) both on input (``teacher``) and output.
+``splax.io.write_ply`` consume) both on input (``teacher``) and output.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Hashable, Mapping
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import dm_pix
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
 import splax
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Hashable, Mapping
 
 # --------------------------------------------------------------------------- #
 # teacher/params plumbing
@@ -97,9 +98,7 @@ def _lookat_viewmats(
     upv = np.broadcast_to(up, (n, 3)).astype(np.float64).copy()
     # swap in an alternate up where it is (nearly) parallel to the view direction
     par = np.abs(z @ up) > 0.99
-    upv[par] = (
-        np.array([0.0, 0.0, 1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
-    )
+    upv[par] = np.array([0.0, 0.0, 1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
     x = np.cross(upv, z)
     x /= np.linalg.norm(x, axis=1, keepdims=True) + 1e-12
     y = np.cross(z, x)
@@ -286,9 +285,7 @@ def _student_init(
         sel = np.argsort(-opac1)[:n_student]
         return {
             "means": jnp.asarray(means[sel], jnp.float32),
-            "log_scales": jnp.asarray(
-                np.log(np.clip(scales[sel], 1e-8, None)), jnp.float32
-            ),
+            "log_scales": jnp.asarray(np.log(np.clip(scales[sel], 1e-8, None)), jnp.float32),
             "quats": jnp.asarray(quats[sel], jnp.float32),
             "colors_logit": jnp.asarray(_logit(colors[sel]), jnp.float32),
             "opac_logit": jnp.asarray(_logit(opac1[sel])[:, None], jnp.float32),
@@ -306,9 +303,7 @@ def _student_init(
             "log_scales": jnp.asarray(ls),
             "quats": jnp.asarray(q),
             "colors_logit": jnp.asarray(_logit(col)),
-            "opac_logit": jnp.full(
-                (n_student, 1), float(_logit(np.array(init_opa))), jnp.float32
-            ),
+            "opac_logit": jnp.full((n_student, 1), float(_logit(np.array(init_opa))), jnp.float32),
         }
     raise ValueError(f"unknown init {init!r} (expected 'prune' or 'random')")
 
@@ -349,8 +344,7 @@ def _to_render_space(p: dict[str, jax.Array]) -> dict[str, jax.Array]:
     return {
         "means": p["means"],
         "scales": jnp.exp(p["log_scales"]),
-        "quats": p["quats"]
-        / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8),
+        "quats": p["quats"] / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8),
         "colors": jax.nn.sigmoid(p["colors_logit"]),
         "opacities": jax.nn.sigmoid(p["opac_logit"]),
     }
@@ -359,9 +353,7 @@ def _to_render_space(p: dict[str, jax.Array]) -> dict[str, jax.Array]:
 # --------------------------------------------------------------------------- #
 # training step
 # --------------------------------------------------------------------------- #
-def _reset_opt_state(
-    opt_state: optax.OptState, reset_mask: jax.Array
-) -> optax.OptState:
+def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.OptState:
     n = reset_mask.shape[0]
     keep = (~reset_mask).astype(jnp.float32)
 
@@ -383,10 +375,7 @@ def _make_step(
     scale_reg: float,
     depth_lambda: float,
 ) -> Callable:
-    """Jitted train step mirroring ``scripts/train_colmap.py``'s step builder, with
-    optional *dense* depth distillation (masked, scale-normalized L1 between the
-    student and teacher expected-depth maps) in place of the sparse-point depth loss.
-    """
+    """Build a jitted distillation train step."""
     depth_on = depth_lambda > 0.0
 
     def per_view(
@@ -409,9 +398,7 @@ def _make_step(
     def loss_fn(
         p: dict[str, jax.Array], gt: jax.Array, vm: jax.Array, gt_depth: jax.Array
     ) -> tuple[jax.Array, jax.Array]:
-        l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, 0, 0, 0))(
-            p, gt, vm, gt_depth
-        )
+        l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, 0, 0, 0))(p, gt, vm, gt_depth)
         l1 = jnp.mean(l1s)
         loss = (1.0 - ssim_lambda) * l1 + ssim_lambda * jnp.mean(dssims)
         loss = loss + opacity_reg * jnp.mean(jax.nn.sigmoid(p["opac_logit"]))
@@ -428,12 +415,10 @@ def _make_step(
         vm: jax.Array,
         gt_depth: jax.Array,
     ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
-        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-            p, gt, vm, gt_depth
-        )
+        (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(p, gt, vm, gt_depth)
         updates, opt_state = opt.update(grads, opt_state, p)
         # apply_updates is typed as the broad optax ArrayTree, the params stay a dict
-        new_p = cast(dict[str, jax.Array], optax.apply_updates(p, updates))
+        new_p = cast("dict[str, jax.Array]", optax.apply_updates(p, updates))
         return new_p, opt_state, l1
 
     return step
@@ -516,9 +501,7 @@ def distill(
     opt = optax.multi_transform(txs, {k: k for k in params})
     opt_state = opt.init(params)
     binoms = splax.mcmc.make_binoms(51)
-    step_fn = _make_step(
-        opt, H, W, intr, ssim_lambda, opacity_reg, scale_reg, depth_lambda
-    )
+    step_fn = _make_step(opt, H, W, intr, ssim_lambda, opacity_reg, scale_reg, depth_lambda)
 
     @jax.jit
     def relocate(
@@ -537,9 +520,7 @@ def distill(
         return new, _reset_opt_state(opt_state, reset)
 
     @jax.jit
-    def add_noise(
-        p: dict[str, jax.Array], key: jax.Array, scaler: float
-    ) -> dict[str, jax.Array]:
+    def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
         m = splax.mcmc.inject_noise(
             key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler
         )
@@ -567,11 +548,7 @@ def distill(
         if rel_every and ref_start < it < refine_stop and it % rel_every == 0:
             key, sk = jax.random.split(key)
             params, opt_state = relocate(params, opt_state, sk)
-        if (
-            noise_lr > 0
-            and it < steps
-            and (noise_stop_iter < 0 or it < noise_stop_iter)
-        ):
+        if noise_lr > 0 and it < steps and (noise_stop_iter < 0 or it < noise_stop_iter):
             scaler = float(jnp.asarray(means_sched(it))) * noise_lr
             key, sk = jax.random.split(key)
             params = add_noise(params, sk, scaler)
@@ -580,9 +557,7 @@ def distill(
             l1.block_until_ready()
             entry = {"step": it, "train_l1": round(float(l1), 5)}
             if eval_hook is not None:
-                entry["eval_psnr"] = round(
-                    float(eval_hook(_to_render_space(params))), 3
-                )
+                entry["eval_psnr"] = round(float(eval_hook(_to_render_space(params))), 3)
             curve.append(entry)
     wall = time.perf_counter() - t0
 

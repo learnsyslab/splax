@@ -24,9 +24,10 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import warp as wp
-from warp.jax_experimental.ffi import jax_callable, JaxCallableGraphMode
+from warp.jax_experimental.ffi import JaxCallableGraphMode, jax_callable
 
 from splax._intersect import (
+    _MINMAX_CHUNK,
     BLOCK_SIZE,
     BLOCK_WIDTH,
     _bits_for_count,
@@ -34,7 +35,6 @@ from splax._intersect import (
     _get_scratch,
     _graph_cache,
     _map_intersects_32bit,
-    _MINMAX_CHUNK,
     _seed_minmax,
     _sort_and_bin,
     _tile_bin_edges_32bit_dev,
@@ -142,15 +142,11 @@ def _rasterize_fwd(
         conic_tile = wp.tile_load_indexed(
             conics, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
         )
-        cid_tile = wp.tile_map(
-            wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, color_mod, dtype=wp.int32)
-        )
+        cid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, color_mod, dtype=wp.int32))
         color_tile = wp.tile_load_indexed(
             colors, indices=cid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
         )
-        oid_tile = wp.tile_map(
-            wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, opac_mod, dtype=wp.int32)
-        )
+        oid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, opac_mod, dtype=wp.int32))
         opac_tile = wp.tile_load_indexed(
             opacities, indices=oid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
         )
@@ -163,9 +159,7 @@ def _rasterize_fwd(
                 opac = opac_tile[t]
                 dx = xy[0] - px
                 dy = xy[1] - py
-                sigma = (
-                    0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
-                )
+                sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
                 alpha = wp.min(0.999, opac * wp.exp(-sigma))
                 if sigma < 0.0 or alpha < 1.0 / 255.0:
                     continue
@@ -260,15 +254,11 @@ def _rasterize_fwd_depth(
         depth_tile = wp.tile_load_indexed(
             depths, indices=id_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
         )
-        cid_tile = wp.tile_map(
-            wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, color_mod, dtype=wp.int32)
-        )
+        cid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, color_mod, dtype=wp.int32))
         color_tile = wp.tile_load_indexed(
             colors, indices=cid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
         )
-        oid_tile = wp.tile_map(
-            wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, opac_mod, dtype=wp.int32)
-        )
+        oid_tile = wp.tile_map(wp.mod, id_tile, wp.tile_full(BLOCK_SIZE, opac_mod, dtype=wp.int32))
         opac_tile = wp.tile_load_indexed(
             opacities, indices=oid_tile, shape=(BLOCK_SIZE,), axis=0, storage="shared"
         )
@@ -281,9 +271,7 @@ def _rasterize_fwd_depth(
                 opac = opac_tile[t]
                 dx = xy[0] - px
                 dy = xy[1] - py
-                sigma = (
-                    0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
-                )
+                sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
                 alpha = wp.min(0.999, opac * wp.exp(-sigma))
                 if sigma < 0.0 or alpha < 1.0 / 255.0:
                     continue
@@ -343,13 +331,7 @@ def _blend_setup(
         tile_bounds_y,
         num_intersects,
     )
-    return (
-        gaussian_ids,
-        tile_bins,
-        num_intersects,
-        tile_bounds_x,
-        tile_bounds_x * tile_bounds_y,
-    )
+    return (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, tile_bounds_x * tile_bounds_y)
 
 
 def _forward_graph(
@@ -450,9 +432,7 @@ def _forward_graph(
             outputs=[isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket]],
             device=device,
         )
-        wp.utils.radix_sort_pairs(
-            isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket], bucket
-        )
+        wp.utils.radix_sort_pairs(isect_ids[: 2 * bucket], gaussian_ids[: 2 * bucket], bucket)
         wp.launch(
             _tile_bin_edges_32bit_dev,
             dim=bucket,
@@ -515,9 +495,9 @@ def _forward_graph(
         opacities.ptr,
         map_opacities.ptr,
         background.ptr,
-        cast(wp.array, out_img).ptr,
-        cast(wp.array, final_Ts).ptr,
-        cast(wp.array, final_idx).ptr,
+        cast("wp.array", out_img).ptr,
+        cast("wp.array", final_Ts).ptr,
+        cast("wp.array", final_idx).ptr,
     )
     graph = _graph_cache.get(key)
     if graph is None:
@@ -593,18 +573,7 @@ def _rasterize_launch(
     # The blend uses opacities, compensated in antialiased mode. When not
     # antialiased the caller passes the same array for both.
     gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors,
-        xys,
-        depths,
-        radii,
-        conics,
-        map_opacities,
-        cum_tiles_hit,
-        n,
-        B,
-        img_h,
-        img_w,
-        ni_pre,
+        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w, ni_pre
     )
 
     wp.launch_tiled(
@@ -666,17 +635,7 @@ def _rasterize_depth_launch(
     sel_bg = background.shape[0] > 1
 
     gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
-        colors,
-        xys,
-        depths,
-        radii,
-        conics,
-        map_opacities,
-        cum_tiles_hit,
-        n,
-        B,
-        img_h,
-        img_w,
+        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
     wp.launch_tiled(
@@ -836,16 +795,13 @@ def _rasterize_bwd_kernel(
         wp.atomic_add(
             v_conic,
             og,
-            wp.vec3(
-                0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy
-            ),
+            wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
         )
         wp.atomic_add(
             v_xy,
             og,
             wp.vec2(
-                v_sigma * (conic[0] * dx + conic[1] * dy),
-                v_sigma * (conic[1] * dx + conic[2] * dy),
+                v_sigma * (conic[0] * dx + conic[1] * dy), v_sigma * (conic[1] * dx + conic[2] * dy)
             ),
         )
         wp.atomic_add(v_opacity, og, vis * v_alpha)
@@ -963,16 +919,13 @@ def _rasterize_bwd_depth_kernel(
         wp.atomic_add(
             v_conic,
             og,
-            wp.vec3(
-                0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy
-            ),
+            wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
         )
         wp.atomic_add(
             v_xy,
             og,
             wp.vec2(
-                v_sigma * (conic[0] * dx + conic[1] * dy),
-                v_sigma * (conic[1] * dx + conic[2] * dy),
+                v_sigma * (conic[0] * dx + conic[1] * dy), v_sigma * (conic[1] * dx + conic[2] * dy)
             ),
         )
         wp.atomic_add(v_opacity, og, vis * v_alpha)
@@ -1015,17 +968,7 @@ def _rasterize_bwd_launch(
     vout_rows = v_out_img.shape[0]
 
     gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors,
-        xys,
-        depths,
-        radii,
-        conics,
-        map_opacities,
-        cum_tiles_hit,
-        n,
-        B_geom,
-        img_h,
-        img_w,
+        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
     # atomics accumulate, so outputs must start at zero
@@ -1107,17 +1050,7 @@ def _rasterize_bwd_depth_launch(
     vdepth_rows = v_out_depth.shape[0]
 
     gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
-        colors,
-        xys,
-        depths,
-        radii,
-        conics,
-        map_opacities,
-        cum_tiles_hit,
-        n,
-        B_geom,
-        img_h,
-        img_w,
+        colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
     v_colors.zero_()
@@ -1204,7 +1137,7 @@ def _rasterize_call(
         int(W),
         output_dims=(H, W),
     )
-    return cast(tuple[jax.Array, jax.Array, jax.Array], out)
+    return cast("tuple[jax.Array, jax.Array, jax.Array]", out)
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
@@ -1284,11 +1217,7 @@ def _rasterize_fwd_rule(
 
 
 def _rasterize_bwd_rule(
-    n: int,
-    H: int,
-    W: int,
-    residuals: tuple[jax.Array, ...],
-    v_img: jax.Array,
+    n: int, H: int, W: int, residuals: tuple[jax.Array, ...], v_img: jax.Array
 ) -> tuple[jax.Array | None, ...]:
     (
         colors,
@@ -1407,7 +1336,7 @@ def _rasterize_depth_call(
         int(W),
         output_dims=(H, W),
     )
-    return cast(tuple[jax.Array, jax.Array, jax.Array, jax.Array], out)
+    return cast("tuple[jax.Array, jax.Array, jax.Array, jax.Array]", out)
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
@@ -1533,9 +1462,7 @@ def _rasterize_depth_bwd_rule(
     return (v_colors, v_opacity, None, None, v_xy, v_depths, None, v_conic, None)
 
 
-_rasterize_depth_differentiable.defvjp(
-    _rasterize_depth_fwd_rule, _rasterize_depth_bwd_rule
-)
+_rasterize_depth_differentiable.defvjp(_rasterize_depth_fwd_rule, _rasterize_depth_bwd_rule)
 
 
 def rasterize_depth(
