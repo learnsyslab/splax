@@ -33,8 +33,11 @@ does by multiplying the camera-to-world matrix by `diag(1, -1, -1, 1)` before
 inverting.
 
 `f` is the focal length `(fx, fy)` in pixels and `c` is the principal point
-`(cx, cy)`. `img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian
-scale, and `clip_thresh` is the near-plane depth cutoff.
+`(cx, cy)` in pixels, where the optical axis meets the image plane. It defaults
+to the image center `(W / 2, H / 2)`, which is exact for synthetic cameras.
+Calibrated real cameras (COLMAP intrinsics) provide their own off-center values.
+`img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian scale, and
+`clip_thresh` is the near-plane depth cutoff.
 
 ## Backgrounds
 

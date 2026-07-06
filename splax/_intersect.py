@@ -34,7 +34,6 @@ ALPHA_THRESHOLD = wp.constant(1.0 / 255.0)
 class _Ellipse:
     """Opacity-aware ellipse and its tile walk state (gsplat SNUGBOX + AccuTile)."""
 
-    valid: wp.int32  # 1 if the ellipse's tile rectangle is non-empty
     A: wp.float32  # conic (inverse 2d covariance upper triangle)
     B: wp.float32
     C: wp.float32
@@ -50,7 +49,8 @@ class _Ellipse:
     bbox_argmax: wp.vec2
     rect_min: wp.vec2i
     rect_max: wp.vec2i
-    isY: wp.int32  # 1 if the walk marches over the y tiles (shorter span outer)
+    valid: wp.bool  # True if the ellipse's tile rectangle is non-empty
+    isY: wp.bool  # True if the walk marches over the y tiles (shorter span outer)
 
 
 @wp.func
@@ -62,12 +62,12 @@ def _ellipse_intersection(
     t: wp.float32,
     px: wp.float32,
     py: wp.float32,
-    isY: wp.int32,
+    isY: wp.bool,
     coord: wp.float32,
 ) -> wp.vec2:
     # Where the boundary line u=coord meets the ellipse, giving the [lower, upper]
     # extent of the cross axis at that line.
-    if isY != 0:
+    if isY:
         p_u = py
         p_v = px
         coeff = A
@@ -96,7 +96,7 @@ def _ellipse_setup(
     # Tight AABB of the ellipse plus its tile rectangle, then pick the shorter tile
     # span as the walk's outer axis. Faithful to IntersectTile.cu:210-252.
     s = _Ellipse()
-    s.valid = wp.int32(0)
+    s.valid = wp.bool(False)
     s.A = A
     s.B = B
     s.C = C
@@ -123,11 +123,9 @@ def _ellipse_setup(
     y_span = rmaxy - rminy
     if y_span * x_span == 0:
         return s
-    isY = wp.int32(0)
-    if y_span < x_span:
-        isY = wp.int32(1)
+    isY = y_span < x_span
     s.isY = isY
-    if isY != 0:
+    if isY:
         s.rect_min = wp.vec2i(rminy, rminx)
         s.rect_max = wp.vec2i(rmaxy, rmaxx)
         s.bbox_min = wp.vec2(bbox_min[1], bbox_min[0])
@@ -141,7 +139,7 @@ def _ellipse_setup(
         s.bbox_max = bbox_max
         s.bbox_argmin = bbox_argmin
         s.bbox_argmax = bbox_argmax
-    s.valid = wp.int32(1)
+    s.valid = wp.bool(True)
     return s
 
 
@@ -189,7 +187,7 @@ def _ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
 @wp.func
 def _ellipse_tile_count(s: _Ellipse) -> wp.int32:
     # Total tiles the ellipse touches, written to num_tiles_hit by projection.
-    if s.valid == 0:
+    if not s.valid:
         return wp.int32(0)
     I_min = _ellipse_init_span(s)
     count = wp.int32(0)
@@ -411,7 +409,7 @@ def _map_intersects_32bit(
         tile_bounds_x,
         tile_bounds_y,
     )
-    if setup.valid == 0:
+    if not setup.valid:
         return
     I_min = _ellipse_init_span(setup)
     for u in range(setup.rect_min[0], setup.rect_max[0]):
@@ -419,7 +417,7 @@ def _map_intersects_32bit(
         mn = wp.int32(rc[0])
         mx = wp.int32(rc[1])
         for v in range(mn, mx):
-            if setup.isY != 0:
+            if setup.isY:
                 tile_id = u * tile_bounds_x + v
             else:
                 tile_id = v * tile_bounds_x + u
@@ -476,7 +474,7 @@ def _map_intersects_64bit(
         tile_bounds_x,
         tile_bounds_y,
     )
-    if setup.valid == 0:
+    if not setup.valid:
         return
     I_min = _ellipse_init_span(setup)
     for u in range(setup.rect_min[0], setup.rect_max[0]):
@@ -484,7 +482,7 @@ def _map_intersects_64bit(
         mn = wp.int32(rc[0])
         mx = wp.int32(rc[1])
         for v in range(mn, mx):
-            if setup.isY != 0:
+            if setup.isY:
                 tile_id = wp.int64(u * tile_bounds_x + v)
             else:
                 tile_id = wp.int64(v * tile_bounds_x + u)

@@ -74,7 +74,7 @@ def _rasterize_fwd(
     num_tiles: wp.int32,
     color_mod: wp.int32,
     opac_mod: wp.int32,
-    sel_bg: wp.int32,
+    sel_bg: wp.bool,
     gaussian_ids_sorted: wp.array[wp.int32],
     tile_bins: wp.array[wp.vec2i],
     xys: wp.array[wp.vec2],
@@ -179,7 +179,7 @@ def _rasterize_fwd(
                 cur_idx = batch_start + t
 
     if inside:
-        bg = background[image_id * sel_bg]
+        bg = background[wp.where(sel_bg, image_id, 0)]
         row = image_id * img_h + i
         final_Ts[row, j] = T
         final_idx[row, j] = cur_idx
@@ -200,7 +200,7 @@ def _rasterize_fwd_depth(
     num_tiles: wp.int32,
     color_mod: wp.int32,
     opac_mod: wp.int32,
-    sel_bg: wp.int32,
+    sel_bg: wp.bool,
     gaussian_ids_sorted: wp.array[wp.int32],
     tile_bins: wp.array[wp.vec2i],
     xys: wp.array[wp.vec2],
@@ -298,7 +298,7 @@ def _rasterize_fwd_depth(
                 cur_idx = batch_start + t
 
     if inside:
-        bg = background[image_id * sel_bg]
+        bg = background[wp.where(sel_bg, image_id, 0)]
         row = image_id * img_h + i
         final_Ts[row, j] = T
         final_idx[row, j] = cur_idx
@@ -368,7 +368,7 @@ def _forward_graph(
     img_w: int,
     tile_bounds_x: int,
     tile_bounds_y: int,
-    sel_bg: int,
+    sel_bg: bool,
     final_Ts: wp.array2d[wp.float32],
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
@@ -555,7 +555,7 @@ def _rasterize_launch(
     # axis from this wrapper.
     n = num_gaussians
     B = out_img.shape[0] // img_h
-    sel_bg = 1 if background.shape[0] > 1 else 0
+    sel_bg = background.shape[0] > 1
 
     # Post-sync CUDA graph fast path, opt-in. Replays the whole
     # map/sort/bin/blend as one cached graph. On a fallback the readback is
@@ -663,7 +663,7 @@ def _rasterize_depth_launch(
     # the blend order matches the plain path bit for bit.
     n = num_gaussians
     B = out_img.shape[0] // img_h
-    sel_bg = 1 if background.shape[0] > 1 else 0
+    sel_bg = background.shape[0] > 1
 
     gaussian_ids, tile_bins, _num_isect, tile_bounds_x, num_tiles = _blend_setup(
         colors,
@@ -735,10 +735,10 @@ def _rasterize_bwd_kernel(
     tile_bounds_x: wp.int32,
     num_tiles: wp.int32,
     num_gaussians: wp.int32,
-    sel_geom: wp.int32,
+    sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
-    sel_bg: wp.int32,
+    sel_bg: wp.bool,
     vout_rows: wp.int32,
     gaussian_ids_sorted: wp.array[wp.int32],
     tile_bins: wp.array[wp.vec2i],
@@ -758,15 +758,15 @@ def _rasterize_bwd_kernel(
 ):
     # One thread per pixel over B_out*num_tiles blocks. image_id decodes the
     # output image. The geometry has its own batch B_geom, either equal to B_out
-    # (sel_geom=1) or 1 (sel_geom=0, a single shared render differentiated against
-    # B target images). Grads are written at og = image_id*N*(1 - sel_geom) + g,
-    # so batched geometry writes at the flat id and broadcast geometry gets one
-    # slot per output image. JAX reduces broadcast inputs over the batch axis.
+    # (sel_geom True) or 1 (sel_geom False, a single shared render differentiated
+    # against B target images). Batched geometry writes grads at the flat id and
+    # broadcast geometry gets one slot per output image. JAX reduces broadcast
+    # inputs over the batch axis.
     tile_g, tr = wp.tid()
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
-    geom_image = image_id * sel_geom
-    og_base = image_id * num_gaussians * (1 - sel_geom)
+    geom_image = wp.where(sel_geom, image_id, 0)
+    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
     li = tr // BLOCK_WIDTH
@@ -793,7 +793,7 @@ def _rasterize_bwd_kernel(
     # but broadcast (H rows) for a view-independent one. Modulo by its own row
     # count reads the right row either way.
     v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
-    bg = background[image_id * sel_bg]
+    bg = background[wp.where(sel_bg, image_id, 0)]
     buffer = wp.vec3(0.0, 0.0, 0.0)
 
     # Walk back to front from the last contributor. Culled contributors are
@@ -863,10 +863,10 @@ def _rasterize_bwd_depth_kernel(
     tile_bounds_x: wp.int32,
     num_tiles: wp.int32,
     num_gaussians: wp.int32,
-    sel_geom: wp.int32,
+    sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
-    sel_bg: wp.int32,
+    sel_bg: wp.bool,
     vout_rows: wp.int32,
     vdepth_rows: wp.int32,
     gaussian_ids_sorted: wp.array[wp.int32],
@@ -891,8 +891,8 @@ def _rasterize_bwd_depth_kernel(
     tile_g, tr = wp.tid()
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
-    geom_image = image_id * sel_geom
-    og_base = image_id * num_gaussians * (1 - sel_geom)
+    geom_image = wp.where(sel_geom, image_id, 0)
+    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
     li = tr // BLOCK_WIDTH
@@ -917,7 +917,7 @@ def _rasterize_bwd_depth_kernel(
     T = t_final
     v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
     v_outd = v_out_depth[(image_id * img_h + i) % vdepth_rows, j]
-    bg = background[image_id * sel_bg]
+    bg = background[wp.where(sel_bg, image_id, 0)]
     buffer = wp.vec3(0.0, 0.0, 0.0)
     dbuffer = wp.float32(0.0)
 
@@ -1010,8 +1010,8 @@ def _rasterize_bwd_launch(
     n = num_gaussians
     B_out = v_xy.shape[0] // n
     B_geom = cum_tiles_hit.shape[0] // n
-    sel_geom = 1 if B_geom > 1 else 0
-    sel_bg = 1 if background.shape[0] > 1 else 0
+    sel_geom = B_geom > 1
+    sel_bg = background.shape[0] > 1
     vout_rows = v_out_img.shape[0]
 
     gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = _blend_setup(
@@ -1101,8 +1101,8 @@ def _rasterize_bwd_depth_launch(
     n = num_gaussians
     B_out = v_xy.shape[0] // n
     B_geom = cum_tiles_hit.shape[0] // n
-    sel_geom = 1 if B_geom > 1 else 0
-    sel_bg = 1 if background.shape[0] > 1 else 0
+    sel_geom = B_geom > 1
+    sel_bg = background.shape[0] > 1
     vout_rows = v_out_img.shape[0]
     vdepth_rows = v_out_depth.shape[0]
 

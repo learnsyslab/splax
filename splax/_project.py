@@ -57,13 +57,13 @@ def _project_kernel(
     transform_ids: wp.array[wp.int32],
     num_gaussians: wp.int32,
     num_transforms: wp.int32,
-    has_transforms: wp.int32,
-    sel_means: wp.int32,
-    sel_scales: wp.int32,
-    sel_quats: wp.int32,
-    sel_view: wp.int32,
-    sel_opac: wp.int32,
-    sel_transforms: wp.int32,
+    has_transforms: wp.bool,
+    sel_means: wp.bool,
+    sel_scales: wp.bool,
+    sel_quats: wp.bool,
+    sel_view: wp.bool,
+    sel_opac: wp.bool,
+    sel_transforms: wp.bool,
     img_h: wp.int32,
     img_w: wp.int32,
     fx: wp.float32,
@@ -88,11 +88,11 @@ def _project_kernel(
     n = num_gaussians
     bid = idx // n
     gid = idx % n
-    m_idx = wp.where(sel_means != 0, idx, gid)
-    s_idx = wp.where(sel_scales != 0, idx, gid)
-    q_idx = wp.where(sel_quats != 0, idx, gid)
-    o_idx = wp.where(sel_opac != 0, idx, gid)
-    vb = wp.where(sel_view != 0, bid, 0) * 4  # row offset into (4B, 4) viewmat
+    m_idx = wp.where(sel_means, idx, gid)
+    s_idx = wp.where(sel_scales, idx, gid)
+    q_idx = wp.where(sel_quats, idx, gid)
+    o_idx = wp.where(sel_opac, idx, gid)
+    vb = wp.where(sel_view, bid, 0) * 4  # row offset into (4B, 4) viewmat
 
     radii[idx] = 0
     num_tiles_hit[idx] = 0
@@ -110,11 +110,11 @@ def _project_kernel(
     # follows via M below. With has_transforms == 0 nothing in this block
     # executes and the kernel matches the plain path exactly.
     R_tf = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-    moved = wp.int32(0)
-    if has_transforms != 0:
+    moved = wp.bool(False)
+    if has_transforms:
         tf_id = transform_ids[gid]
         if tf_id >= 0:
-            tf_idx = wp.where(sel_transforms != 0, bid * num_transforms + tf_id, tf_id)
+            tf_idx = wp.where(sel_transforms, bid * num_transforms + tf_id, tf_id)
             R_tf = wp.mat33(
                 gaussian_transforms[tf_idx, 0, 0],
                 gaussian_transforms[tf_idx, 0, 1],
@@ -132,7 +132,7 @@ def _project_kernel(
                 gaussian_transforms[tf_idx, 2, 3],
             )
             mean = R_tf * mean + t_tf
-            moved = wp.int32(1)
+            moved = wp.bool(True)
 
     mx = mean[0]
     my = mean[1]
@@ -177,7 +177,7 @@ def _project_kernel(
         R[2, 1] * sy,
         R[2, 2] * sz,
     )
-    if moved != 0:
+    if moved:
         # rotate the covariance factor, V3 becomes R_tf V3 R_tf^T
         M = R_tf * M
     V3 = M * wp.transpose(M)
@@ -279,7 +279,7 @@ def _project_launch(
     transform_ids: wp.array[wp.int32],
     num_gaussians: int,
     num_transforms: int,
-    has_transforms: int,
+    has_transforms: bool,
     img_h: int,
     img_w: int,
     fx: float,
@@ -302,12 +302,12 @@ def _project_launch(
     # broadcast (equal to base, selector 0).
     n = num_gaussians
     total = xys.shape[0]  # B*N
-    sel_means = 1 if means3d.shape[0] > n else 0
-    sel_scales = 1 if scales.shape[0] > n else 0
-    sel_quats = 1 if quats.shape[0] > n else 0
-    sel_view = 1 if viewmat.shape[0] > 4 else 0
-    sel_opac = 1 if opacities.shape[0] > n else 0
-    sel_transforms = 1 if gaussian_transforms.shape[0] > num_transforms else 0
+    sel_means = means3d.shape[0] > n
+    sel_scales = scales.shape[0] > n
+    sel_quats = quats.shape[0] > n
+    sel_view = viewmat.shape[0] > 4
+    sel_opac = opacities.shape[0] > n
+    sel_transforms = gaussian_transforms.shape[0] > num_transforms
     wp.launch(
         _project_kernel,
         dim=total,
@@ -646,15 +646,15 @@ def _project_bwd_gaussians_kernel(
     v_depth_in: wp.array[wp.float32],
     v_conic_in: wp.array[wp.vec3],
     num_gaussians: wp.int32,
-    sel_means: wp.int32,
-    sel_scales: wp.int32,
-    sel_quats: wp.int32,
-    sel_view: wp.int32,
-    sel_radii: wp.int32,
-    sel_conics: wp.int32,
-    sel_vxy: wp.int32,
-    sel_vdepth: wp.int32,
-    sel_vconic: wp.int32,
+    sel_means: wp.bool,
+    sel_scales: wp.bool,
+    sel_quats: wp.bool,
+    sel_view: wp.bool,
+    sel_radii: wp.bool,
+    sel_conics: wp.bool,
+    sel_vxy: wp.bool,
+    sel_vdepth: wp.bool,
+    sel_vconic: wp.bool,
     fx: wp.float32,
     fy: wp.float32,
     glob_scale: wp.float32,
@@ -670,17 +670,17 @@ def _project_bwd_gaussians_kernel(
     # broadcast (leading dim N, read at gid). A cotangent can arrive broadcast even
     # when the geometry is batched. The depth cotangent is zero for an image loss,
     # so JAX hands it back at size N, and indexing it at idx would read OOB.
-    r_idx = wp.where(sel_radii != 0, idx, gid)
+    r_idx = wp.where(sel_radii, idx, gid)
     if radii[r_idx] <= 0:
         return  # culled gaussian keeps its pre-zeroed grad
-    m_idx = wp.where(sel_means != 0, idx, gid)
-    s_idx = wp.where(sel_scales != 0, idx, gid)
-    q_idx = wp.where(sel_quats != 0, idx, gid)
-    c_idx = wp.where(sel_conics != 0, idx, gid)
-    vx_idx = wp.where(sel_vxy != 0, idx, gid)
-    vd_idx = wp.where(sel_vdepth != 0, idx, gid)
-    vc_idx = wp.where(sel_vconic != 0, idx, gid)
-    vb = wp.where(sel_view != 0, bid, 0) * 4
+    m_idx = wp.where(sel_means, idx, gid)
+    s_idx = wp.where(sel_scales, idx, gid)
+    q_idx = wp.where(sel_quats, idx, gid)
+    c_idx = wp.where(sel_conics, idx, gid)
+    vx_idx = wp.where(sel_vxy, idx, gid)
+    vd_idx = wp.where(sel_vdepth, idx, gid)
+    vc_idx = wp.where(sel_vconic, idx, gid)
+    vb = wp.where(sel_view, bid, 0) * 4
     mean = means3d[m_idx]
     W, trans = _load_W_trans(viewmat, vb)
     g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
@@ -709,15 +709,15 @@ def _project_bwd_viewmat_kernel(
     v_conic_in: wp.array[wp.vec3],
     num_gaussians: wp.int32,
     blocks_per_image: wp.int32,
-    sel_means: wp.int32,
-    sel_scales: wp.int32,
-    sel_quats: wp.int32,
-    sel_view: wp.int32,
-    sel_radii: wp.int32,
-    sel_conics: wp.int32,
-    sel_vxy: wp.int32,
-    sel_vdepth: wp.int32,
-    sel_vconic: wp.int32,
+    sel_means: wp.bool,
+    sel_scales: wp.bool,
+    sel_quats: wp.bool,
+    sel_view: wp.bool,
+    sel_radii: wp.bool,
+    sel_conics: wp.bool,
+    sel_vxy: wp.bool,
+    sel_vdepth: wp.bool,
+    sel_vconic: wp.bool,
     fx: wp.float32,
     fy: wp.float32,
     glob_scale: wp.float32,
@@ -734,16 +734,16 @@ def _project_bwd_viewmat_kernel(
     idx = image_id * n + gid
     v_R = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     v_t = wp.vec3(0.0, 0.0, 0.0)
-    r_idx = wp.where(sel_radii != 0, idx, gid)
+    r_idx = wp.where(sel_radii, idx, gid)
     if gid < n and radii[r_idx] > 0:
-        m_idx = wp.where(sel_means != 0, idx, gid)
-        s_idx = wp.where(sel_scales != 0, idx, gid)
-        q_idx = wp.where(sel_quats != 0, idx, gid)
-        c_idx = wp.where(sel_conics != 0, idx, gid)
-        vx_idx = wp.where(sel_vxy != 0, idx, gid)
-        vd_idx = wp.where(sel_vdepth != 0, idx, gid)
-        vc_idx = wp.where(sel_vconic != 0, idx, gid)
-        vb = wp.where(sel_view != 0, image_id, 0) * 4
+        m_idx = wp.where(sel_means, idx, gid)
+        s_idx = wp.where(sel_scales, idx, gid)
+        q_idx = wp.where(sel_quats, idx, gid)
+        c_idx = wp.where(sel_conics, idx, gid)
+        vx_idx = wp.where(sel_vxy, idx, gid)
+        vd_idx = wp.where(sel_vdepth, idx, gid)
+        vc_idx = wp.where(sel_vconic, idx, gid)
+        vb = wp.where(sel_view, image_id, 0) * 4
         mean = means3d[m_idx]
         W, trans = _load_W_trans(viewmat, vb)
         g = _recompute_geom(
@@ -782,15 +782,15 @@ def _project_bwd_joint_kernel(
     v_conic_in: wp.array[wp.vec3],
     num_gaussians: wp.int32,
     blocks_per_image: wp.int32,
-    sel_means: wp.int32,
-    sel_scales: wp.int32,
-    sel_quats: wp.int32,
-    sel_view: wp.int32,
-    sel_radii: wp.int32,
-    sel_conics: wp.int32,
-    sel_vxy: wp.int32,
-    sel_vdepth: wp.int32,
-    sel_vconic: wp.int32,
+    sel_means: wp.bool,
+    sel_scales: wp.bool,
+    sel_quats: wp.bool,
+    sel_view: wp.bool,
+    sel_radii: wp.bool,
+    sel_conics: wp.bool,
+    sel_vxy: wp.bool,
+    sel_vdepth: wp.bool,
+    sel_vconic: wp.bool,
     fx: wp.float32,
     fy: wp.float32,
     glob_scale: wp.float32,
@@ -807,16 +807,16 @@ def _project_bwd_joint_kernel(
     idx = image_id * n + gid
     v_R = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     v_t = wp.vec3(0.0, 0.0, 0.0)
-    r_idx = wp.where(sel_radii != 0, idx, gid)
+    r_idx = wp.where(sel_radii, idx, gid)
     if gid < n and radii[r_idx] > 0:
-        m_idx = wp.where(sel_means != 0, idx, gid)
-        s_idx = wp.where(sel_scales != 0, idx, gid)
-        q_idx = wp.where(sel_quats != 0, idx, gid)
-        c_idx = wp.where(sel_conics != 0, idx, gid)
-        vx_idx = wp.where(sel_vxy != 0, idx, gid)
-        vd_idx = wp.where(sel_vdepth != 0, idx, gid)
-        vc_idx = wp.where(sel_vconic != 0, idx, gid)
-        vb = wp.where(sel_view != 0, image_id, 0) * 4
+        m_idx = wp.where(sel_means, idx, gid)
+        s_idx = wp.where(sel_scales, idx, gid)
+        q_idx = wp.where(sel_quats, idx, gid)
+        c_idx = wp.where(sel_conics, idx, gid)
+        vx_idx = wp.where(sel_vxy, idx, gid)
+        vd_idx = wp.where(sel_vdepth, idx, gid)
+        vc_idx = wp.where(sel_vconic, idx, gid)
+        vb = wp.where(sel_view, image_id, 0) * 4
         mean = means3d[m_idx]
         W, trans = _load_W_trans(viewmat, vb)
         g = _recompute_geom(
@@ -856,15 +856,15 @@ def _bwd_selectors(
     v_xy: wp.array,
     v_depth: wp.array,
     v_conic: wp.array,
-) -> tuple[int, ...]:
+) -> tuple[bool, ...]:
     # Each operand is independently batched (own leading dim B*N or 4B, read at
     # the flat idx) or broadcast (N or 4, read at gid). One selector per operand,
     # indexed in-kernel exactly like the forward. This is required for
     # correctness, not just robustness. A cotangent can arrive broadcast even when
     # the geometry is fully batched, e.g. the depth cotangent of an image loss.
-    def sel(a: "wp.array | wp.array2d[wp.float32]", base: int) -> int:
+    def sel(a: "wp.array | wp.array2d[wp.float32]", base: int) -> bool:
         # every operand is a real wp.array at runtime, array2d is a stub-only alias
-        return 1 if cast(wp.array, a).shape[0] > base else 0
+        return cast(wp.array, a).shape[0] > base
 
     return (
         sel(means3d, n),
@@ -1083,11 +1083,11 @@ def _project_call(
         gaussian_transforms = jnp.zeros((1, 4, 4), jnp.float32)
         transform_ids = jnp.full((1,), -1, jnp.int32)
         num_transforms = 1
-        has_transforms = 0
+        has_transforms = False
     else:
         assert transform_ids is not None  # built alongside the transforms
         num_transforms = gaussian_transforms.shape[-3]
-        has_transforms = 1
+        has_transforms = True
     xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit = _project_ffi(
         mean3ds,
         scales,
@@ -1098,7 +1098,7 @@ def _project_call(
         transform_ids,
         int(n),
         int(num_transforms),
-        int(has_transforms),
+        bool(has_transforms),
         int(H),
         int(W),
         float(f[0]),
@@ -1304,7 +1304,7 @@ def project(
     opacities: jax.Array,
     img_shape: tuple[int, int],
     f: tuple[float, float],
-    c: tuple[float, float],
+    c: tuple[float, float] | None = None,
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
 ) -> _ProjOut:
@@ -1321,6 +1321,8 @@ def project(
     gradient through project, their gradient flows through rasterize.
     """
     n = mean3ds.shape[0]
+    if c is None:
+        c = (img_shape[1] / 2, img_shape[0] / 2)
     return _project_differentiable(
         mean3ds,
         scales,
