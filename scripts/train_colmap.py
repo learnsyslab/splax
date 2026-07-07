@@ -1,44 +1,17 @@
 """Fit a fixed set of Gaussians to a COLMAP scene with the splax Warp backend.
 
-Generalized trainer for any COLMAP sparse reconstruction (``sparse/0`` with
-``cameras.bin``, ``images.bin``, ``points3D.bin`` + an ``images/`` folder). It
-reuses the Phase 6d MCMC quality recipe (fixed-N relocation + noise via
-``splax.mcmc``, per-parameter LR schedules, L1 + 0.2 D-SSIM, opacity/scale
-regularizers) that reached 33 dB on lego -- see ``scripts/train_lego.py`` and
-``reports/phase6d.md``.
-
-Key differences from the synthetic-lego trainer:
-
-* **Real camera model.** COLMAP intrinsics are read straight from ``cameras.bin``.
-  The renderer is a pinhole (``f=(fx,fy)``, ``c=(cx,cy)``); if the COLMAP camera
-  carries distortion (SIMPLE_RADIAL / RADIAL / OPENCV ...), it is *ignored* and
-  the pinhole approximation is used. For the drone scene the OPENCV distortion
-  coefficients are tiny (k1~0.012, k2~-0.028, p1/p2~1e-3), so the approximation
-  is acceptable; documented in ``reports/phase8f_drone_fit.md``.
-* **Real extrinsics.** COLMAP stores world-to-camera ``(qvec, tvec)`` in the
-  OpenCV convention (+z forward, +y down, +x right) -- exactly what
-  ``splax.render``'s ``viewmat`` expects -- so ``viewmat = [[R, t], [0, 1]]``
-  with ``R = quat2mat(qvec)`` directly, no axis flip (unlike the NeRF/OpenGL
-  loader in ``train_lego.py`` which multiplies by ``diag(1,-1,-1,1)``).
-* **Point-cloud initialization.** Gaussians are initialized *from* the sparse
-  point cloud: means = 3D points, colors = their RGB, scales = log of the
-  nearest-neighbour distance, moderate opacity, random quats. This is what makes
-  real-scene fixed-N training converge. Padded (by jittered duplication) or
-  subsampled to a fixed ``N`` for static shapes.
-* **Scene normalization.** The scene is normalized by a similarity transform so
-  the mean camera distance to the camera centroid is 1 (points + camera poses
-  transformed consistently -- rendering is invariant to a world similarity), so
-  the lego 6d LR/noise defaults transfer directly. The exported ``.ply`` is in
-  this normalized frame.
+Generalized trainer for any COLMAP sparse reconstruction consisting of ``sparse/0`` with
+``cameras.bin``, ``images.bin``, ``points3D.bin`` and an ``images/`` folder.
 
 Usage:
-  python scripts/train_colmap.py --data data/drone --out-ply data/scenes/drone.ply
+    python scripts/train_colmap.py --data data/drone --out-ply data/scenes/drone.ply
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import struct
 import time
 from pathlib import Path
@@ -59,13 +32,10 @@ import splax
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable
 
-
+logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
 
 
-# --------------------------------------------------------------------------- #
-# COLMAP binary readers (hand-parsed; format per colmap/scripts/read_write_model)
-# --------------------------------------------------------------------------- #
 _CAMERA_MODELS = {
     0: ("SIMPLE_PINHOLE", 3),
     1: ("PINHOLE", 4),
@@ -102,9 +72,8 @@ def read_images(path: str | Path) -> list[dict]:
     """Return list of dicts {id, qvec, tvec, camera_id, name, obs_xy, obs_pid}.
 
     ``obs_xy`` (K,2 float64) / ``obs_pid`` (K, int64) are the per-image 2D keypoint
-    observations that have a valid triangulated 3D point (point3D_id != -1) -- these
-    are the COLMAP sparse points visible in this view, used for depth regularization
-    (survey T2). Views with no depth loss simply ignore them.
+    observations that have a valid triangulated 3D point. These are the COLMAP sparse points visible
+    in this view, used for depth regularization. Views with no depth loss simply ignore them.
     """
     imgs = []
     with open(path, "rb") as f:
@@ -171,9 +140,6 @@ def quat2mat(q: np.ndarray) -> np.ndarray:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Scene loading
-# --------------------------------------------------------------------------- #
 def _view_depth_targets(
     im: dict,
     vm: np.ndarray,
@@ -185,13 +151,7 @@ def _view_depth_targets(
     max_pts: int,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build depth supervision targets for one view.
-
-    Returns (uv (max_pts,2) f32, depth (max_pts,) f32, mask (max_pts,) f32). The
-    target depth is the sparse point's z in this camera (same normalized units as the
-    rendered expected-depth channel). Off-image / behind-camera observations are
-    dropped; if more than max_pts survive, a random subset is kept.
-    """
+    """Build depth supervision targets for one view."""
     uv = np.zeros((max_pts, 2), np.float32)
     depth = np.zeros((max_pts,), np.float32)
     mask = np.zeros((max_pts,), np.float32)
@@ -225,23 +185,17 @@ def load_scene(
     seed: int = 0,
     sparse_model: int = 0,
 ) -> dict:
-    """Load a COLMAP scene, normalized, downscaled. Returns a dict of arrays.
-
-    Views carry (image float32 HxWx3 in [0,1], viewmat 4x4). Intrinsics are a
-    single shared pinhole (fx, fy, cx, cy) at the downscaled resolution. The
-    world is similarity-normalized (mean camera distance -> 1); the same
-    transform is applied to the sparse points used for initialization.
-    """
+    """Load a COLMAP scene, normalized, downscaled."""
     data_dir = Path(data_dir)
     # COLMAP can emit several disconnected sub-models (sparse/0, 1, ...); the largest
-    # is not always 0 (data/room's usable model is 2), so the index is selectable.
+    # is not always 0, so the index is selectable.
     sparse = data_dir / "sparse" / str(sparse_model)
     cams = read_cameras(sparse / "cameras.bin")
     images = read_images(sparse / "images.bin")
     pts_xyz, pts_rgb, pts_ids = read_points3D(sparse / "points3D.bin")
     id2row = {int(pid): i for i, pid in enumerate(pts_ids)}
 
-    # --- camera centers + similarity normalization (mean cam dist -> 1) ------
+    # camera centers + similarity normalization
     centers = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in images])
     ctr = np.median(centers, axis=0)
     s = 1.0 / np.mean(np.linalg.norm(centers - ctr, axis=1))
@@ -257,7 +211,7 @@ def load_scene(
 
     pts_xyz = (s * (pts_xyz - ctr)).astype(np.float32)
 
-    # --- intrinsics (pinhole; distortion ignored) ---------------------------
+    # intrinsics
     cam_name, W0, H0, params = cams[images[0]["camera_id"]]
     if cam_name in (
         "SIMPLE_PINHOLE",
@@ -272,14 +226,14 @@ def load_scene(
     else:  # PINHOLE, OPENCV, OPENCV_FISHEYE, FULL_OPENCV, THIN_PRISM_FISHEYE
         fx, fy, cx, cy = params[0], params[1], params[2], params[3]
     W, H = W0 // downscale, H0 // downscale
-    r = W / W0  # exact ratio (W0 divisible by downscale for the drone: 3840/4)
+    r = W / W0
     intr = (fx * r, fy * r, cx * r, cy * r)
 
-    # --- load + downscale images (box filter) -------------------------------
+    # load and downscale images
     train_imgs, train_vms, eval_imgs, eval_vms, eval_names = [], [], [], [], []
     tp_uv, tp_depth, tp_mask = [], [], []  # per-train-view depth-reg targets (T2)
     tgt_rng = np.random.default_rng(seed)
-    print(f"loading {len(images)} images at {W}x{H} (downscale {downscale}) ...")
+    logger.info(f"loading {len(images)} images at {W}x{H} (downscale {downscale}) ...")
     for i, im in enumerate(images):
         fp = data_dir / "images" / im["name"]
         arr = iio.imread(fp)
@@ -322,9 +276,9 @@ def load_scene(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Point-cloud initialization
-# --------------------------------------------------------------------------- #
+# region Initialization
+
+
 def knn_scales(xyz: np.ndarray, k: int = 3, cap: float | None = None) -> np.ndarray:
     """Log-scale init = log(mean distance to k nearest neighbours)."""
     tree = KDTree(xyz)
@@ -340,8 +294,8 @@ def init_from_points(
     """Fixed-N init from the sparse cloud (pad by jittered duplication / subsample)."""
     rng = np.random.default_rng(seed)
     m = xyz.shape[0]
-    # cap init gaussian size (normalized units; cameras sit at dist ~1) so a few
-    # isolated outlier points don't seed giant gaussians.
+    # cap init gaussian size (normalized units, cameras sit at dist ~1) so a few isolated outlier
+    # points don't seed giant gaussians.
     cap = 0.3
     if m >= n:
         sel = rng.choice(m, n, replace=False)
@@ -351,18 +305,13 @@ def init_from_points(
         pad = n - m
         src = rng.integers(0, m, pad)
         base_ls = knn_scales(xyz, cap=cap)  # (m,) at the SPARSE m-point density
-        # N-aware scale correction. knn_scales is the mean nearest-neighbour distance at
-        # the *sparse* density (m points spread through the scene volume V). Padding to
-        # n>m gaussians raises the density to n/V, and for a roughly uniform cloud the
-        # mean NN spacing scales as density^(-1/3); so the honest per-gaussian scale at
-        # the target density is smaller by a factor cbrt(n/m). Without this every gaussian
-        # is instantiated ~cbrt(n/m)x too large -- the diagnosed 1.5M-drone init ceiling
-        # (reports/phase8i: 49,471 pts padded ~30x carried 49k-density scales ~3x too
-        # large, stalling at ~12.4 dB). We correct in log space by subtracting (1/3)ln(n/m)
-        # from every knn log-scale (originals and padded copies alike -- after padding the
-        # whole cloud lives at n/V density). The jitter that spreads the padded copies uses
-        # the corrected (smaller) scale too, so the seeded points sit at the target spacing.
-        # Only fires when padding (n>m); the subsample branch above is untouched.
+        # N-aware scale correction. knn_scales is the mean nearest-neighbour distance at the
+        # *sparse* density (m points spread through the scene volume V). Padding to n>m gaussians
+        # raises the density to n/V, and for a roughly uniform cloud the mean NN spacing scales as
+        # density^(-1/3). The per-gaussian scale at the target density is thus smaller by a factor
+        # cbrt(n/m). We correct in log space by subtracting (1/3)ln(n/m) from every knn log-scale.
+        # The jitter that spreads the padded copies uses the corrected (smaller) scale too, so the
+        # seeded points sit at the target spacing. Only fires when padding (n>m).
         base_ls = base_ls - np.log(n / m) / 3.0
         jitter = rng.normal(size=(pad, 3)).astype(np.float32) * np.exp(base_ls[src])[:, None]
         xyz_n = np.concatenate([xyz, xyz[src] + jitter], 0)
@@ -381,9 +330,9 @@ def init_from_points(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Rendering / metrics
-# --------------------------------------------------------------------------- #
+# region Rendering / metrics
+
+
 def render_params(
     p: dict[str, jax.Array],
     viewmat: jax.Array,
@@ -422,11 +371,7 @@ def render_params(
 
 
 def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
-    """Bilinearly sample the (H, W) depth map at pixel coords ``uv`` (K, 2) = (x, y).
-
-    Pixel (j, i) center is at (j+0.5, i+0.5), so we shift by -0.5 before interpolating.
-    Out-of-range coords are clamped (masked points contribute nothing to the loss).
-    """
+    """Bilinearly sample the (H, W) depth map at pixel coords ``uv`` (K, 2) = (x, y)."""
     H, W = D.shape
     x = jnp.clip(uv[:, 0] - 0.5, 0.0, W - 1.0)
     y = jnp.clip(uv[:, 1] - 0.5, 0.0, H - 1.0)
@@ -445,43 +390,26 @@ def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
     return top * (1.0 - wy) + bot * wy
 
 
-# --------------------------------------------------------------------------- #
-# Per-image exposure correction (affine variant of survey item T5)
-# --------------------------------------------------------------------------- #
-# Real captures (phone/drone) drift in exposure / white-balance across frames;
-# without correction the splat absorbs that per-view color error as spurious
-# view-dependent color. The affine fix learns one 3x4 color transform per
-# *training* image -- [M (3x3) | b (3)], applied as ``M @ rgb + b`` per pixel to
-# the *rendered* RGB before the loss only -- so the shared 3D color no longer has
-# to explain per-image ISP variation. This is the cheap first step the T5 survey
-# recommends ("start with the affine-exposure variant; full bilateral grid only
-# if real captures show ISP drift"); the analogue of gsplat's per-image
-# AppearanceOptModule / bilateral-grid post-processing, minus the grid + MLP.
-#
-# Honesty at eval: held-out views have NO learned transform (they were never in
-# the optimizer), and letting eval fit its own transform would let it cheat by
-# regressing the render onto the GT. So eval always scores the RAW render vs GT
-# (``render_params`` unchanged) -- the exposure params touch the training loss
-# only and are excluded from every reported metric and the exported .ply.
-def init_exposure(ntr: int) -> jax.Array:
-    """Per-training-image affine color transforms, identity-initialized.
+# Per-image exposure correction
 
-    Returns (ntr, 3, 4): each 3x4 block is [M (3x3) | b (3)]. Init M=I, b=0 so the
-    transform is the identity at step 0 -- an unoptimized transform leaves the
-    render bit-identical, which is what keeps the ``--exposure-opt`` off-path
-    (never constructed) and the pre-optimization state faithful.
-    """
+# Real captures drift in exposure / white-balance across frames. Without correction the splat
+# absorbs that per-view color error as spurious view-dependent color. The affine fix learns one 3x4
+# color transform per *training* image so the shared 3D color no longer has to explain per-image ISP
+# variation.
+
+# Held-out views have NO learned transform, as letting eval fit its own transform would let it cheat
+# by regressing the render onto the GT. So eval always scores the RAW render vs GT
+
+
+def init_exposure(ntr: int) -> jax.Array:
+    """Per-training-image affine color transforms, identity-initialized."""
     eye = jnp.broadcast_to(jnp.eye(3, dtype=jnp.float32), (ntr, 3, 3))
     off = jnp.zeros((ntr, 3, 1), jnp.float32)
     return jnp.concatenate([eye, off], axis=2)
 
 
 def apply_exposure(img: jax.Array, affine: jax.Array) -> jax.Array:
-    """Apply one image's 3x4 affine color transform to an (H, W, 3) render.
-
-    ``affine`` is (3, 4) = [M (3x3) | b (3)]; returns ``M @ rgb + b`` per pixel.
-    Pure JAX, no kernels -- used on the rendered RGB before the training loss only.
-    """
+    """Apply one image's 3x4 affine color transform to an (H, W, 3) render."""
     M, b = affine[:, :3], affine[:, 3]
     return jnp.einsum("ij,hwj->hwi", M, img) + b
 
@@ -500,12 +428,9 @@ def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
     opac = jax.nn.sigmoid(params["opac_logit"])
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     splax.io.write_ply(path, params["means"], scales, quats, colors, opac)
-    print(f"wrote {path}")
+    logger.info(f"wrote {path}")
 
 
-# --------------------------------------------------------------------------- #
-# MCMC helpers (generic; mirror scripts/train_lego.py)
-# --------------------------------------------------------------------------- #
 def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.OptState:
     n = reset_mask.shape[0]
     keep = (~reset_mask).astype(jnp.float32)
@@ -534,38 +459,12 @@ def _make_step(
 ) -> Callable:
     """Build a jitted train step.
 
-    ``bg`` is a per-step render-side background color
-    (gsplat ``random_bkgd``; see the ``--random-bkgd`` caveat in ``main()``): unlike
-    the lego trainer, COLMAP photos carry no alpha channel, so only the *render* is
-    composited over ``bg`` -- the GT photo is fixed real content and is never
-    recomposited. When disabled the caller passes a fixed white ``bg`` (bit-identical
-    to the pre-T1 code path).
-
-    ``depth_loss`` (survey T2, gsplat ``depth_loss``) adds a scale-normalized masked L1
-    between the rendered expected-depth channel (bilinearly sampled at the COLMAP
-    sparse-point pixels of the view) and those points' camera-space depths, weighted by
-    ``depth_lambda`` (gsplat default 1e-2). When OFF, the depth branch is never traced,
-    so the loss is bit-identical to the pre-T2 path (the ``pts_*`` step args are unused).
-
-    ``exp_tx`` (survey T5 affine variant, ``--exposure-opt``): when given an optax
-    optimizer, the step also takes the per-image exposure table ``exp_p`` + its opt
-    state + the view index ``vi``, applies that view's 3x4 affine to the render before
-    the photometric terms (see ``apply_exposure``), and returns the updated table.
-    When None the exposure branch is never traced and the off path stays bit identical.
-
-    ``batch`` (survey T6, gsplat ``batch_size``): views processed per step. Every
-    per-view step arg (``gt``, ``vm``, ``bg``, ``vi``, ``pts_*``) carries a leading axis
-    of size ``batch``; ``per_view`` computes one view's photometric + depth terms and is
-    ``jax.vmap``-ed over that axis (the shared scene ``p``/``exp_p`` are broadcast, so the
-    grad is one batch native backward launch in Phase 8a). The batch's per-view L1 and
-    D-SSIM are *mean-reduced* (gsplat averages the loss over the batch); the opacity/scale
-    regularizers are added once per step (they depend only on ``p``). Interactions:
-    ``random_bkgd`` draws ``batch`` independent backgrounds; ``depth_loss`` stacks
-    ``batch`` target sets; ``exposure-opt`` indexes ``batch`` affine rows (their grads land
-    in their own rows and the vjp of broadcast ``exp_p`` sums per-view, and each view
-    touches a distinct row). At ``batch==1`` every per-view arg arrives with a leading
-    1-axis holding exactly the arrays the pre-T6 single-view step received, and the
-    size-1 vmap+mean is the identity, so the default path is numerically identical.
+    Loss terms:
+        * ``bg`` is a per-step render-side background color
+        * ``depth_loss`` adds a scale-normalized masked L1 between the rendered expected-depth
+        channel and those points' camera-space depths, weighted by ``depth_lambda``
+        * ``exp_tx`` per-image exposure table when given an optax optimizer. Applies a view's 3x4
+        affine to the render before the photometric terms, and returns the updated table.
     """
 
     def per_view(
@@ -676,9 +575,7 @@ def _make_step(
     return step
 
 
-# --------------------------------------------------------------------------- #
-# Training
-# --------------------------------------------------------------------------- #
+# region Training
 def train(args: argparse.Namespace) -> dict:
     """Train splats on a COLMAP scene and return metrics."""
     scene = load_scene(
@@ -691,14 +588,8 @@ def train(args: argparse.Namespace) -> dict:
     )
     H, W, intr = scene["H"], scene["W"], scene["intr"]
     ntr = scene["train_imgs"].shape[0]
-    print(
-        f"camera model {scene['cam_name']} -> pinhole intr(fx,fy,cx,cy)="
-        f"{tuple(round(v, 2) for v in intr)}  norm_scale={scene['norm_scale']:.4f}"
-    )
-    print(
-        f"{ntr} train / {len(scene['eval_names'])} eval views; "
-        f"{scene['pts_xyz'].shape[0]} sparse points -> {args.n} gaussians"
-    )
+    logger.info(f"{ntr} train / {len(scene['eval_names'])} eval views")
+    logger.info(f"{scene['pts_xyz'].shape[0]} sparse points -> {args.n} gaussians")
 
     params = init_from_points(scene["pts_xyz"], scene["pts_rgb"], args.n, args.init_opa, args.seed)
 
@@ -711,10 +602,8 @@ def train(args: argparse.Namespace) -> dict:
     tp_mask = scene["train_pts_mask"]
     if args.depth_loss:
         vis = float(tp_mask.sum(1).mean())
-        print(
-            f"depth-reg ON (lambda {args.depth_lambda}): "
-            f"~{vis:.0f}/{args.max_depth_pts} sparse points per train view"
-        )
+        logger.info(f"Depth regularizer: {vis:.0f}/{args.max_depth_pts} points per train view")
+
     eval_imgs = [scene["eval_imgs"][i] for i in range(len(scene["eval_names"]))]
     eval_vms = [jnp.asarray(scene["eval_vms"][i]) for i in range(len(eval_imgs))]
 
@@ -729,16 +618,7 @@ def train(args: argparse.Namespace) -> dict:
 
     eval_idxs = list(range(min(args.n_eval, len(eval_imgs))))
 
-    # --- Batched training steps + sqrt(batch) LR scaling (survey T6, gsplat) -----
-    # gsplat trains ``batch_size`` views/step (loss averaged over the batch) and scales
-    # every LR by sqrt(batch·world_size); its ``steps_scaler`` compresses the schedules
-    # so a batch-B run does 1/B the steps. We follow the same contract: the caller sets
-    # ``--steps`` to the reduced count (steps ≈ total_view_visits / B) and we (a) scale
-    # all Adam LRs -- incl. the means-schedule base -- by sqrt(B), and (b) divide the
-    # per-STEP cadence knobs (relocate_every, refine_start) by B so relocation/refine
-    # fire at the same *view-visit* as B=1. ``refine_stop`` and the means-decay length
-    # both derive from ``--steps`` (already reduced), so they need no extra scaling.
-    # At B=1 sqrt=1 and //1 are no-ops -> the default recipe is unchanged.
+    # Scale batched learning rates by sqrt(B) and adjust relocation steps
     B = args.batch_size
     lr_scale = float(np.sqrt(B))
     relocate_every = max(1, round(args.relocate_every / B)) if args.relocate_every else 0
@@ -748,11 +628,7 @@ def train(args: argparse.Namespace) -> dict:
         round(args.noise_stop_iter / B) if args.noise_stop_iter > 0 else args.noise_stop_iter
     )
     if B > 1:
-        print(
-            f"batched training: B={B} views/step, {args.steps} steps "
-            f"({args.steps * B} view-visits), LRs x{lr_scale:.3f} (sqrt B); "
-            f"relocate_every {relocate_every}, refine [{refine_start}, {refine_stop}]"
-        )
+        logger.info(f"Batched training: LRs scaled to {lr_scale:.3f}, relocate and refine adjusted")
 
     means_sched = optax.exponential_decay(args.means_lr * lr_scale, args.steps, 0.01)
     txs: dict[Hashable, optax.GradientTransformation] = {
@@ -789,10 +665,7 @@ def train(args: argparse.Namespace) -> dict:
         )
         return {**p, "means": m}
 
-    # Per-image affine exposure correction (off by default; see init_exposure).
-    # Own optax param group with its own LR (default 1e-3, matching gsplat's
-    # AppearanceOptModule appearance_opt_lr -- the survey gives no affine-specific
-    # figure, so we mirror gsplat's per-image appearance LR).
+    # Per-image affine exposure correction uses an optax param group with its own LR
     exp_tx = None
     exp_params: jax.Array | None = None
     exp_state: optax.OptState | None = None
@@ -800,10 +673,7 @@ def train(args: argparse.Namespace) -> dict:
         exp_params = init_exposure(ntr)
         exp_tx = optax.adam(args.exposure_lr * lr_scale)  # sqrt(B) scaled too (T6)
         exp_state = exp_tx.init(exp_params)
-        print(
-            f"exposure-opt ON: {ntr} per-image affine transforms "
-            f"(identity-init, lr {args.exposure_lr * lr_scale:g}); eval uses raw render"
-        )
+        logger.info("Exposure correction enabled. Learning per-image affine transforms")
     step_fn = _make_step(
         opt,
         H,
@@ -820,7 +690,7 @@ def train(args: argparse.Namespace) -> dict:
     )
 
     p0 = float(np.mean(eval_psnr(eval_idxs)))
-    print(f"point-init eval PSNR: {p0:.2f} dB")
+    logger.info(f"point-init eval PSNR: {p0:.2f} dB")
     curve = [{"step": 0, "visits": 0, "eval_psnr": round(p0, 3)}]
 
     key = jax.random.key(args.seed + 1)
@@ -880,32 +750,13 @@ def train(args: argparse.Namespace) -> dict:
                     "train_l1": round(float(l1), 5),
                 }
             )
-            print(f"step {it:5d}  train L1 {float(l1):.4f}  eval PSNR {ep:5.2f} dB")
+            logger.info(f"step {it:5d}  train L1 {float(l1):.4f}  eval PSNR {ep:5.2f} dB")
     wall = time.perf_counter() - t0
 
     per_frame = eval_psnr(eval_idxs)
     ep_final = float(np.mean(per_frame))
-    print(f"\nfinal held-out PSNR: {ep_final:.2f} dB  {[round(x, 2) for x in per_frame]}")
-    print(
-        f"{args.steps} steps / {args.n} gaussians in {wall:.1f}s "
-        f"({wall / args.steps * 1000:.1f} ms/step)"
-    )
-
-    # side-by-side render|GT for a few eval views
-    Path("results").mkdir(exist_ok=True)
-    for j, i in enumerate(eval_idxs):
-        r = np.clip(
-            np.asarray(
-                render_params(params, eval_vms[i], H, W, intr, antialiased=args.antialiased)[0]
-            ),
-            0,
-            1,
-        )
-        iio.imwrite(
-            f"results/drone_view{j}.png",
-            (np.concatenate([r, eval_imgs[i]], 1) * 255).astype(np.uint8),
-        )
-        print(f"  results/drone_view{j}.png  ({scene['eval_names'][i]})  {per_frame[j]:.2f} dB")
+    logger.info(f"\nfinal held-out PSNR: {ep_final:.2f} dB  {[round(x, 2) for x in per_frame]}")
+    logger.info(f"{args.steps} steps / {args.n} gaussians in {wall:.1f}s ")
 
     if args.out_ply:
         save_ply(args.out_ply, params)
@@ -930,7 +781,7 @@ def train(args: argparse.Namespace) -> dict:
         Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.out_json, "w") as f:
             json.dump(result, f, indent=2)
-        print(f"wrote {args.out_json}")
+        logger.info(f"wrote {args.out_json}")
     return result
 
 
@@ -942,12 +793,13 @@ def _plot_curve(curve: list[dict], wall: float, final: float) -> None:
     ax.plot(steps, ps, "-o", ms=3, color="C0")
     ax.set_xlabel("training step")
     ax.set_ylabel("held-out PSNR (dB)")
-    ax.set_title(f"drone MCMC fit: {final:.2f} dB in {wall:.0f}s")
+    ax.set_title(f"MCMC fit: {final:.2f} dB in {wall:.0f}s")
     ax.grid(alpha=0.3)
-    Path("reports/figures").mkdir(parents=True, exist_ok=True)
+    dir = Path("reports/figures")
+    dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    fig.savefig("reports/figures/drone_fit_curve.png", dpi=130)
-    print("wrote reports/figures/drone_fit_curve.png")
+    fig.savefig(str(dir / "training.png"), dpi=130)
+    logger.info(f"wrote {dir / 'training.png'}")
 
 
 def main() -> None:
@@ -1025,23 +877,14 @@ def main() -> None:
         "--max-depth-pts",
         type=int,
         default=2048,
-        help="fixed max COLMAP sparse points per view for depth reg "
-        "(static shape; the rest are masked)",
+        help="fixed max COLMAP sparse points per view for depth reg",
     )
     ap.add_argument("--out-json", default=None, help="dump the result dict as JSON")
-    # T5 affine variant: per-training-image 3x4 color transform on the render
-    # before the loss (identity-init, own LR). OFF by default -> off-path is
-    # bit-identical to the pre-T5 trainer. Eval always scores the raw render.
     ap.add_argument(
-        "--exposure-opt",
-        action="store_true",
-        help="learn a per-training-image affine color correction (T5)",
+        "--exposure-opt", action="store_true", help="learn a per-training-image color correction"
     )
     ap.add_argument(
-        "--exposure-lr",
-        type=float,
-        default=1e-3,
-        help="LR for the exposure affine params (gsplat appearance_opt_lr)",
+        "--exposure-lr", type=float, default=1e-3, help="LR for the exposure affine params"
     )
     ap.add_argument("--no-plot", dest="plot", action="store_false")
     args = ap.parse_args()
@@ -1051,4 +894,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("jax").setLevel(logging.WARNING)
     main()

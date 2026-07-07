@@ -75,5 +75,5 @@ MCMC-style training without densification that grows `N`.
 
 Two scripts under `scripts/` are reference training recipes.
 
-- `scripts/train_lego.py` fits the synthetic NeRF lego scene. Its default smoke mode is a fast gradient sanity check. `--quality` runs the full MCMC recipe with per-parameter Adam schedules, relocation and noise, an L1 plus D-SSIM loss, opacity and scale regularizers, and progressive resolution fine-tuning.
+- `scripts/train_lego.py` fits the synthetic NeRF lego scene. It uses per-parameter Adam schedules, relocation and noise, an L1 plus D-SSIM loss, opacity and scale regularizers, and progressive resolution fine-tuning.
 - `scripts/train_colmap.py` fits any COLMAP sparse reconstruction. It reads the intrinsics and extrinsics directly, initializes gaussians from the sparse point cloud, normalizes the scene by a similarity transform, and reuses the same MCMC recipe. It also exposes opt-in depth regularization, per-image affine exposure correction, and batched training steps with sqrt-batch learning-rate scaling.
