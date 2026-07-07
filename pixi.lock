@@ -6777,7 +6777,7 @@ packages:
   - optax>=0.2.8
   - dm-pix>=0.4.5
   - viser>=1.0 ; extra == 'viewer'
-  requires_python: '>=3.12'
+  requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl
   name: nvidia-cuda-nvrtc-cu12
   version: 12.8.93

@@ -5,7 +5,7 @@ description = "High-performance vectorized gaussian splatting rendering in JAX"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "licenses/*"]
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "jax[cuda12]>=0.10",
     "imageio",
@@ -133,7 +133,7 @@ splax = { path = "./", editable = true }
 viser = ">=1.0"
 
 [tool.pixi.feature.docs.dependencies]
-python = ">=3.12"
+python = ">=3.11"
 properdocs = ">=1.5.0"
 mkdocs-material = ">=9.5.0"
 
@@ -161,7 +161,7 @@ docs-serve = { cmd = "properdocs serve --livereload", description = "Serve the d
 # automatically when the environment was recreated. To force a rebuild, delete 
 # .pixi/envs/colmap/bin/colmap.
 [tool.pixi.feature.colmap.dependencies]
-python = ">=3.12"
+python = ">=3.11"
 # Build toolchain
 c-compiler = "*"
 cxx-compiler = "*"
@@ -214,7 +214,7 @@ colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p
 # CUDA extension on first use, so the environment carries the matching CUDA 12.8
 # compiler and headers (torch is cu128). Everything stays inside the pixi env.
 [tool.pixi.feature.tests.dependencies]
-python = ">=3.12"
+python = ">=3.11"
 pytest = "*"
 cuda-nvcc = "12.8.*"
 cuda-cudart-dev = "12.8.*"
