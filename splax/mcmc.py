@@ -1,24 +1,18 @@
-"""splax.mcmc: fixed-budget MCMC training utilities (port of gsplat MCMCStrategy).
+"""Fixed-budget MCMC training utilities.
 
-Ports the essential mechanics of *"3D Gaussian Splatting as Markov Chain Monte
-Carlo"* (Kheradmand et al., NeurIPS 2024) as **fixed-shape** JAX ops, so a JAX
-pipeline that needs static array shapes (no densification that grows ``N``) can
-still get MCMC-style training:
+This module ports the core mechanics of "3D Gaussian Splatting as Markov Chain Monte Carlo" by
+Kheradmand et al. from gsplat to JAX. Every op keeps the gaussian count fixed and works as a mask,
+gather, and scatter over the full array, so it composes with ``jax.jit`` and a static optax state
+without the densification that grows the gaussian count in the original strategy.
 
-- ``relocate`` teleports dead (low-opacity) gaussians onto alive ones sampled in
-  proportion to opacity, correcting opacity/scale so the multiplicity that now
-  shares a location preserves the original's contribution (Eq. 9 of the paper),
-  and returns a boolean ``reset`` mask (which rows' optimizer moments to zero).
-- ``inject_noise`` adds covariance- and opacity-weighted Gaussian noise to the
-  means every step (annealed by the caller via ``scaler``), so low-opacity
-  gaussians random-walk to explore while high-opacity ones stay put.
+``relocate`` teleports dead gaussians onto alive ones sampled in proportion to opacity. It corrects
+opacity and scale so the gaussians that now share a location preserve the original contribution, and
+it reports which rows need their optimizer moments reset. ``inject_noise`` perturbs the means with
+covariance and opacity weighted Gaussian noise every step, so low-opacity gaussians random-walk to
+explore the scene while high-opacity ones stay put.
 
-Every op is a mask + gather + scatter on the full ``N`` with no dynamic shapes,
-so it composes with ``jax.jit`` and a fixed optax state. Ports the CUDA
-``relocation_kernel`` (gsplat/cuda/csrc/RelocationCUDA.cu) and the PyTorch
-``relocate`` / ``inject_noise_to_position`` (gsplat/strategy/ops.py) faithfully.
-``tests/test_mcmc.py`` holds the parity check against a direct transcription of
-the CUDA Eq. 9 loop.
+The relocation math matches gsplat's CUDA relocation kernel, and ``tests/test_mcmc.py`` checks
+parity against a direct transcription of it.
 """
 
 from __future__ import annotations
@@ -27,12 +21,22 @@ import math
 
 import jax
 import jax.numpy as jnp
+from scipy.spatial.transform import Rotation as R
 
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 
 def make_binoms(n_max: int = 51) -> jax.Array:
-    """Binomial-coefficient lookup table ``b[n, k] = C(n, k)`` (gsplat convention)."""
+    """Build the binomial coefficient lookup table ``b[n, k] = C(n, k)``.
+
+    The table follows the gsplat convention, with zeros for ``k > n``.
+
+    Args:
+        n_max: Number of rows and columns of the table.
+
+    Returns:
+        Lookup table of shape ``(n_max, n_max)`` as float32.
+    """
     b = [[math.comb(n, k) if k <= n else 0 for k in range(n_max)] for n in range(n_max)]
     return jnp.asarray(b, jnp.float32)
 
@@ -40,28 +44,28 @@ def make_binoms(n_max: int = 51) -> jax.Array:
 def compute_relocation(
     opacities: jax.Array, scales: jax.Array, ratios: jax.Array, binoms: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
-    """Eq. (9) of the MCMC paper: new opacity/scale for a relocated multiplicity.
+    """Compute the corrected opacity and scale for a relocated multiplicity.
 
-    Args mirror gsplat's ``compute_relocation`` (the CUDA ``relocation_kernel``):
-      opacities (N,)   activation-space opacity of the source gaussians.
-      scales    (N, 3) activation-space per-axis scales of the sources.
-      ratios    (N,)   how many gaussians now share each source's location.
-      binoms  (M, M)   ``make_binoms`` table (``M`` = n_max).
+    Each entry receives the opacity and scale that preserve the source gaussian's contribution when
+    ``ratio`` gaussians share its location.
 
-    Returns ``(new_opacities (N,), new_scales (N, 3))``. ``ratio == 1`` is the
-    identity, so it is safe to apply to *every* gaussian (untouched ones pass
-    through unchanged). Vectorized: the CUDA double loop over ``i in 1..n`` is
-    folded into ``cumsum(binoms)`` indexed by ``ratio - 1``.
+    Args:
+        opacities: Activation-space opacities of the source gaussians, shape ``(N,)``.
+        scales: Activation-space per-axis scales of the sources, shape ``(N, 3)``.
+        ratios: Number of gaussians sharing each source's location, shape ``(N,)``.
+        binoms: Binomial table from ``make_binoms``.
+
+    Returns:
+        Tuple of the new opacities with shape ``(N,)`` and the new scales with shape ``(N, 3)``.
     """
     n_max = binoms.shape[0]
     ratios = jnp.clip(jnp.round(ratios).astype(jnp.int32), 1, n_max)
     new_opac = 1.0 - (1.0 - opacities) ** (1.0 / ratios)
     k = jnp.arange(n_max, dtype=jnp.float32)
-    sign_sqrt = ((-1.0) ** k) / jnp.sqrt(k + 1.0)  # (-1)^k / sqrt(k+1)
-    # cb[m, k] = sum_{i=1..m+1} binoms[i-1, k], so sum_{i=1..n} binoms[i-1, k] = cb[n-1, k]
+    sign_sqrt = ((-1.0) ** k) / jnp.sqrt(k + 1.0)
     cb = jnp.cumsum(binoms, axis=0)
     cbr = cb[ratios - 1]  # (N, n_max)
-    powers = new_opac[:, None] ** (k + 1.0)  # new_opac^(k+1)
+    powers = new_opac[:, None] ** (k + 1.0)
     denom = jnp.sum(cbr * sign_sqrt[None, :] * powers, axis=1)
     coeff = opacities / denom
     return new_opac, coeff[:, None] * scales
@@ -77,19 +81,28 @@ def relocate(
     binoms: jax.Array,
     min_opacity: float = 0.005,
 ) -> tuple[dict[str, jax.Array], jax.Array]:
-    """Relocate dead gaussians onto alive ones at fixed ``N``, a port of gsplat ``relocate``.
+    """Relocate dead gaussians onto alive ones at a fixed gaussian count.
 
-    Operates on the *raw* training parameters (opacity/scale stored as
-    logit/log). Dead = ``sigmoid(opac_logit) <= min_opacity``. Every gaussian
-    samples a source among the alive ones with probability proportional to
-    opacity. Dead gaussians copy their source's mean/quat/color and take the
-    Eq.-9-corrected opacity/scale, while a source chosen by ``c`` dead gaussians
-    has its own opacity/scale corrected for the resulting multiplicity ``c + 1``.
-    Alive, unchosen gaussians pass through untouched (``ratio == 1``).
+    A gaussian counts as dead when its activated opacity falls to ``min_opacity`` or below. Every
+    gaussian samples a source among the alive ones with probability proportional to opacity. Dead
+    gaussians copy the mean, quaternion, and color of their source and take the corrected opacity
+    and scale from ``compute_relocation``, while a source chosen by dead gaussians has its own
+    opacity and scale corrected for the resulting multiplicity. Alive gaussians that were not chosen
+    pass through untouched.
 
-    Returns ``(new_params_dict, reset_mask)`` where ``new_params_dict`` has the
-    same keys as the inputs and ``reset_mask`` (N,) marks rows whose optimizer
-    moments the caller should zero (sources + dead copies).
+    Args:
+        key: PRNG key for the source sampling.
+        means: Gaussian centers, shape ``(N, 3)``.
+        log_scales: Log of the per-axis scales, shape ``(N, 3)``.
+        quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
+        colors_logit: Color logits, shape ``(N, 3)``.
+        opac_logit: Opacity logits, one entry per gaussian.
+        binoms: Binomial table from ``make_binoms``.
+        min_opacity: Opacity threshold at or below which a gaussian counts as dead.
+
+    Returns:
+        Tuple of the new parameter dict, with the same keys as the inputs, and a boolean mask of
+        shape ``(N,)`` marking the rows whose optimizer moments the caller should zero.
     """
     n = means.shape[0]
     opac = jax.nn.sigmoid(opac_logit).reshape(n)
@@ -120,26 +133,6 @@ def relocate(
     return out, reset
 
 
-def _quat_to_rotmat(quats: jax.Array) -> jax.Array:
-    """Normalized wxyz quaternions -> rotation matrices (N, 3, 3) (gsplat convention)."""
-    q = quats / (jnp.linalg.norm(quats, axis=-1, keepdims=True) + _EPS)
-    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-    return jnp.stack(
-        [
-            1 - 2 * (y * y + z * z),
-            2 * (x * y - w * z),
-            2 * (x * z + w * y),
-            2 * (x * y + w * z),
-            1 - 2 * (x * x + z * z),
-            2 * (y * z - w * x),
-            2 * (x * z - w * y),
-            2 * (y * z + w * x),
-            1 - 2 * (x * x + y * y),
-        ],
-        axis=-1,
-    ).reshape(-1, 3, 3)
-
-
 def inject_noise(
     key: jax.Array,
     means: jax.Array,
@@ -148,21 +141,29 @@ def inject_noise(
     opac_logit: jax.Array,
     scaler: float,
 ) -> jax.Array:
-    """Add covariance weighted Gaussian noise to ``means``.
+    """Add covariance and opacity weighted Gaussian noise to the means.
 
-    ``noise = Sigma @ (randn * op_sigmoid(1 - opacity) * scaler)`` with
-    ``Sigma = R diag(scale^2) R^T`` and ``op_sigmoid(x) = sigmoid(100 (x - 0.995))``
-    so low-opacity gaussians get near-full noise and high-opacity ones ~zero. The
-    caller anneals via ``scaler = means_lr(step) * noise_lr``. Returns new means.
+    Each gaussian draws its noise from its own covariance and attenuates it with a steep sigmoid of
+    the opacity, so gaussians with low opacity receive close to the full perturbation while opaque
+    ones barely move. The caller anneals the strength through ``scaler``, typically as the means
+    learning rate at the current step times a noise factor.
+
+    Args:
+        key: PRNG key for the noise.
+        means: Gaussian centers, shape ``(N, 3)``.
+        log_scales: Log of the per-axis scales, shape ``(N, 3)``.
+        quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
+        opac_logit: Opacity logits, one entry per gaussian.
+        scaler: Global noise strength.
+
+    Returns:
+        The perturbed means, shape ``(N, 3)``.
     """
     opac = jax.nn.sigmoid(opac_logit).reshape(means.shape[0])
     scales = jnp.exp(log_scales)
-    rot = _quat_to_rotmat(quats)
+    rot = R.from_quat(quats).as_matrix()
     m = rot * scales[:, None, :]  # R diag(scale) with Sigma = m m^T
     op_sig = jax.nn.sigmoid(100.0 * ((1.0 - opac) - 0.995))
     noise = jax.random.normal(key, means.shape) * (op_sig * scaler)[:, None]
     noise = jnp.einsum("nij,nkj,nk->ni", m, m, noise)  # Sigma @ noise
     return means + noise
-
-
-__all__ = ["make_binoms", "compute_relocation", "relocate", "inject_noise"]

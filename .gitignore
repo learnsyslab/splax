@@ -12,3 +12,4 @@ dev
 reports/
 results/
 .pixi-src/
+.vscode/

@@ -1,48 +1,45 @@
 """Tile intersection, sort keys, and bin edges shared by projection and rasterization.
 
-The opacity-aware tight tile intersection is a port of gsplat's SpeedySplat path
-(SNUGBOX plus AccuTile, ProjectionEWA3DGSFused.cu and IntersectTile.cu). Instead of
-an isotropic 3-sigma bbox, each gaussian gets a tight ellipse at the opacity-aware
-isocontour level t = min(EXTEND^2, 2 ln(opacity / ALPHA)). Outside that level the
-gaussian's alpha drops below 1/255, so tiles past it are invisible. The AccuTile
-walk marches the ellipse column by column and emits only the tiles its boundary
-spans. Projection counts tiles with the same walk that rasterization uses to emit
-sort keys, so the counted and emitted totals agree bit for bit. This is required,
-otherwise the per-gaussian sort buffer offsets in cum_tiles_hit corrupt.
+The opacity-aware tight tile intersection ports gsplat's SpeedySplat path, its SNUGBOX and AccuTile
+stages. Instead of an isotropic 3-sigma bounding box, each gaussian gets a tight ellipse at the
+opacity-aware isocontour level. Outside that level the gaussian's alpha drops below ``1/255``, so
+tiles past it are invisible. The AccuTile walk marches the ellipse column by column and emits only
+the tiles its boundary spans. Projection counts tiles with the same walk rasterization uses to emit
+sort keys, so the counted and emitted totals agree bit for bit.
 
-Sort keys come in two widths. When image and tile ids leave at least 16 low bits,
-the whole key packs into one non-negative int32 (iid | tile_id | quantized depth),
-halving the radix sort passes and quartering the bytes moved. The sort stage drops
-2.7 to 3.1x on large frames. Otherwise the 64 bit key
-(iid | tile_id) << 32 | depth_bits is the automatic fallback.
+Sort keys come in two widths. When the image and tile ids leave at least 16 low bits, the whole key
+packs into one non-negative int32 holding the image id, the tile id, and the quantized depth. This
+halves the radix sort passes and quarters the bytes moved, dropping the sort stage by 2.7 to 3.1x on
+large frames. Otherwise a 64 bit key carrying the image and tile ids above the depth bits is the
+automatic fallback.
 """
 
 import warp as wp
 
 wp.init()
 
-# One 16x16 pixel tile is processed by one 256-thread block. Tile shapes must be
-# static, so these are compile-time constants and the only supported geometry.
+# One 16x16 pixel tile is processed by one 256-thread block. Tile shapes must be static, so these
+# are compile-time constants and the only supported geometry.
 BLOCK_WIDTH = wp.constant(16)
 BLOCK_SIZE = wp.constant(256)
 
-GAUSSIAN_EXTEND_SQ = wp.constant(3.33 * 3.33)  # (max ellipse extent in sigma)^2
+GAUSSIAN_EXTEND_SQ = wp.constant(3.33 * 3.33)  # squared max ellipse extent in sigma
 ALPHA_THRESHOLD = wp.constant(1.0 / 255.0)
 
 
 @wp.struct
 class _Ellipse:
-    """Opacity-aware ellipse and its tile walk state (gsplat SNUGBOX + AccuTile)."""
+    """Opacity-aware ellipse and its tile walk state, from gsplat's SNUGBOX and AccuTile."""
 
-    A: wp.float32  # conic (inverse 2d covariance upper triangle)
+    A: wp.float32  # conic, the inverse 2d covariance upper triangle
     B: wp.float32
     C: wp.float32
     disc: wp.float32  # B*B - A*C, negative for a real ellipse
     t: wp.float32  # opacity-aware isocontour level
     px: wp.float32  # ellipse center in image pixels, un-swapped
     py: wp.float32
-    # bbox_* and rect_* store the walk's outer axis in component [0]. An x-major
-    # walk (isY=0) keeps (x, y), a y-major walk swaps them.
+    # bbox_* and rect_* store the walk's outer axis in component 0. An x-major walk keeps x then y,
+    # and a y-major walk swaps them.
     bbox_min: wp.vec2
     bbox_max: wp.vec2
     bbox_argmin: wp.vec2
@@ -50,7 +47,7 @@ class _Ellipse:
     rect_min: wp.vec2i
     rect_max: wp.vec2i
     valid: wp.bool  # True if the ellipse's tile rectangle is non-empty
-    isY: wp.bool  # True if the walk marches over the y tiles (shorter span outer)
+    isY: wp.bool  # True if the walk marches over the y tiles with the shorter span outer
 
 
 @wp.func
@@ -65,8 +62,7 @@ def _ellipse_intersection(
     isY: wp.bool,
     coord: wp.float32,
 ) -> wp.vec2:
-    # Where the boundary line u=coord meets the ellipse, giving the [lower, upper]
-    # extent of the cross axis at that line.
+    """Compute the cross-axis extent of the ellipse at a given line along the outer axis."""
     if isY:
         p_u = py
         p_v = px
@@ -81,7 +77,7 @@ def _ellipse_intersection(
 
 
 @wp.func
-def _ellipse_setup(
+def ellipse_setup(
     A: wp.float32,
     B: wp.float32,
     C: wp.float32,
@@ -91,8 +87,11 @@ def _ellipse_setup(
     tile_width: wp.int32,
     tile_height: wp.int32,
 ) -> _Ellipse:
-    # Tight AABB of the ellipse plus its tile rectangle, then pick the shorter tile
-    # span as the walk's outer axis. Faithful to IntersectTile.cu:210-252.
+    """Initialize the ellipse and its tile walk state.
+
+    We compute the tight axis-aligned bounding box of the ellipse plus its tile rectangle, and then
+    pick the shorter tile span as the walk's outer axis.
+    """
     s = _Ellipse()
     s.valid = wp.bool(False)
     s.A = A
@@ -142,20 +141,21 @@ def _ellipse_setup(
 
 
 @wp.func
-def _ellipse_init_span(s: _Ellipse) -> wp.vec2:
-    # Cross-axis extent carried into the first column. The boundary at the rect's
-    # leading line, or a degenerate default when that line lies outside the bbox.
+def ellipse_init_span(s: _Ellipse) -> wp.vec2:
+    """Cross-axis extent of the ellipse at the leading line of the walk."""
     min_line0 = wp.float32(s.rect_min[0]) * wp.float32(BLOCK_WIDTH)
+    # Return a degenerate default when the line lies outside the bbox.
     if s.bbox_min[0] <= min_line0:
         return _ellipse_intersection(s.A, s.B, s.C, s.disc, s.t, s.px, s.py, s.isY, min_line0)
     return wp.vec2(s.bbox_max[1], s.bbox_min[1])
 
 
 @wp.func
-def _ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
-    # One outer column of the walk. Returns (min_tile_v, max_tile_v, I_max) where
-    # I_max feeds the next column as its I_min (gsplat's rolling intersect lines).
-    # The cross-axis tile range is [min_v, max_v).
+def ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
+    """Cross-axis tile range of the ellipse at one outer tile column."""
+    # One outer column of the walk. Returns min_tile_v, max_tile_v, and I_max, where I_max feeds the
+    # next column as its I_min following gsplat's rolling intersect lines. The cross-axis tile range
+    # is [min_v, max_v).
     block = wp.float32(BLOCK_WIDTH)
     min_line = wp.float32(u) * block
     max_line = min_line + block
@@ -177,50 +177,46 @@ def _ellipse_column(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
 
 
 @wp.func
-def _ellipse_tile_count(s: _Ellipse) -> wp.int32:
+def ellipse_tile_count(s: _Ellipse) -> wp.int32:
     # Total tiles the ellipse touches, written to num_tiles_hit by projection.
     if not s.valid:
         return wp.int32(0)
-    I_min = _ellipse_init_span(s)
+    I_min = ellipse_init_span(s)
     count = wp.int32(0)
     for u in range(s.rect_min[0], s.rect_max[0]):
-        r = _ellipse_column(u, s, I_min)
+        r = ellipse_column(u, s, I_min)
         count = count + (wp.int32(r[1]) - wp.int32(r[0]))
         I_min = wp.vec2(r[2], r[3])
     return count
 
 
 def _bits_for_count(count: int) -> int:
-    """Bits needed to index [0, count)."""
+    """Return the number of bits needed to index ``[0, count)``."""
     return 0 if count <= 1 else (count - 1).bit_length()
 
 
-# Persistent grow-only scratch cache. The pipeline needs three buffers
-# whose sizes depend on the data-dependent intersection count:
-#   isect_ids / gaussian_ids  radix sort key and value ping-pong buffers. Warp's
-#     radix_sort_pairs mandates a 2*count backing array because it drives a
-#     cub::DoubleBuffer internally.
-#   tile_bins  per (image, tile) bin edges of length B*num_tiles.
-# Re-allocating from the mempool every frame costs a cold ~14 ms re-malloc of ~3 GB
-# at B=8/1M/1080p. One set of buffers is kept per device, keyed on the static shape
-# signature (B, N, num_tiles). Callers invoke this from jitted functions, so the
-# signature is fixed per compiled executable and repeated calls reuse stable
-# buffers. A signature change drops everything, so a big config's scratch never
-# lingers into a smaller one. Within one signature the sort buffers track the
-# running max intersection count with 1.25x headroom.
-# The sort buffers are fully overwritten in their valid prefix every frame, so
-# there is no stale-data hazard. tile_bins is the exception. The bin-edge kernel
-# only touches bins that own intersections, so the used prefix must be zeroed
-# each frame.
+# Persistent grow-only scratch cache. The pipeline needs three buffers whose sizes depend on the
+# data-dependent intersection count:
+#   isect_ids / gaussian_ids  radix sort key and value ping-pong buffers. Warp's radix_sort_pairs
+#     mandates a 2*count backing array because it drives a cub::DoubleBuffer internally.
+#   tile_bins  per-image per-tile bin edges of length B*num_tiles.
+# Re-allocating from the mempool every frame costs a cold ~14 ms re-malloc of ~3 GB at B=8, 1M
+# gaussians, and 1080p. One set of buffers is kept per device, keyed on the static shape signature
+# over B, N, and num_tiles. Callers invoke this from jitted functions, so the signature is fixed per
+# compiled executable and repeated calls reuse stable buffers. A signature change drops everything,
+# so a big config's scratch never lingers into a smaller one. Within one signature the sort buffers
+# track the running max intersection count with 1.25x headroom.
+# The sort buffers are fully overwritten in their valid prefix every frame, so there is no stale
+# data hazard. tile_bins is the exception. The bin-edge kernel only touches bins that own
+# intersections, so the used prefix must be zeroed each frame.
 _SCRATCH_HEADROOM = 1.25
 _scratch_cache: dict = {}
 
-# Cached post-sync CUDA graphs (see _rasterize._forward_graph). A graph
-# records the addresses of the scratch buffers, so any scratch reallocation makes
-# every cached graph dangling and the cache must be purged. Graphs are destroyed
-# before the scratch refs drop, so each is torn down while the buffers it
-# recorded are still alive. The "gen" counter in each scratch entry bumps on
-# every sort-buffer reallocation and is part of the graph cache key.
+# Cached post-sync CUDA graphs, see _rasterize._forward_graph. A graph records the addresses of the
+# scratch buffers, so any scratch reallocation makes every cached graph dangling and the cache must
+# be purged. Graphs are destroyed before the scratch refs drop, so each is torn down while the
+# buffers it recorded are still alive. The "gen" counter in each scratch entry bumps on every
+# sort-buffer reallocation and is part of the graph cache key.
 _graph_cache: dict = {}
 
 
@@ -391,14 +387,14 @@ def _map_intersects_32bit(
     opac = map_opacities[idx % opac_mod]
     t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
     conic = conics[idx]
-    setup = _ellipse_setup(
+    setup = ellipse_setup(
         conic[0], conic[1], conic[2], t, center[0], center[1], tile_bounds_x, tile_bounds_y
     )
     if not setup.valid:
         return
-    I_min = _ellipse_init_span(setup)
+    I_min = ellipse_init_span(setup)
     for u in range(setup.rect_min[0], setup.rect_max[0]):
-        rc = _ellipse_column(u, setup, I_min)
+        rc = ellipse_column(u, setup, I_min)
         mn = wp.int32(rc[0])
         mx = wp.int32(rc[1])
         for v in range(mn, mx):
@@ -449,14 +445,14 @@ def _map_intersects_64bit(
     opac = map_opacities[idx % opac_mod]
     t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
     conic = conics[idx]
-    setup = _ellipse_setup(
+    setup = ellipse_setup(
         conic[0], conic[1], conic[2], t, center[0], center[1], tile_bounds_x, tile_bounds_y
     )
     if not setup.valid:
         return
-    I_min = _ellipse_init_span(setup)
+    I_min = ellipse_init_span(setup)
     for u in range(setup.rect_min[0], setup.rect_max[0]):
-        rc = _ellipse_column(u, setup, I_min)
+        rc = ellipse_column(u, setup, I_min)
         mn = wp.int32(rc[0])
         mx = wp.int32(rc[1])
         for v in range(mn, mx):

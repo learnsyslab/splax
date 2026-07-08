@@ -1,15 +1,14 @@
 """Differentiable rendering entry point.
 
-splax.training.render composes the jax.custom_vjp projection and rasterization
-primitives, so jax.grad flows through it with respect to means3d, scales, quats,
-colors, opacities, and the camera pose viewmat. It shares every Warp kernel with
-the inference path. The only difference is that the forward rule keeps final_Ts
-and final_idx alive as backward residuals.
+``splax.training.render`` composes the projection and rasterization primitives with their custom
+autodiff rules, so ``jax.grad`` flows through it with respect to the gaussian parameters and the
+camera pose. It shares every Warp kernel with the inference path and differs only in the forward
+rule keeping the blend residuals alive for the backward pass.
 
-Batched gradients are batch-native. jax.vmap(jax.grad(render)) runs a single
-batched backward launch and matches per-sample sequential grads. Broadcast
-inputs shared across the batch get their gradients summed over the batch axis,
-per-image inputs such as a batch of camera poses get per-image gradients.
+Batched gradients are batch-native. ``jax.vmap(jax.grad(render))`` runs a single batched backward
+launch and matches per-sample sequential gradients. Inputs shared across the batch get their
+gradients summed over the batch axis, while per-image inputs such as a batch of camera poses get
+per-image gradients.
 """
 
 from __future__ import annotations
@@ -42,27 +41,41 @@ def render(
 ) -> tuple[jax.Array, jax.Array | None]:
     """Render a splat with autodiff support.
 
-    Returns (image, depths) where depths is None unless render_depth=True. The
-    image matches splax.inference.render's forward result.
+    The image matches the forward result of ``splax.inference.render``. Gradient selection follows
+    ``jax.grad`` and its argnums, and the backward pass launches only the kernels the requested
+    gradients need, so camera pose optimization for example pays only for the camera gradient.
 
-    Gradient selection is pure jax.grad / argnums. The projection backward
-    launches only the kernels the requested gradients need, so for example
-    camera-pose optimization pays only for the camera gradient.
+    Antialiased rendering enables the Mip-Splatting opacity compensation. The per-gaussian
+    compensation factor is multiplied into the blend opacity and cancels the area inflation that
+    thin gaussians get from the screen-space dilation. Its gradient chains back to the scales,
+    quaternions, and means.
 
-    antialiased=True enables the Mip-Splatting opacity compensation. The
-    per-gaussian det-ratio factor from opacity_compensation is multiplied into
-    the blend opacity, cancelling the area inflation thin gaussians get from the
-    0.3 px dilation. Its gradient chains back to scales, quats, and means through
-    the existing conic vjp. The tile intersection stays on the raw opacity so the
-    sort offsets remain valid.
+    Depth rendering additionally returns the alpha-blended expected depth map, used for sparse-point
+    depth regularization. The depth channel is differentiable and routes its cotangent to the
+    gaussian geometry and the camera pose. The image is identical to the plain path either way.
 
-    render_depth=True also returns the alpha-blended expected-depth map, used for
-    sparse-point depth regularization. The depth channel is differentiable and
-    routes its cotangent to the gaussian geometry and camera pose. The image is
-    identical to the plain path either way.
+    The background is always a constant. For inference without autodiff use
+    ``splax.inference.render``.
 
-    Background is always a constant. For inference without autodiff use
-    splax.inference.render.
+    Args:
+        means3d: Gaussian centers, shape ``(N, 3)``.
+        scales: Per-axis scales, shape ``(N, 3)``.
+        quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
+        colors: Gaussian colors, shape ``(N, 3)``.
+        opacities: Gaussian opacities, one entry per gaussian.
+        viewmat: World-to-camera matrix, shape ``(4, 4)``.
+        background: Constant background color, shape ``(3,)``.
+        img_shape: Image size as ``(height, width)`` in pixels.
+        f: Focal lengths ``(fx, fy)`` in pixels.
+        c: Principal point ``(cx, cy)`` in pixels, defaulting to the image center.
+        glob_scale: Global factor applied to all scales.
+        clip_thresh: Near-plane clipping threshold.
+        antialiased: Enable the Mip-Splatting opacity compensation.
+        render_depth: Additionally render the expected depth map.
+
+    Returns:
+        Tuple of the rendered image and the depth map, where the depth map is None unless
+        ``render_depth`` is True.
     """
     xys, depths, radii, conics, _num_tiles_hit, cum_tiles_hit = project(
         means3d,
@@ -110,6 +123,3 @@ def render(
         map_opacities=map_opacities,
     )
     return img, None
-
-
-__all__ = ["render"]

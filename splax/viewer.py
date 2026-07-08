@@ -1,8 +1,8 @@
 """Web-based splat viewer built on `viser <https://viser.studio>`_.
 
 ``Viewer`` wraps a ``viser.ViserServer`` and exposes splats as named rigid objects. ``add_splats``
-uploads the gaussians of one object once (converted to the covariance form viser's browser-side
-rasterizer consumes), and ``update_pose`` moves objects afterwards without re-uploading.
+uploads the gaussians of one object once, and ``update_pose`` moves objects afterwards without
+re-uploading.
 
 Viser is an optional dependency that can be installed with ``pip install splax[viewer]``.
 """
@@ -23,21 +23,6 @@ from scipy.spatial.transform import Rotation as R
 
 if TYPE_CHECKING:
     import jax
-
-
-def covariances(scales: jax.Array | np.ndarray, quats: jax.Array | np.ndarray) -> np.ndarray:
-    """Covariance matrices of gaussians from render-space scales and quats.
-
-    Args:
-        scales: (N, 3) positive per-axis scales.
-        quats: (N, 4) wxyz unit quaternions.
-
-    Returns:
-        (N, 3, 3) float32 covariances ``rot @ diag(scales**2) @ rot.T``.
-    """
-    scales = np.asarray(scales, np.float32)
-    rot = R.from_quat(np.asarray(quats, np.float32), scalar_first=True).as_matrix()
-    return np.einsum("nij,nj,nkj->nik", rot, scales**2, rot).astype(np.float32)
 
 
 class Viewer:
@@ -92,7 +77,7 @@ class Viewer:
         self._handles[name] = self._server.scene.add_gaussian_splats(
             f"/{name}",
             centers=np.asarray(means, np.float32),
-            covariances=covariances(scales, quats),
+            covariances=_covariances(scales, quats),
             rgbs=np.asarray(colors, np.float32),
             opacities=np.asarray(opacities, np.float32).reshape(-1, 1),
             position=np.asarray(position, np.float32),
@@ -121,3 +106,18 @@ class Viewer:
     def close(self) -> None:
         """Stop the web server."""
         self._server.stop()
+
+
+def _covariances(scales: jax.Array | np.ndarray, quats: jax.Array | np.ndarray) -> np.ndarray:
+    """Covariance matrices of gaussians from render-space scales and quats.
+
+    Args:
+        scales: (N, 3) positive per-axis scales.
+        quats: (N, 4) wxyz unit quaternions.
+
+    Returns:
+        (N, 3, 3) float32 covariances ``rot @ diag(scales**2) @ rot.T``.
+    """
+    scales = np.asarray(scales, np.float32)
+    rot = R.from_quat(np.asarray(quats, np.float32), scalar_first=True).as_matrix()
+    return np.einsum("nij,nj,nkj->nik", rot, scales**2, rot).astype(np.float32)

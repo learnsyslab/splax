@@ -21,8 +21,8 @@ from splax._intersect import (
     ALPHA_THRESHOLD,
     BLOCK_WIDTH,
     GAUSSIAN_EXTEND_SQ,
-    _ellipse_setup,
-    _ellipse_tile_count,
+    ellipse_setup,
+    ellipse_tile_count,
 )
 
 
@@ -246,8 +246,8 @@ def _project_kernel(
         or center_y - radius_y >= wp.float32(img_h)
     ):
         return
-    setup = _ellipse_setup(conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y)
-    count = _ellipse_tile_count(setup)
+    setup = ellipse_setup(conic[0], conic[1], conic[2], t, center_x, center_y, tb_x, tb_y)
+    count = ellipse_tile_count(setup)
     if count <= 0:
         return
     num_tiles_hit[idx] = count
