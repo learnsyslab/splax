@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import pytest
 
 import splax
-from splax import _project
+from splax._project import _project
 
 
 class _PK(TypedDict):
