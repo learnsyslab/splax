@@ -23,6 +23,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from scipy.spatial.transform import RigidTransform as TF
+from scipy.spatial.transform import Rotation as R
 
 import splax
 from splax._project import _project_call
@@ -58,57 +60,14 @@ def _kw(H: int, W: int) -> _KW:
     }
 
 
-def _euler_T(rx: float, ry: float, rz: float, t: tuple[float, float, float]) -> np.ndarray:
-    """4x4 rigid transform from XYZ Euler angles in radians plus a translation."""
-
-    def rot(axis: int, a: float) -> np.ndarray:
-        ca, sa = np.cos(a), np.sin(a)
-        m = np.eye(3, dtype=np.float64)
-        i, j = [(1, 2), (0, 2), (0, 1)][axis]
-        m[i, i] = ca
-        m[j, j] = ca
-        m[i, j] = -sa if axis != 1 else sa
-        m[j, i] = sa if axis != 1 else -sa
-        return m
-
-    R = rot(2, rz) @ rot(1, ry) @ rot(0, rx)
-    T = np.eye(4, dtype=np.float32)
-    T[:3, :3] = R.astype(np.float32)
-    T[:3, 3] = t
-    return T
-
-
-def _rotmat_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
-    w = np.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2.0
-    x = (R[2, 1] - R[1, 2]) / (4.0 * w)
-    y = (R[0, 2] - R[2, 0]) / (4.0 * w)
-    z = (R[1, 0] - R[0, 1]) / (4.0 * w)
-    return np.array([w, x, y, z], np.float32)
-
-
-def _qmul_wxyz(a: jax.Array, b: jax.Array) -> jax.Array:
-    w1, x1, y1, z1 = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
-    w2, x2, y2, z2 = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-    return jnp.stack(
-        [
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        ],
-        axis=-1,
-    )
-
-
 def _manual_move(
     means: jax.Array, quats: jax.Array, T: np.ndarray, start: int, stop: int
 ) -> tuple[jax.Array, jax.Array]:
     """Reference transform of a slice, applied to the splat arrays in JAX."""
-    R = jnp.asarray(T[:3, :3])
-    t = jnp.asarray(T[:3, 3])
-    q_obj = jnp.asarray(_rotmat_to_quat_wxyz(T[:3, :3]))
-    m2 = means.at[start:stop].set(means[start:stop] @ R.T + t)
-    q2 = quats.at[start:stop].set(_qmul_wxyz(q_obj[None], quats[start:stop]))
+    transform = TF.from_matrix(jnp.asarray(T))
+    rotated = transform.rotation * R.from_quat(quats[start:stop], scalar_first=True)
+    m2 = means.at[start:stop].set(transform.apply(means[start:stop]))
+    q2 = quats.at[start:stop].set(rotated.as_quat(scalar_first=True))
     return m2, q2
 
 
@@ -143,7 +102,8 @@ def test_projection_matches_manual_transform() -> None:
     n = 4000
     means, scales, quats, _colors, opac = _scene(n, seed=2)
     kw = _kw(128, 128)
-    T = _euler_T(0.26, -0.17, 0.52, (0.3, -0.2, 0.1))
+    rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
+    T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
     args = (n, kw["img_shape"], kw["f"], kw["c"], 1.0, 0.01)
     tf_ids = jnp.full((n,), -1, jnp.int32).at[:1000].set(0)
     a = _project_call(
@@ -167,7 +127,8 @@ def test_render_matches_manual_transform() -> None:
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=3)
     kw = _kw(128, 128)
-    T = _euler_T(0.26, -0.17, 0.52, (0.3, -0.2, 0.1))
+    rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
+    T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
     moved = np.asarray(
         splax.inference.render(
             means,
@@ -195,7 +156,9 @@ def test_vmap_over_transforms_matches_sequential() -> None:
     n, B = 4000, 3
     means, scales, quats, colors, opac = _scene(n, seed=4)
     kw = _kw(96, 96)
-    Ts = np.stack([_euler_T(0.0, 0.0, 0.3 * i, (0.05 * i, -0.03 * i, 0.0)) for i in range(B)])
+    angles = np.array([[0.0, 0.0, 0.3 * i] for i in range(B)])
+    trans = np.array([[0.05 * i, -0.03 * i, 0.0] for i in range(B)])
+    Ts = TF.from_components(trans, R.from_euler("xyz", angles)).as_matrix().astype(np.float32)
     tfs = jnp.asarray(Ts)[:, None]  # (B, 1, 4, 4)
 
     def render_tf(tf: jax.Array) -> jax.Array:
@@ -222,8 +185,10 @@ def test_two_objects_move_independently() -> None:
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=5)
     kw = _kw(128, 128)
-    Ta = _euler_T(0.0, 0.0, 0.4, (0.2, 0.0, 0.0))
-    Tb = _euler_T(0.3, 0.0, 0.0, (-0.1, 0.15, 0.0))
+    rot_a = R.from_euler("xyz", [0.0, 0.0, 0.4])
+    Ta = TF.from_components((0.2, 0.0, 0.0), rot_a).as_matrix().astype(np.float32)
+    rot_b = R.from_euler("xyz", [0.3, 0.0, 0.0])
+    Tb = TF.from_components((-0.1, 0.15, 0.0), rot_b).as_matrix().astype(np.float32)
     slices = ((0, 800), (2000, 2600))
     both = np.asarray(
         splax.inference.render(

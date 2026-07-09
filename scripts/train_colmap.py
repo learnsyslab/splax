@@ -27,6 +27,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import optax
 from scipy.spatial import KDTree
+from scipy.spatial.transform import RigidTransform as TF
+from scipy.spatial.transform import Rotation as R
 
 import splax
 
@@ -134,19 +136,6 @@ def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray,
     )
 
 
-def quat2mat(q: np.ndarray) -> np.ndarray:
-    """COLMAP wxyz quaternion -> 3x3 rotation matrix."""
-    q = q / np.linalg.norm(q)
-    w, x, y, z = q
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-        ]
-    )
-
-
 def _view_depth_targets(
     im: dict,
     vm: np.ndarray,
@@ -217,7 +206,9 @@ def load_scene(
         # (temporally ordered) center path by more than pose_filter times the median
         # consecutive-frame step. The window (15) absorbs excursions up to ~5 frames.
         n_all = len(images)
-        ctr_path = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in images])
+        tvecs = np.array([im["tvec"] for im in images])
+        rots = R.from_quat(np.array([im["qvec"] for im in images]), scalar_first=True)
+        ctr_path = TF.from_components(tvecs, rots).inv().translation
         med_step = np.median(np.linalg.norm(np.diff(ctr_path, axis=0), axis=1))
         half = 7
         keep_mask = np.ones(n_all, bool)
@@ -236,7 +227,9 @@ def load_scene(
     # camera centers + similarity normalization. The gauge comes from the full filtered list,
     # BEFORE the eval split and any train-view sampling, so runs with different sampling share
     # the same normalized world and their eval scores stay comparable.
-    centers = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in images])
+    tvecs = np.array([im["tvec"] for im in images])
+    rots = R.from_quat(np.array([im["qvec"] for im in images]), scalar_first=True)
+    centers = TF.from_components(tvecs, rots).inv().translation
     ctr = np.median(centers, axis=0)
     s = 1.0 / np.mean(np.linalg.norm(centers - ctr, axis=1))
 
@@ -250,11 +243,10 @@ def load_scene(
         # motion of the same order). Uniform-in-time sampling underserves fast sections, which
         # is where held-out views end up farthest from their training neighbours.
         n_all = len(train_images)
-        ctr_path = np.array([-quat2mat(im["qvec"]).T @ im["tvec"] for im in train_images])
-        Rs = np.array([quat2mat(im["qvec"]) for im in train_images])
-        rel = np.einsum("nij,nkj->nik", Rs[1:], Rs[:-1])
-        tr = np.clip((np.trace(rel, axis1=1, axis2=2) - 1) / 2, -1, 1)
-        ang = np.arccos(tr)
+        tvecs = np.array([im["tvec"] for im in train_images])
+        rots = R.from_quat(np.array([im["qvec"] for im in train_images]), scalar_first=True)
+        ctr_path = TF.from_components(tvecs, rots).inv().translation
+        ang = (rots[1:] * rots[:-1].inv()).magnitude()
         dist = np.linalg.norm(np.diff(ctr_path, axis=0), axis=1) + ang
         arc = np.concatenate([[0.0], np.cumsum(dist)])
         targets = np.linspace(0.0, arc[-1], adaptive_views)
@@ -268,10 +260,10 @@ def load_scene(
 
     def normalize_pose(qvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
         """Similarity-transform a w2c pose: X' = s (X - ctr). R stays, t' = s(t + R ctr)."""
-        R = quat2mat(qvec)
-        t_new = s * (tvec + R @ ctr)
+        rmat = R.from_quat(qvec, scalar_first=True).as_matrix()
+        t_new = s * (tvec + rmat @ ctr)
         vm = np.eye(4, dtype=np.float32)
-        vm[:3, :3] = R
+        vm[:3, :3] = rmat
         vm[:3, 3] = t_new
         return vm
 
@@ -536,6 +528,8 @@ def apply_pose_delta(vm: jax.Array, delta: jax.Array) -> jax.Array:
     zero-rotation init has well-defined gradients.
     """
     w, t = delta[:3], delta[3:]
+    # Not scipy's Rotation.from_rotvec here: it returns NaN gradients at the zero-vector init.
+    # The smooth A/B form below keeps jax.grad finite at theta = 0.
     theta2 = jnp.sum(w * w) + 1e-12
     theta = jnp.sqrt(theta2)
     A = jnp.sin(theta) / theta

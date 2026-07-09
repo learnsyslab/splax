@@ -233,6 +233,8 @@ TORCH_CUDA_ARCH_LIST = "8.9;12.0"
 # conda-forge keeps the CUDA headers under targets/, torch's extension builder
 # expects them on the host compiler search path.
 CPATH = "$CONDA_PREFIX/targets/x86_64-linux/include"
+# Required for scipy.spatial.transform's Rotation / RigidTransform to work with JAX
+SCIPY_ARRAY_API = "1"
 
 [tool.pixi.feature.tests.pypi-dependencies]
 torch = ">=2.4"

@@ -22,6 +22,9 @@ from pathlib import Path
 import numpy as np
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("SCIPY_ARRAY_API", "1")
+
+from scipy.spatial.transform import Rotation as R
 
 import splax
 from splax.viewer import Viewer
@@ -45,8 +48,8 @@ def main(scene: Path, obj: Path, port: int, radius: float, height: float, freq: 
             angle = 2 * np.pi * freq * (time.time() - t_start)
             pos = (radius * np.cos(angle), radius * np.sin(angle), height)
             # Yaw along the direction of travel: rotation of angle + pi/2 around +z (wxyz).
-            yaw = angle / 2 + np.pi / 4
-            viewer.update_pose("object", pos, (np.cos(yaw), 0.0, 0.0, np.sin(yaw)))
+            quat = R.from_euler("z", angle + np.pi / 2).as_quat(scalar_first=True)
+            viewer.update_pose("object", pos, quat)
             time.sleep(1 / 30)
     except KeyboardInterrupt:
         viewer.close()
