@@ -6,7 +6,8 @@
 subsequent ``load_ply`` reproduces them. Normals are zeroed and ``f_rest`` is omitted.
 
 ``fetch`` downloads remote assets into a local cache and returns the cached path, so examples and
-tests can pull scenes on demand.
+tests can pull scenes on demand. It validates a cached file against the remote content token so a
+re-uploaded asset is picked up without clearing the cache by hand.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import shutil
 import tempfile
 import urllib.parse
 import urllib.request
-from contextlib import ExitStack
 from pathlib import Path
 
 import jax
@@ -29,26 +29,21 @@ from plyfile import PlyData, PlyElement
 _C0 = 0.28209479177387814
 
 
-def fetch(
-    url: str, *, sha256: str | None = None, cache: Path | None = None, force: bool = False
-) -> Path:
+def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
     """Download ``url`` into a local cache and return the path to the cached file.
 
-    If the file is already cached and ``force`` is False, it is returned immediately. ``sha256`` is
-    only verified on real downloads, not on cache hits. The cache directory defaults to
-    ``$SPLAX_CACHE`` if set, else ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
+    A cached file is reused only while its stored ETag still matches the remote, so a re-uploaded
+    asset at the same URL is re-downloaded without clearing the cache. Fetching with the ``force``
+    parameter ensures a fresh download. The cache directory defaults to ``$SPLAX_CACHE`` if set,
+    else ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
 
     Args:
         url: URL to download.
-        sha256: Expected hex digest of the downloaded bytes, checked on download.
         cache: Cache directory, overriding the environment-based default.
         force: Re-download and overwrite the cached copy even if it exists.
 
     Returns:
         Path to the cached file.
-
-    Raises:
-        ValueError: If ``sha256`` is given and the downloaded bytes don't match.
     """
     if cache is None:
         loc = os.environ.get("SPLAX_CACHE", os.environ.get("XDG_CACHE_HOME"))
@@ -56,20 +51,21 @@ def fetch(
     assert isinstance(cache, Path), f"cache must be a Path, got {type(cache)}"
     name = Path(urllib.parse.urlparse(url).path).name or "download"
     path = cache / (hashlib.sha256(url.encode()).hexdigest()[:16] + "-" + name)
-    if path.exists() and not force:
+    token_path = cache / (path.name + ".etag")
+    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as resp:
+        etag = resp.headers["ETag"]
+    if not force and path.exists() and token_path.exists() and token_path.read_text() == etag:
         return path
     cache.mkdir(parents=True, exist_ok=True)
+    # Download to a temp file and atomically swap it in, so path is never left half-written.
     tmp = tempfile.NamedTemporaryFile(dir=cache, delete=False)
-    with ExitStack() as stack:  # Ensure tmp is deleted when an exception occurs before os.replace
-        stack.callback(Path(tmp.name).unlink, missing_ok=True)
+    try:
         with tmp, urllib.request.urlopen(url) as src:
             shutil.copyfileobj(src, tmp)
-        if sha256 is not None:
-            digest = hashlib.sha256(Path(tmp.name).read_bytes()).hexdigest()
-            if digest != sha256:
-                raise ValueError(f"sha256 mismatch for {url}: expected {sha256}, got {digest}")
         os.replace(tmp.name, path)
-        stack.pop_all()
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+    token_path.write_text(etag)
     return path
 
 

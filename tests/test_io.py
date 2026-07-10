@@ -11,13 +11,12 @@ plus that ``splax.inference.render`` and ``splax.training.render`` produce the
 identical forward image (the split is numerically zero-cost).
 
 ``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral
-port: download, cache hit, force re-download, sha256 verification, and the
+port: download, cache hit, force re-download, ETag-based invalidation, and the
 ``SPLAX_CACHE`` environment fallback.
 """
 
 from __future__ import annotations
 
-import hashlib
 import http.server
 import threading
 from pathlib import Path
@@ -191,6 +190,10 @@ def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
             requests.append(self.path)
             super().do_GET()
 
+        def end_headers(self) -> None:
+            self.send_header("ETag", '"fixed"')  # Constant: content changes are picked up by force.
+            super().end_headers()
+
         def log_message(self, format: str, *args: object) -> None:
             pass  # Keep pytest output clean.
 
@@ -245,19 +248,44 @@ def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_p
     assert forced.read_bytes() == b"new bytes"
 
 
-def test_fetch_sha256(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
-    """A correct digest passes, a wrong one raises and leaves no cached file."""
-    srv_dir, url, _ = file_server
-    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+def test_fetch_etag_invalidates_cache(tmp_path: Path) -> None:
+    """A cache hit is reused while the remote ETag is unchanged, and refetched when it changes."""
+    state = {"body": b"v1 bytes", "etag": '"aaa"', "gets": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _headers(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(state["body"])))
+            self.send_header("ETag", state["etag"])
+            self.end_headers()
+
+        def do_HEAD(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+            self._headers()
+
+        def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+            state["gets"] += 1
+            self._headers()
+            self.wfile.write(state["body"])
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass  # Keep pytest output clean.
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/scene.ply"
     cache = tmp_path / "cache"
-    digest = hashlib.sha256(b"splat bytes").hexdigest()
+    try:
+        assert fetch(url, cache=cache).read_bytes() == b"v1 bytes"
+        assert state["gets"] == 1
+        fetch(url, cache=cache)  # Same ETag: cache hit, no new download.
+        assert state["gets"] == 1
 
-    with pytest.raises(ValueError, match="sha256 mismatch"):
-        fetch(f"{url}/scene.ply", sha256="0" * 64, cache=cache)
-    assert not any(cache.iterdir())  # No final file, no leftover temp file.
-
-    path = fetch(f"{url}/scene.ply", sha256=digest, cache=cache)
-    assert path.read_bytes() == b"splat bytes"
+        state["body"], state["etag"] = b"v2 bytes longer", '"bbb"'
+        assert fetch(url, cache=cache).read_bytes() == b"v2 bytes longer"  # Changed ETag: refetch.
+        assert state["gets"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_fetch_env_cache(
