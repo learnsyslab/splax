@@ -20,6 +20,7 @@ from typing import cast
 import warp as wp
 from warp.jax_experimental.ffi import JaxCallableGraphMode, jax_callable
 
+from splax._batching import nested_vmap
 from splax._intersect import (
     _MINMAX_CHUNK,
     BLOCK_SIZE,
@@ -595,11 +596,15 @@ def _rasterize_launch(
     )
 
 
-_rasterize_ffi = jax_callable(
-    _rasterize_launch,
-    num_outputs=3,
-    graph_mode=JaxCallableGraphMode.NONE,
-    vmap_method="expand_dims",
+_rasterize_ffi = nested_vmap(
+    jax_callable(
+        _rasterize_launch,
+        num_outputs=3,
+        graph_mode=JaxCallableGraphMode.NONE,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=9,
+    name="rasterize",
 )
 
 
@@ -658,11 +663,15 @@ def _rasterize_depth_launch(
     )
 
 
-_rasterize_depth_ffi = jax_callable(
-    _rasterize_depth_launch,
-    num_outputs=4,
-    graph_mode=JaxCallableGraphMode.NONE,
-    vmap_method="expand_dims",
+_rasterize_depth_ffi = nested_vmap(
+    jax_callable(
+        _rasterize_depth_launch,
+        num_outputs=4,
+        graph_mode=JaxCallableGraphMode.NONE,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=9,
+    name="rasterize_depth",
 )
 
 
@@ -1003,11 +1012,15 @@ def _rasterize_bwd_launch(
     )
 
 
-_rasterize_bwd_ffi = jax_callable(
-    _rasterize_bwd_launch,
-    num_outputs=4,
-    graph_mode=JaxCallableGraphMode.NONE,
-    vmap_method="expand_dims",
+_rasterize_bwd_ffi = nested_vmap(
+    jax_callable(
+        _rasterize_bwd_launch,
+        num_outputs=4,
+        graph_mode=JaxCallableGraphMode.NONE,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=12,
+    name="rasterize_bwd",
 )
 
 
@@ -1088,9 +1101,13 @@ def _rasterize_bwd_depth_launch(
     )
 
 
-_rasterize_bwd_depth_ffi = jax_callable(
-    _rasterize_bwd_depth_launch,
-    num_outputs=5,
-    graph_mode=JaxCallableGraphMode.NONE,
-    vmap_method="expand_dims",
+_rasterize_bwd_depth_ffi = nested_vmap(
+    jax_callable(
+        _rasterize_bwd_depth_launch,
+        num_outputs=5,
+        graph_mode=JaxCallableGraphMode.NONE,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=13,
+    name="rasterize_bwd_depth",
 )

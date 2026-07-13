@@ -14,6 +14,7 @@ from typing import cast
 import warp as wp
 from warp.jax_experimental.ffi import JaxCallableGraphMode, jax_callable
 
+from splax._batching import nested_vmap
 from splax._intersect import (
     ALPHA_THRESHOLD,
     BLOCK_WIDTH,
@@ -111,8 +112,15 @@ def _project_launch(
 # gains a leading batch axis that warp's FFI callback collapses into the leading
 # array dim, and the callable launches once over B*N. A non-vmapped call keeps
 # base rank and reduces to the unbatched path exactly.
-_project_ffi = jax_callable(
-    _project_launch, num_outputs=6, graph_mode=JaxCallableGraphMode.WARP, vmap_method="expand_dims"
+_project_ffi = nested_vmap(
+    jax_callable(
+        _project_launch,
+        num_outputs=6,
+        graph_mode=JaxCallableGraphMode.WARP,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=7,
+    name="project",
 )
 
 
@@ -525,23 +533,35 @@ def _project_bwd_joint_launch(
 # Batch-native backward, exactly like the forward. Gaussian grads come out per
 # view and JAX reduces broadcast inputs over the batch axis. The viewmat grad is
 # a per-image accumulator.
-_project_bwd_gaussians_ffi = jax_callable(
-    _project_bwd_gaussians_launch,
-    num_outputs=3,
-    graph_mode=JaxCallableGraphMode.WARP,
-    vmap_method="expand_dims",
+_project_bwd_gaussians_ffi = nested_vmap(
+    jax_callable(
+        _project_bwd_gaussians_launch,
+        num_outputs=3,
+        graph_mode=JaxCallableGraphMode.WARP,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=9,
+    name="project_bwd_gaussians",
 )
-_project_bwd_viewmat_ffi = jax_callable(
-    _project_bwd_viewmat_launch,
-    num_outputs=1,
-    graph_mode=JaxCallableGraphMode.WARP,
-    vmap_method="expand_dims",
+_project_bwd_viewmat_ffi = nested_vmap(
+    jax_callable(
+        _project_bwd_viewmat_launch,
+        num_outputs=1,
+        graph_mode=JaxCallableGraphMode.WARP,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=9,
+    name="project_bwd_viewmat",
 )
-_project_bwd_joint_ffi = jax_callable(
-    _project_bwd_joint_launch,
-    num_outputs=4,
-    graph_mode=JaxCallableGraphMode.WARP,
-    vmap_method="expand_dims",
+_project_bwd_joint_ffi = nested_vmap(
+    jax_callable(
+        _project_bwd_joint_launch,
+        num_outputs=4,
+        graph_mode=JaxCallableGraphMode.WARP,
+        vmap_method="expand_dims",
+    ),
+    n_arrays=9,
+    name="project_bwd_joint",
 )
 
 

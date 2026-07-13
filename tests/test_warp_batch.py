@@ -153,6 +153,87 @@ def test_render_vmap_mixed_both_batched() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
+def test_render_nested_vmap_grid() -> None:
+    """Nested vmap over an A splats x B viewmats grid == the A x B double loop."""
+    scenes = [_rand_scene(N, seed=s) for s in (3, 4, 5)]
+    mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
+    B = VIEWS.shape[0]
+    ref = jnp.stack(
+        [jnp.stack([_render(*scenes[a], VIEWS[b]) for b in range(B)]) for a in range(len(scenes))]
+    )
+    grid = jax.vmap(lambda m, s, q, c, o: jax.vmap(lambda vm: _render(m, s, q, c, o, vm))(VIEWS))
+    out = grid(mb, sb, qb, cb, ob)
+    assert out.shape == ref.shape
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+
+
+def _render_inf(
+    m: jax.Array,
+    s: jax.Array,
+    q: jax.Array,
+    c: jax.Array,
+    o: jax.Array,
+    vm: jax.Array,
+    **extra: jax.Array | tuple[tuple[int, int], ...],
+) -> jax.Array:
+    return splax.inference.render(m, s, q, c, o, viewmat=vm, **KW, **extra)
+
+
+def test_inference_render_nested_vmap_grid() -> None:
+    """inference.render nested vmap over an A splats x B viewmats grid == the double loop."""
+    scenes = [_rand_scene(N, seed=s) for s in (3, 4, 5)]
+    mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
+    ref = jnp.stack(
+        [jnp.stack([_render_inf(*sc, VIEWS[b]) for b in range(VIEWS.shape[0])]) for sc in scenes]
+    )
+    inner = lambda m, s, q, c, o: jax.vmap(lambda vm: _render_inf(m, s, q, c, o, vm))(VIEWS)  # noqa: E731
+    out = jax.vmap(inner)(mb, sb, qb, cb, ob)
+    assert out.shape == ref.shape
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+
+
+def test_inference_render_nested_shared_splat_transforms() -> None:
+    """Nested vmap, shared splat, viewmat on both axes, transforms on the outer axis only."""
+    m, s, q, c, o = _rand_scene(N, seed=6)
+    slices = ((0, N // 2), (N // 2, N))
+    n_worlds, n_cams = 2, 3
+    vms = jnp.stack([
+        jnp.stack([_viewmat(0.1 * w + 0.03 * cam) for cam in range(n_cams)])
+        for w in range(n_worlds)
+    ])
+    tfs = jnp.stack(
+        [jnp.broadcast_to(jnp.eye(4).at[0, 3].set(0.02 * w), (2, 4, 4)) for w in range(n_worlds)]
+    )
+
+    def one(vm: jax.Array, tf: jax.Array) -> jax.Array:
+        return _render_inf(m, s, q, c, o, vm, gaussian_transforms=tf, gaussian_slices=slices)
+
+    ref = jnp.stack(
+        [jnp.stack([one(vms[w, cam], tfs[w]) for cam in range(n_cams)]) for w in range(n_worlds)]
+    )
+    out = jax.vmap(lambda vmw, tfw: jax.vmap(lambda vm: one(vm, tfw))(vmw))(vms, tfs)
+    assert out.shape == ref.shape
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+
+
+def test_render_nested_vmap_grad() -> None:
+    """Nested vmap over jax.grad of the differentiable render == the double loop of gradients."""
+    m, s, q, c, o = _rand_scene(N, seed=12)
+    means = jnp.stack([m, m * 1.01])
+
+    def loss(mm: jax.Array, vm: jax.Array) -> jax.Array:
+        return _render(mm, s, q, c, o, vm).sum()
+
+    ref = jnp.stack(
+        [jnp.stack([jax.grad(loss)(means[a], VIEWS[b]) for b in range(VIEWS.shape[0])])
+         for a in range(means.shape[0])]
+    )
+    out = jax.vmap(lambda mm: jax.vmap(lambda vm: jax.grad(loss)(mm, vm))(VIEWS))(means)
+    assert out.shape == ref.shape
+    # gradient magnitudes reach ~1e3 and batched reductions reorder, so allclose not bit-exact
+    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-4, atol=1e-2)
+
+
 def test_render_jit_vmap() -> None:
     """jit(vmap(render)) matches unbatched."""
     m, s, q, c, o = _rand_scene(N, seed=9)

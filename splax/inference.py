@@ -77,10 +77,10 @@ def render(
     index ranges. The gaussians in slice k move by gaussian_transforms[k], all
     others stay static, and the transform happens on the fly in the projection
     kernel without copying the splat. Batching works through jax.vmap over the
-    transform stack (and over the viewmat if desired), so each batch element
-    renders the same scene with its gaussians at different poses. The slices are
-    static Python values. Omitting both arguments is the plain path with
-    identical output and performance.
+    transform stack (and over the viewmat if desired), including nested vmap over
+    several axes at once, so each batch element renders the same scene with its
+    gaussians at different poses. The slices are static Python values. Omitting
+    both arguments is the plain path with identical output and performance.
     """
     n = means3d.shape[0]
     H, W = img_shape
