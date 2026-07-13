@@ -13,3 +13,4 @@ reports/
 results/
 .pixi-src/
 .vscode/
+uv.lock
