@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax
+import jax.core
 import jax.numpy as jnp
 from jax.extend.core import Primitive
 from jax.interpreters import batching, mlir

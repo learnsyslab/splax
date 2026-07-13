@@ -197,10 +197,12 @@ def test_inference_render_nested_shared_splat_transforms() -> None:
     m, s, q, c, o = _rand_scene(N, seed=6)
     slices = ((0, N // 2), (N // 2, N))
     n_worlds, n_cams = 2, 3
-    vms = jnp.stack([
-        jnp.stack([_viewmat(0.1 * w + 0.03 * cam) for cam in range(n_cams)])
-        for w in range(n_worlds)
-    ])
+    vms = jnp.stack(
+        [
+            jnp.stack([_viewmat(0.1 * w + 0.03 * cam) for cam in range(n_cams)])
+            for w in range(n_worlds)
+        ]
+    )
     tfs = jnp.stack(
         [jnp.broadcast_to(jnp.eye(4).at[0, 3].set(0.02 * w), (2, 4, 4)) for w in range(n_worlds)]
     )
@@ -225,8 +227,10 @@ def test_render_nested_vmap_grad() -> None:
         return _render(mm, s, q, c, o, vm).sum()
 
     ref = jnp.stack(
-        [jnp.stack([jax.grad(loss)(means[a], VIEWS[b]) for b in range(VIEWS.shape[0])])
-         for a in range(means.shape[0])]
+        [
+            jnp.stack([jax.grad(loss)(means[a], VIEWS[b]) for b in range(VIEWS.shape[0])])
+            for a in range(means.shape[0])
+        ]
     )
     out = jax.vmap(lambda mm: jax.vmap(lambda vm: jax.grad(loss)(mm, vm))(VIEWS))(means)
     assert out.shape == ref.shape
