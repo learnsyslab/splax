@@ -36,23 +36,6 @@ Repository = "https://github.com/amacati/splax"
 requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[dependency-groups]
-# gsplat is the external test reference (torch/CUDA). Both are required so the test suite's parity
-# checks run
-tests = ["pytest", "torch>=2.4", "gsplat>=1.5"]
-lint = ["ty==0.0.56"]
-docs = [
-    "properdocs>=1.5.0",
-    "mkdocs-material>=9.5.0",
-    "mkdocstrings[python]>=0.26.0",
-    "mkdocs-gen-files>=0.5.0",
-    "mkdocs-literate-nav>=0.6.0",
-    "mkdocs-section-index>=0.3.0",
-    "mkdocs-autorefs>=1.2.0",
-]
-dist = ["build", "twine"]
-dev = ["ruff", { include-group = "tests" }, { include-group = "docs" }, { include-group = "lint" }]
-
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
 exclude = [
@@ -142,8 +125,7 @@ ruff = "*"
 platforms = ["linux-64-cuda"]
 
 [tool.pixi.pypi-dependencies]
-splax = { path = "./", editable = true }
-viser = ">=1.0"
+splax = { path = "./", editable = true, extras = ["viewer"] }
 
 [tool.pixi.feature.docs.dependencies]
 python = ">=3.11"
@@ -261,7 +243,6 @@ tests = { cmd = "pytest -v tests", description = "Run tests" }
 # Lint feature: ty type checking of the library.
 [tool.pixi.feature.lint.pypi-dependencies]
 ty = "==0.0.56"
-splax = { path = "./", editable = true, extras = ["viewer"] }
 
 [tool.pixi.feature.lint.tasks]
 ty = { cmd = "ty check splax", description = "Type check the library" }
@@ -282,9 +263,9 @@ upload = { cmd = "twine upload dist/*", description = "Upload to PyPI" }
 default = { features = ["cuda"], solve-group = "default" }
 docs = { features = ["docs"], solve-group = "docs" }
 colmap = { features = ["colmap"], solve-group = "colmap" }
-tests = { features = ["cuda", "tests"], solve-group = "default" }
-lint = { features = ["lint"], solve-group = "default" }
-dist = { features = ["cuda", "dist"], solve-group = "default" }
+tests = { features = ["cuda", "tests"], solve-group = "tests" }
+lint = { features = ["lint"], solve-group = "lint" }
+dist = { features = ["cuda", "dist"], solve-group = "dist" }
 
 [tool.setuptools.packages]
 find = {include = ["splax*"]}

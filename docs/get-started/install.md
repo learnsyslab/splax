@@ -36,12 +36,7 @@ python -c "import splax; print(splax.__all__)"
     pixi shell -e docs
     ```
 
-The dependency groups in `pyproject.toml` (`dev`, `docs`) mirror the pixi features, so [uv](https://docs.astral.sh/uv/) works as an alternative:
-
-```bash
-uv sync --group dev     # tests and ruff
-uv sync --group docs    # documentation tooling
-```
+Use the Pixi environments above for tooling and docs tasks.
 
 ## Building the documentation
 

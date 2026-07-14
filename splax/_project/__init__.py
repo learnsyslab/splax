@@ -1,8 +1,4 @@
-"""Projection stage.
-
-The public API is re-exported from ``splax._project._project``, the differentiable projection
-module. The Warp kernels and their JAX FFI callables live in ``splax._project._kernels``.
-"""
+"""Warp kernels and JAX FFI bindings for the projection stage of gaussian splatting."""
 
 from splax._project._project import _project_call, opacity_compensation, project
 
