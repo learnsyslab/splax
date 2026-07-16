@@ -229,6 +229,91 @@ def clear_graph_cache() -> None:
     _graph_cache.clear()
 
 
+# Recorded per-kernel launches, keyed on (kernel, device). wp.launch resolves the
+# device, module, and hooks and repacks every argument on each call, which costs
+# 5 to 16 us of host time per launch on kernels with many arguments. A recorded
+# wp.Launch replays in about 2 us. Purged together with the scratch cache so a
+# recorded launch never keeps a freed scratch buffer alive through its retained
+# argument list.
+_launch_cache: dict = {}
+
+
+class _CachedLaunch:
+    """Recorded kernel launch that repacks only the arguments that changed.
+
+    Records the launch once and keeps the packed parameter block. Each call
+    compares every argument against the recorded state, arrays by pointer and
+    shape and scalars by value, and repacks only mismatches before replaying.
+    FFI callbacks are serialized by Warp's callback lock, so the mutable state
+    needs no locking of its own.
+    """
+
+    __slots__ = ("block_dim", "dim", "launch", "state")
+
+    def __init__(
+        self, kernel: wp.Kernel, dim: int, args: list, device: wp.Device | None, block_dim: int = 0
+    ):
+        if block_dim:
+            self.launch = wp.launch_tiled(
+                kernel, dim=[dim], inputs=args, block_dim=block_dim, device=device, record_cmd=True
+            )
+        else:
+            self.launch = wp.launch(kernel, dim=dim, inputs=args, device=device, record_cmd=True)
+        self.block_dim = block_dim
+        self.dim = dim
+        self.state = [(a.ptr, a.shape) if isinstance(a, wp.array) else a for a in args]
+
+    def __call__(self, dim: int, args: list) -> None:
+        if dim != self.dim:
+            self.dim = dim
+            self.launch.set_dim([dim, self.block_dim] if self.block_dim else dim)
+        state = self.state
+        for i, a in enumerate(args):
+            if isinstance(a, wp.array):
+                key = (a.ptr, a.shape)
+                if state[i] != key:
+                    self.launch.set_param_at_index(i, a)
+                    state[i] = key
+            elif state[i] != a:
+                self.launch.set_param_at_index(i, a)
+                state[i] = a
+        self.launch.launch()
+
+
+def _cached_launch(
+    kernel: wp.Kernel, dim: int, args: list, device: wp.Device | None, block_dim: int = 0
+) -> None:
+    """Launch a kernel through its recorded per-device launch object."""
+    key = (kernel, str(device))
+    cl = _launch_cache.get(key)
+    if cl is None:
+        cl = _CachedLaunch(kernel, dim, args, device, block_dim)
+        _launch_cache[key] = cl
+    cl(dim, args)
+
+
+# One pinned int32 staging element per device for the intersection-count
+# readback. A pageable slice.numpy() readback allocates on every frame and
+# costs about 17 us of host time on an idle stream, the pinned copy plus
+# stream sync about 6 us.
+_readback_bufs: dict = {}
+
+
+def _read_count(src: wp.array, index: int, device: wp.Device | None) -> int:
+    """Read one int32 element back to the host."""
+    if device is None or not device.is_cuda:
+        return int(src[index : index + 1].numpy()[0])
+    key = str(device)
+    buf = _readback_bufs.get(key)
+    if buf is None:
+        staging = wp.empty(1, dtype=wp.int32, device="cpu", pinned=True)
+        buf = (staging, staging.numpy())
+        _readback_bufs[key] = buf
+    wp.copy(buf[0], src, dest_offset=0, src_offset=index, count=1)
+    wp.synchronize_stream(device.stream)
+    return int(buf[1][0])
+
+
 def _get_scratch(
     device: wp.Device | None,
     sig: tuple,
@@ -240,9 +325,10 @@ def _get_scratch(
     entry = _scratch_cache.get(key)
     if entry is None or entry["sig"] != sig:
         # New workload signature. Drop everything first so the peak is the new
-        # size, not old plus new. Purge the graphs first, they hold the old
-        # addresses.
+        # size, not old plus new. Purge the graphs and recorded launches first,
+        # they hold the old addresses and array references.
         _graph_cache.clear()
+        _launch_cache.clear()
         _scratch_cache.pop(key, None)
         entry = {
             "sig": sig,
@@ -258,7 +344,10 @@ def _get_scratch(
     if entry["isect_cap"] < isect_need or entry["isect_dtype"] != isect_dtype:
         cap = max(int(isect_need * _SCRATCH_HEADROOM) + 1, entry["isect_cap"])
         entry["gen"] += 1
-        _graph_cache.clear()  # sort buffers move on realloc, graphs go stale
+        # Sort buffers move on realloc, so graphs go stale and recorded launches
+        # must drop their references to the old buffers before the free below.
+        _graph_cache.clear()
+        _launch_cache.clear()
         # Free before allocating larger, avoiding an old plus new transient peak.
         entry["isect_ids"] = None
         entry["gaussian_ids"] = None
@@ -275,10 +364,11 @@ def clear_scratch() -> None:
 
     The backend caches grow-only scratch across renders. Call this to reclaim that
     memory, for example before switching to a very different workload size. Also
-    purges the post-sync CUDA graph cache, whose graphs reference the freed
-    scratch addresses.
+    purges the post-sync CUDA graph cache and the recorded launch cache, which
+    reference the freed scratch buffers.
     """
     _graph_cache.clear()
+    _launch_cache.clear()
     _scratch_cache.clear()
 
 
@@ -592,7 +682,8 @@ def _sort_and_bin(
     reproduces the forward gaussian_ids and tile_bins and the saved final_idx stays
     valid. num_intersects may be passed in when the caller already read it back
     (the graph eligibility check), avoiding a second host sync. Returns
-    (gaussian_ids, tile_bins, num_intersects).
+    (gaussian_ids, tile_bins, num_intersects), where gaussian_ids is the full
+    scratch buffer whose valid prefix is [0, num_intersects).
     """
     num_tiles = tile_bounds_x * tile_bounds_y
     tile_n_bits = _bits_for_count(num_tiles)
@@ -612,34 +703,39 @@ def _sort_and_bin(
 
     # The one legitimate device to host sync, the total intersection count.
     if num_intersects is None:
-        num_intersects = int(cum_tiles_hit[total - 1 : total].numpy()[0])
+        num_intersects = _read_count(cum_tiles_hit, total - 1, device)
 
     isect_dtype = wp.int32 if packed else wp.int64
     scratch = _get_scratch(
         device, (B, n, num_tiles), max(2 * num_intersects, 2), bins_len, isect_dtype
     )
-    tile_bins = scratch["tile_bins"][:bins_len]
+    # tile_bins is allocated at exactly bins_len for this signature.
+    tile_bins = scratch["tile_bins"]
     tile_bins.zero_()
 
     if num_intersects == 0:
-        return scratch["gaussian_ids"][:1], tile_bins, 0
+        return scratch["gaussian_ids"], tile_bins, 0
 
-    isect_ids = scratch["isect_ids"][: 2 * num_intersects]
-    gaussian_ids = scratch["gaussian_ids"][: 2 * num_intersects]
+    # The kernels and the sort take explicit counts, so the full-capacity scratch
+    # arrays are passed without per-frame slicing. Every access stays inside
+    # [0, 2*num_intersects) and the stable shapes keep the recorded launches from
+    # repacking their array arguments each frame.
+    isect_ids = scratch["isect_ids"]
+    gaussian_ids = scratch["gaussian_ids"]
     if packed:
         # Device-side per-image [dmin, dmax] for the depth quantization, no host sync.
         depth_mm = scratch["depth_mm"]
-        wp.launch(_seed_minmax, dim=B, inputs=[depth_mm], device=device)
-        wp.launch(
+        _cached_launch(_seed_minmax, B, [depth_mm], device)
+        _cached_launch(
             _depth_minmax,
-            dim=(total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
-            inputs=[depths, radii, total, n, depth_mm],
-            device=device,
+            (total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
+            [depths, radii, total, n, depth_mm],
+            device,
         )
-        wp.launch(
+        _cached_launch(
             _map_intersects_32bit,
-            dim=total,
-            inputs=[
+            total,
+            [
                 xys,
                 depths,
                 radii,
@@ -653,23 +749,23 @@ def _sort_and_bin(
                 depth_bits,
                 tile_bounds_x,
                 tile_bounds_y,
+                isect_ids,
+                gaussian_ids,
             ],
-            outputs=[isect_ids, gaussian_ids],
-            device=device,
+            device,
         )
         wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
-        wp.launch(
+        _cached_launch(
             _tile_bin_edges_32bit,
-            dim=num_intersects,
-            inputs=[num_intersects, isect_ids, num_tiles, tile_n_bits, depth_bits],
-            outputs=[tile_bins],
-            device=device,
+            num_intersects,
+            [num_intersects, isect_ids, num_tiles, tile_n_bits, depth_bits, tile_bins],
+            device,
         )
     else:
-        wp.launch(
+        _cached_launch(
             _map_intersects_64bit,
-            dim=total,
-            inputs=[
+            total,
+            [
                 xys,
                 depths.view(wp.int32),
                 radii,
@@ -681,16 +777,16 @@ def _sort_and_bin(
                 tile_n_bits,
                 tile_bounds_x,
                 tile_bounds_y,
+                isect_ids,
+                gaussian_ids,
             ],
-            outputs=[isect_ids, gaussian_ids],
-            device=device,
+            device,
         )
         wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
-        wp.launch(
+        _cached_launch(
             _tile_bin_edges_64bit,
-            dim=num_intersects,
-            inputs=[num_intersects, isect_ids, num_tiles, tile_n_bits],
-            outputs=[tile_bins],
-            device=device,
+            num_intersects,
+            [num_intersects, isect_ids, num_tiles, tile_n_bits, tile_bins],
+            device,
         )
-    return gaussian_ids[:num_intersects], tile_bins, num_intersects
+    return gaussian_ids, tile_bins, num_intersects

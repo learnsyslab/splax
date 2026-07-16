@@ -26,10 +26,12 @@ from splax._intersect import (
     BLOCK_SIZE,
     BLOCK_WIDTH,
     _bits_for_count,
+    _cached_launch,
     _depth_minmax,
     _get_scratch,
     _graph_cache,
     _map_intersects_32bit,
+    _read_count,
     _seed_minmax,
     _sort_and_bin,
     _tile_bin_edges_32bit_dev,
@@ -267,9 +269,7 @@ def _rasterize_fwd_depth(
         wp.tile_scatter_masked(
             geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
         )
-        wp.tile_scatter_masked(
-            cd_tile, tr, wp.vec4(color[0], color[1], color[2], depths[g]), True
-        )
+        wp.tile_scatter_masked(cd_tile, tr, wp.vec4(color[0], color[1], color[2], depths[g]), True)
 
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
         if not done:
@@ -392,7 +392,7 @@ def _forward_graph(
     packed = _use_32bit_keys(depth_bits)
     total = B * n
     # The single host readback, reused by the caller's plain path on a fallback.
-    num_intersects = int(cum_tiles_hit[total - 1 : total].numpy()[0])
+    num_intersects = _read_count(cum_tiles_hit, total - 1, device)
     if not packed or num_intersects <= 0 or num_intersects >= _GRAPH_THRESHOLD:
         return False, num_intersects
 
@@ -583,10 +583,10 @@ def _rasterize_launch(
         colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w, ni_pre
     )
 
-    wp.launch_tiled(
+    _cached_launch(
         _rasterize_fwd,
-        dim=[B * num_tiles],
-        inputs=[
+        B * num_tiles,
+        [
             img_h,
             img_w,
             tile_bounds_x,
@@ -601,10 +601,12 @@ def _rasterize_launch(
             colors,
             opacities,
             background,
+            final_Ts,
+            final_idx,
+            out_img,
         ],
-        outputs=[final_Ts, final_idx, out_img],
+        colors.device,
         block_dim=int(BLOCK_SIZE),
-        device=colors.device,
     )
 
 
@@ -649,10 +651,10 @@ def _rasterize_depth_launch(
         colors, xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
-    wp.launch_tiled(
+    _cached_launch(
         _rasterize_fwd_depth,
-        dim=[B * num_tiles],
-        inputs=[
+        B * num_tiles,
+        [
             img_h,
             img_w,
             tile_bounds_x,
@@ -668,10 +670,13 @@ def _rasterize_depth_launch(
             opacities,
             background,
             depths,
+            final_Ts,
+            final_idx,
+            out_img,
+            out_depth,
         ],
-        outputs=[final_Ts, final_idx, out_img, out_depth],
+        colors.device,
         block_dim=int(BLOCK_SIZE),
-        device=colors.device,
     )
 
 
@@ -993,10 +998,10 @@ def _rasterize_bwd_launch(
     v_conic.zero_()
     if num_intersects == 0:
         return
-    wp.launch_tiled(
+    _cached_launch(
         _rasterize_bwd_kernel,
-        dim=[B_out * num_tiles],
-        inputs=[
+        B_out * num_tiles,
+        [
             img_h,
             img_w,
             tile_bounds_x,
@@ -1017,10 +1022,13 @@ def _rasterize_bwd_launch(
             final_Ts,
             final_idx,
             v_out_img,
+            v_xy,
+            v_conic,
+            v_colors,
+            v_opacity,
         ],
-        outputs=[v_xy, v_conic, v_colors, v_opacity],
+        colors.device,
         block_dim=int(BLOCK_SIZE),
-        device=colors.device,
     )
 
 
@@ -1079,10 +1087,10 @@ def _rasterize_bwd_depth_launch(
     v_depths.zero_()
     if num_intersects == 0:
         return
-    wp.launch_tiled(
+    _cached_launch(
         _rasterize_bwd_depth_kernel,
-        dim=[B_out * num_tiles],
-        inputs=[
+        B_out * num_tiles,
+        [
             img_h,
             img_w,
             tile_bounds_x,
@@ -1106,10 +1114,14 @@ def _rasterize_bwd_depth_launch(
             final_idx,
             v_out_img,
             v_out_depth,
+            v_xy,
+            v_conic,
+            v_colors,
+            v_opacity,
+            v_depths,
         ],
-        outputs=[v_xy, v_conic, v_colors, v_opacity, v_depths],
+        colors.device,
         block_dim=int(BLOCK_SIZE),
-        device=colors.device,
     )
 
 
