@@ -1031,6 +1031,284 @@ def _rasterize_bwd_depth_kernel(
                     wp.atomic_add(v_opacity, og, vis * v_alpha)
 
 
+# Warp-aggregated backward twin for short tile ranges. One 32-thread block per
+# _SUBTILES-th of a tile (a pair of pixel rows) walks the range in lockstep with
+# uniform broadcast reads and no shared staging. On a single warp wp.tile_sum
+# lowers to shuffle reductions, so the gradient contributions are reduced across
+# the lanes and lane 0 fires one atomic stream per gaussian, cutting the
+# same-address atomic pressure 32x. This wins where tile ranges are short, since
+# there is nothing for the staged walk to amortize and most lanes contribute to
+# the same gaussian at once. On deep ranges the 8x higher gather traffic loses
+# against the staged walk, see the launch gate.
+_SUBTILES = BLOCK_SIZE // 32
+
+
+@wp.kernel
+def _rasterize_bwd_warp_kernel(
+    img_h: wp.int32,
+    img_w: wp.int32,
+    tile_bounds_x: wp.int32,
+    num_tiles: wp.int32,
+    num_gaussians: wp.int32,
+    sel_geom: wp.bool,
+    color_mod: wp.int32,
+    opac_mod: wp.int32,
+    sel_bg: wp.bool,
+    vout_rows: wp.int32,
+    gaussian_ids_sorted: wp.array[wp.int32],
+    tile_bins: wp.array[wp.vec2i],
+    xys: wp.array[wp.vec2],
+    conics: wp.array[wp.vec3],
+    colors: wp.array[wp.vec3],
+    opacities: wp.array[wp.float32],
+    background: wp.array[wp.vec3],
+    final_Ts: wp.array2d[wp.float32],
+    final_idx: wp.array2d[wp.int32],
+    v_out_img: wp.array2d[wp.vec3],
+    # outputs, atomically accumulated per gaussian
+    v_xy: wp.array[wp.vec2],
+    v_conic: wp.array[wp.vec3],
+    v_colors: wp.array[wp.vec3],
+    v_opacity: wp.array[wp.float32],
+):
+    blk, tr = wp.tid()
+    tile_g = blk // _SUBTILES
+    sub = blk % _SUBTILES
+    image_id = tile_g // num_tiles
+    tile_local = tile_g % num_tiles
+    geom_image = wp.where(sel_geom, image_id, 0)
+    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
+    tile_x = tile_local % tile_bounds_x
+    tile_y = tile_local // tile_bounds_x
+    li = sub * 2 + tr // BLOCK_WIDTH
+    lj = tr % BLOCK_WIDTH
+    i = tile_y * BLOCK_WIDTH + li
+    j = tile_x * BLOCK_WIDTH + lj
+
+    tile_range = tile_bins[geom_image * num_tiles + tile_local]
+    range_start = tile_range[0]
+    range_end = tile_range[1]
+    if range_end <= range_start:
+        return
+
+    px = wp.float32(j) + 0.5
+    py = wp.float32(i) + 0.5
+
+    inside = (i < img_h) and (j < img_w)
+    bin_final = range_start - 1
+    T = wp.float32(1.0)
+    t_final = wp.float32(1.0)
+    v_out = wp.vec3(0.0, 0.0, 0.0)
+    bg = wp.vec3(0.0, 0.0, 0.0)
+    if inside:
+        frow = geom_image * img_h + i
+        bin_final = final_idx[frow, j]
+        t_final = final_Ts[frow, j]
+        T = t_final
+        v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
+        bg = background[wp.where(sel_bg, image_id, 0)]
+    buffer = wp.vec3(0.0, 0.0, 0.0)
+
+    start_idx = wp.tile_max(wp.tile(bin_final))[0]
+
+    for idx in range(start_idx, range_start - 1, -1):
+        g = gaussian_ids_sorted[idx]
+        xy = xys[g]
+        conic = conics[g]
+        opac = opacities[g % opac_mod]
+        dx = xy[0] - px
+        dy = xy[1] - py
+        sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
+        vis = wp.exp(-sigma)
+        alpha = wp.min(0.999, opac * vis)
+        valid = (idx <= bin_final) and sigma >= 0.0 and alpha >= 1.0 / 255.0
+        if wp.tile_max(wp.tile(wp.where(valid, 1, 0)))[0] == 0:
+            continue
+
+        v_rgb = wp.vec3(0.0, 0.0, 0.0)
+        v_con = wp.vec3(0.0, 0.0, 0.0)
+        v_xyl = wp.vec2(0.0, 0.0)
+        v_op = wp.float32(0.0)
+        if valid:
+            ra = 1.0 / (1.0 - alpha)
+            T = T * ra
+            fac = alpha * T
+            color = colors[g % color_mod]
+            v_rgb = v_out * fac
+
+            v_alpha = float(0.0)
+            v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
+            v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
+            v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
+            v_alpha += -t_final * ra * bg[0] * v_out[0]
+            v_alpha += -t_final * ra * bg[1] * v_out[1]
+            v_alpha += -t_final * ra * bg[2] * v_out[2]
+
+            buffer = buffer + color * fac
+
+            if opac * vis <= 0.999:
+                v_sigma = -opac * vis * v_alpha
+                v_con = wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy)
+                v_xyl = wp.vec2(
+                    v_sigma * (conic[0] * dx + conic[1] * dy),
+                    v_sigma * (conic[1] * dx + conic[2] * dy),
+                )
+                v_op = vis * v_alpha
+
+        s_rgb = wp.tile_sum(wp.tile(v_rgb, preserve_type=True))[0]
+        s_con = wp.tile_sum(wp.tile(v_con, preserve_type=True))[0]
+        s_xy = wp.tile_sum(wp.tile(v_xyl, preserve_type=True))[0]
+        s_op = wp.tile_sum(wp.tile(v_op))[0]
+        if tr == 0:
+            og = og_base + g
+            wp.atomic_add(v_colors, og, s_rgb)
+            wp.atomic_add(v_conic, og, s_con)
+            wp.atomic_add(v_xy, og, s_xy)
+            wp.atomic_add(v_opacity, og, s_op)
+
+
+# Depth-augmented twin of _rasterize_bwd_warp_kernel. Walk, aggregation, and
+# color-grad math are identical, with the depth channel handled as in
+# _rasterize_bwd_depth_kernel.
+@wp.kernel
+def _rasterize_bwd_depth_warp_kernel(
+    img_h: wp.int32,
+    img_w: wp.int32,
+    tile_bounds_x: wp.int32,
+    num_tiles: wp.int32,
+    num_gaussians: wp.int32,
+    sel_geom: wp.bool,
+    color_mod: wp.int32,
+    opac_mod: wp.int32,
+    sel_bg: wp.bool,
+    vout_rows: wp.int32,
+    vdepth_rows: wp.int32,
+    gaussian_ids_sorted: wp.array[wp.int32],
+    tile_bins: wp.array[wp.vec2i],
+    xys: wp.array[wp.vec2],
+    conics: wp.array[wp.vec3],
+    colors: wp.array[wp.vec3],
+    opacities: wp.array[wp.float32],
+    background: wp.array[wp.vec3],
+    depths: wp.array[wp.float32],
+    final_Ts: wp.array2d[wp.float32],
+    final_idx: wp.array2d[wp.int32],
+    v_out_img: wp.array2d[wp.vec3],
+    v_out_depth: wp.array2d[wp.float32],
+    # outputs, atomically accumulated per gaussian
+    v_xy: wp.array[wp.vec2],
+    v_conic: wp.array[wp.vec3],
+    v_colors: wp.array[wp.vec3],
+    v_opacity: wp.array[wp.float32],
+    v_depths: wp.array[wp.float32],
+):
+    blk, tr = wp.tid()
+    tile_g = blk // _SUBTILES
+    sub = blk % _SUBTILES
+    image_id = tile_g // num_tiles
+    tile_local = tile_g % num_tiles
+    geom_image = wp.where(sel_geom, image_id, 0)
+    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
+    tile_x = tile_local % tile_bounds_x
+    tile_y = tile_local // tile_bounds_x
+    li = sub * 2 + tr // BLOCK_WIDTH
+    lj = tr % BLOCK_WIDTH
+    i = tile_y * BLOCK_WIDTH + li
+    j = tile_x * BLOCK_WIDTH + lj
+
+    tile_range = tile_bins[geom_image * num_tiles + tile_local]
+    range_start = tile_range[0]
+    range_end = tile_range[1]
+    if range_end <= range_start:
+        return
+
+    px = wp.float32(j) + 0.5
+    py = wp.float32(i) + 0.5
+
+    inside = (i < img_h) and (j < img_w)
+    bin_final = range_start - 1
+    T = wp.float32(1.0)
+    t_final = wp.float32(1.0)
+    v_out = wp.vec3(0.0, 0.0, 0.0)
+    v_outd = wp.float32(0.0)
+    bg = wp.vec3(0.0, 0.0, 0.0)
+    if inside:
+        frow = geom_image * img_h + i
+        bin_final = final_idx[frow, j]
+        t_final = final_Ts[frow, j]
+        T = t_final
+        v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
+        v_outd = v_out_depth[(image_id * img_h + i) % vdepth_rows, j]
+        bg = background[wp.where(sel_bg, image_id, 0)]
+    buffer = wp.vec3(0.0, 0.0, 0.0)
+    dbuffer = wp.float32(0.0)
+
+    start_idx = wp.tile_max(wp.tile(bin_final))[0]
+
+    for idx in range(start_idx, range_start - 1, -1):
+        g = gaussian_ids_sorted[idx]
+        xy = xys[g]
+        conic = conics[g]
+        opac = opacities[g % opac_mod]
+        dx = xy[0] - px
+        dy = xy[1] - py
+        sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
+        vis = wp.exp(-sigma)
+        alpha = wp.min(0.999, opac * vis)
+        valid = (idx <= bin_final) and sigma >= 0.0 and alpha >= 1.0 / 255.0
+        if wp.tile_max(wp.tile(wp.where(valid, 1, 0)))[0] == 0:
+            continue
+
+        v_rgb = wp.vec3(0.0, 0.0, 0.0)
+        v_con = wp.vec3(0.0, 0.0, 0.0)
+        v_xyl = wp.vec2(0.0, 0.0)
+        v_op = wp.float32(0.0)
+        v_dep = wp.float32(0.0)
+        if valid:
+            ra = 1.0 / (1.0 - alpha)
+            T = T * ra
+            fac = alpha * T
+            color = colors[g % color_mod]
+            d = depths[g]
+            v_rgb = v_out * fac
+            v_dep = v_outd * fac
+
+            v_alpha = float(0.0)
+            v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
+            v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
+            v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
+            # depth channel, background depth is 0 so there is no t_final*bg term
+            v_alpha += (d * T - dbuffer * ra) * v_outd
+            v_alpha += -t_final * ra * bg[0] * v_out[0]
+            v_alpha += -t_final * ra * bg[1] * v_out[1]
+            v_alpha += -t_final * ra * bg[2] * v_out[2]
+
+            buffer = buffer + color * fac
+            dbuffer = dbuffer + d * fac
+
+            if opac * vis <= 0.999:
+                v_sigma = -opac * vis * v_alpha
+                v_con = wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy)
+                v_xyl = wp.vec2(
+                    v_sigma * (conic[0] * dx + conic[1] * dy),
+                    v_sigma * (conic[1] * dx + conic[2] * dy),
+                )
+                v_op = vis * v_alpha
+
+        s_rgb = wp.tile_sum(wp.tile(v_rgb, preserve_type=True))[0]
+        s_con = wp.tile_sum(wp.tile(v_con, preserve_type=True))[0]
+        s_xy = wp.tile_sum(wp.tile(v_xyl, preserve_type=True))[0]
+        s_op = wp.tile_sum(wp.tile(v_op))[0]
+        s_dep = wp.tile_sum(wp.tile(v_dep))[0]
+        if tr == 0:
+            og = og_base + g
+            wp.atomic_add(v_colors, og, s_rgb)
+            wp.atomic_add(v_conic, og, s_con)
+            wp.atomic_add(v_xy, og, s_xy)
+            wp.atomic_add(v_opacity, og, s_op)
+            wp.atomic_add(v_depths, og, s_dep)
+
+
 def _rasterize_bwd_launch(
     colors: wp.array[wp.vec3],
     opacities: wp.array[wp.float32],
@@ -1077,6 +1355,42 @@ def _rasterize_bwd_launch(
     v_xy.zero_()
     v_conic.zero_()
     if num_intersects == 0:
+        return
+    # Kernel choice by mean tile range. Below one staged batch per tile the
+    # warp-aggregated walk wins, above it the staged lockstep walk does.
+    if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
+        _cached_launch(
+            _rasterize_bwd_warp_kernel,
+            B_out * num_tiles * int(_SUBTILES),
+            [
+                img_h,
+                img_w,
+                tile_bounds_x,
+                num_tiles,
+                n,
+                sel_geom,
+                colors.shape[0],
+                opacities.shape[0],
+                sel_bg,
+                vout_rows,
+                gaussian_ids,
+                tile_bins,
+                xys,
+                conics,
+                colors,
+                opacities,
+                background,
+                final_Ts,
+                final_idx,
+                v_out_img,
+                v_xy,
+                v_conic,
+                v_colors,
+                v_opacity,
+            ],
+            colors.device,
+            block_dim=32,
+        )
         return
     _cached_launch(
         _rasterize_bwd_kernel,
@@ -1166,6 +1480,45 @@ def _rasterize_bwd_depth_launch(
     v_conic.zero_()
     v_depths.zero_()
     if num_intersects == 0:
+        return
+    # Kernel choice by mean tile range, as in _rasterize_bwd_launch.
+    if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
+        _cached_launch(
+            _rasterize_bwd_depth_warp_kernel,
+            B_out * num_tiles * int(_SUBTILES),
+            [
+                img_h,
+                img_w,
+                tile_bounds_x,
+                num_tiles,
+                n,
+                sel_geom,
+                colors.shape[0],
+                opacities.shape[0],
+                sel_bg,
+                vout_rows,
+                vdepth_rows,
+                gaussian_ids,
+                tile_bins,
+                xys,
+                conics,
+                colors,
+                opacities,
+                background,
+                depths,
+                final_Ts,
+                final_idx,
+                v_out_img,
+                v_out_depth,
+                v_xy,
+                v_conic,
+                v_colors,
+                v_opacity,
+                v_depths,
+            ],
+            colors.device,
+            block_dim=32,
+        )
         return
     _cached_launch(
         _rasterize_bwd_depth_kernel,
