@@ -692,12 +692,12 @@ _rasterize_depth_ffi = nested_vmap(
 )
 
 
-# Backward pass. One thread per pixel walks the tile's gaussians back to front
-# from the saved final_idx down to the tile's first intersection, reconstructing
-# T by dividing out (1 - alpha) and accumulating parameter gradients with plain
-# per-pixel atomics. A block-reduction variant that pre-reduces across the block
-# was benchmarked and lost. Per-pixel early termination makes the block barrier a
-# net loss here, unlike the projection viewmat reduce.
+# Backward pass. A staged lockstep walk mirroring the forward blend. All 256
+# threads of a tile block walk the sorted range back to front in shared-staged
+# batches, starting at the block maximum of the pixels' final_idx. Each pixel
+# reconstructs T by dividing out (1 - alpha) and accumulates parameter gradients
+# with per-lane atomics, guarded per pixel so only indices at or below its own
+# final_idx contribute, with the same sigma and alpha culling as the forward.
 #
 # The sort and bin structures are not saved from the forward. They are recomputed
 # from the saved cum_tiles_hit via the shared _sort_and_bin. The sort is
@@ -735,12 +735,12 @@ def _rasterize_bwd_kernel(
     v_colors: wp.array[wp.vec3],
     v_opacity: wp.array[wp.float32],
 ):
-    # One thread per pixel over B_out*num_tiles blocks. image_id decodes the
-    # output image. The geometry has its own batch B_geom, either equal to B_out
-    # (sel_geom True) or 1 (sel_geom False, a single shared render differentiated
-    # against B target images). Batched geometry writes grads at the flat id and
-    # broadcast geometry gets one slot per output image. JAX reduces broadcast
-    # inputs over the batch axis.
+    # One block per (output image, tile). image_id decodes the output image. The
+    # geometry has its own batch B_geom, either equal to B_out (sel_geom True) or
+    # 1 (sel_geom False, a single shared render differentiated against B target
+    # images). Batched geometry writes grads at the flat id and broadcast
+    # geometry gets one slot per output image. JAX reduces broadcast inputs over
+    # the batch axis.
     tile_g, tr = wp.tid()
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
@@ -752,11 +752,6 @@ def _rasterize_bwd_kernel(
     lj = tr % BLOCK_WIDTH
     i = tile_y * BLOCK_WIDTH + li
     j = tile_x * BLOCK_WIDTH + lj
-    if (i >= img_h) or (j >= img_w):
-        return
-
-    px = wp.float32(j) + 0.5
-    py = wp.float32(i) + 0.5
 
     tile_range = tile_bins[geom_image * num_tiles + tile_local]
     range_start = tile_range[0]
@@ -764,78 +759,123 @@ def _rasterize_bwd_kernel(
     if range_end <= range_start:
         return
 
-    frow = geom_image * img_h + i  # final_Ts and final_idx are geometry outputs
-    bin_final = final_idx[frow, j]
-    t_final = final_Ts[frow, j]
-    T = t_final
-    # The image cotangent arrives batched (B_out*H rows) for a view-dependent loss
-    # but broadcast (H rows) for a view-independent one. Modulo by its own row
-    # count reads the right row either way.
-    v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
-    bg = background[wp.where(sel_bg, image_id, 0)]
+    px = wp.float32(j) + 0.5
+    py = wp.float32(i) + 0.5
+
+    # Threads mapping outside the image stay live for the collective staging but
+    # never pass the validity guard, their bin_final sits below the range.
+    inside = (i < img_h) and (j < img_w)
+    bin_final = range_start - 1
+    T = wp.float32(1.0)
+    t_final = wp.float32(1.0)
+    v_out = wp.vec3(0.0, 0.0, 0.0)
+    bg = wp.vec3(0.0, 0.0, 0.0)
+    if inside:
+        frow = geom_image * img_h + i  # final_Ts and final_idx are geometry outputs
+        bin_final = final_idx[frow, j]
+        t_final = final_Ts[frow, j]
+        T = t_final
+        # The image cotangent arrives batched (B_out*H rows) for a view-dependent
+        # loss but broadcast (H rows) for a view-independent one. Modulo by its
+        # own row count reads the right row either way.
+        v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
+        bg = background[wp.where(sel_bg, image_id, 0)]
     buffer = wp.vec3(0.0, 0.0, 0.0)
 
-    # Walk back to front from the last contributor. Culled contributors are
-    # skipped exactly as in the forward, so the T reconstruction and the
-    # contributing set match the forward blend.
-    for idx in range(bin_final, range_start - 1, -1):
-        g = gaussian_ids_sorted[idx]
-        conic = conics[g]
+    # Gaussians behind every pixel's last contributor never matter, so the walk
+    # starts at the block maximum of final_idx instead of range_end.
+    start_idx = wp.tile_max(wp.tile(bin_final))[0]
+    num_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
+
+    geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
+    color_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec3, storage="shared")
+    id_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.int32, storage="shared")
+    sync_tile = wp.tile_empty(shape=1, dtype=wp.int32, storage="shared")
+
+    for b in range(num_batches):
+        # The scatters place their barrier after the write, so an empty scatter
+        # guards the previous batch's shared reads against this batch's staging.
+        wp.tile_scatter_add(sync_tile, 0, 0, False)
+
+        # Per-thread gather of one gaussian record, back to front. Tail lanes
+        # clamp to range_start, staging a duplicate record the guarded loop
+        # never reads. Broadcast size-N attributes are read at the local gid,
+        # batched size B*N ones at the flat id, via modulo as in the forward.
+        batch_end = start_idx - b * BLOCK_SIZE
+        src = wp.max(batch_end - tr, range_start)
+        g = gaussian_ids_sorted[src]
         xy = xys[g]
+        conic = conics[g]
         opac = opacities[g % opac_mod]
-        dx = xy[0] - px
-        dy = xy[1] - py
-        sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
-        if sigma < 0.0:
-            continue
-        vis = wp.exp(-sigma)
-        alpha = wp.min(0.999, opac * vis)
-        if alpha < 1.0 / 255.0:
-            continue
+        wp.tile_scatter_masked(
+            geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
+        )
+        wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
+        wp.tile_scatter_masked(id_tile, tr, g, True)
 
-        ra = 1.0 / (1.0 - alpha)
-        T = T * ra
-        fac = alpha * T
-        color = colors[g % color_mod]
-        og = og_base + g
+        # Pixels whose last contributor lies below this batch skip it whole.
+        batch_size = wp.min(BLOCK_SIZE, batch_end - range_start + 1)
+        if batch_end - batch_size + 1 <= bin_final:
+            for t in range(batch_size):
+                idx = batch_end - t
+                if idx > bin_final:
+                    continue
+                s = geo_tile[t]
+                dx = s[0] - px
+                dy = s[1] - py
+                sigma = 0.5 * (s[3] * dx * dx + s[5] * dy * dy) + s[4] * dx * dy
+                if sigma < 0.0:
+                    continue
+                vis = wp.exp(-sigma)
+                alpha = wp.min(0.999, s[2] * vis)
+                if alpha < 1.0 / 255.0:
+                    continue
 
-        wp.atomic_add(v_colors, og, v_out * fac)
+                ra = 1.0 / (1.0 - alpha)
+                T = T * ra
+                fac = alpha * T
+                color = color_tile[t]
+                og = og_base + id_tile[t]
 
-        v_alpha = float(0.0)
-        v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
-        v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
-        v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
-        v_alpha += -t_final * ra * bg[0] * v_out[0]
-        v_alpha += -t_final * ra * bg[1] * v_out[1]
-        v_alpha += -t_final * ra * bg[2] * v_out[2]
+                wp.atomic_add(v_colors, og, v_out * fac)
 
-        buffer = buffer + color * fac
+                v_alpha = float(0.0)
+                v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
+                v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
+                v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
+                v_alpha += -t_final * ra * bg[0] * v_out[0]
+                v_alpha += -t_final * ra * bg[1] * v_out[1]
+                v_alpha += -t_final * ra * bg[2] * v_out[2]
 
-        # Where the alpha clamp is active alpha is constant, so the sigma and
-        # opacity paths carry no gradient.
-        if opac * vis <= 0.999:
-            v_sigma = -opac * vis * v_alpha
-            wp.atomic_add(
-                v_conic,
-                og,
-                wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
-            )
-            wp.atomic_add(
-                v_xy,
-                og,
-                wp.vec2(
-                    v_sigma * (conic[0] * dx + conic[1] * dy),
-                    v_sigma * (conic[1] * dx + conic[2] * dy),
-                ),
-            )
-            wp.atomic_add(v_opacity, og, vis * v_alpha)
+                buffer = buffer + color * fac
+
+                # Where the alpha clamp is active alpha is constant, so the
+                # sigma and opacity paths carry no gradient.
+                if s[2] * vis <= 0.999:
+                    v_sigma = -s[2] * vis * v_alpha
+                    wp.atomic_add(
+                        v_conic,
+                        og,
+                        wp.vec3(
+                            0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy
+                        ),
+                    )
+                    wp.atomic_add(
+                        v_xy,
+                        og,
+                        wp.vec2(
+                            v_sigma * (s[3] * dx + s[4] * dy), v_sigma * (s[4] * dx + s[5] * dy)
+                        ),
+                    )
+                    wp.atomic_add(v_opacity, og, vis * v_alpha)
 
 
 # Depth-augmented backward. The depth channel is handled exactly like
 # a color channel. It contributes to v_alpha, hence to v_sigma and the conic, xy,
 # and opacity grads, and produces a per-gaussian depth cotangent that flows
-# through project's backward to the geometry and camera pose. Color-grad math is
-# identical to _rasterize_bwd_kernel.
+# through project's backward to the geometry and camera pose. Walk, staging, and
+# color-grad math are identical to _rasterize_bwd_kernel, with depth packed next
+# to color in the staged records.
 @wp.kernel
 def _rasterize_bwd_depth_kernel(
     img_h: wp.int32,
@@ -879,11 +919,6 @@ def _rasterize_bwd_depth_kernel(
     lj = tr % BLOCK_WIDTH
     i = tile_y * BLOCK_WIDTH + li
     j = tile_x * BLOCK_WIDTH + lj
-    if (i >= img_h) or (j >= img_w):
-        return
-
-    px = wp.float32(j) + 0.5
-    py = wp.float32(i) + 0.5
 
     tile_range = tile_bins[geom_image * num_tiles + tile_local]
     range_start = tile_range[0]
@@ -891,72 +926,109 @@ def _rasterize_bwd_depth_kernel(
     if range_end <= range_start:
         return
 
-    frow = geom_image * img_h + i
-    bin_final = final_idx[frow, j]
-    t_final = final_Ts[frow, j]
-    T = t_final
-    v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
-    v_outd = v_out_depth[(image_id * img_h + i) % vdepth_rows, j]
-    bg = background[wp.where(sel_bg, image_id, 0)]
+    px = wp.float32(j) + 0.5
+    py = wp.float32(i) + 0.5
+
+    inside = (i < img_h) and (j < img_w)
+    bin_final = range_start - 1
+    T = wp.float32(1.0)
+    t_final = wp.float32(1.0)
+    v_out = wp.vec3(0.0, 0.0, 0.0)
+    v_outd = wp.float32(0.0)
+    bg = wp.vec3(0.0, 0.0, 0.0)
+    if inside:
+        frow = geom_image * img_h + i
+        bin_final = final_idx[frow, j]
+        t_final = final_Ts[frow, j]
+        T = t_final
+        v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
+        v_outd = v_out_depth[(image_id * img_h + i) % vdepth_rows, j]
+        bg = background[wp.where(sel_bg, image_id, 0)]
     buffer = wp.vec3(0.0, 0.0, 0.0)
     dbuffer = wp.float32(0.0)
 
-    for idx in range(bin_final, range_start - 1, -1):
-        g = gaussian_ids_sorted[idx]
-        conic = conics[g]
+    start_idx = wp.tile_max(wp.tile(bin_final))[0]
+    num_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
+
+    geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
+    cd_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec4, storage="shared")
+    id_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.int32, storage="shared")
+    sync_tile = wp.tile_empty(shape=1, dtype=wp.int32, storage="shared")
+
+    for b in range(num_batches):
+        wp.tile_scatter_add(sync_tile, 0, 0, False)
+
+        batch_end = start_idx - b * BLOCK_SIZE
+        src = wp.max(batch_end - tr, range_start)
+        g = gaussian_ids_sorted[src]
         xy = xys[g]
+        conic = conics[g]
         opac = opacities[g % opac_mod]
-        dx = xy[0] - px
-        dy = xy[1] - py
-        sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
-        if sigma < 0.0:
-            continue
-        vis = wp.exp(-sigma)
-        alpha = wp.min(0.999, opac * vis)
-        if alpha < 1.0 / 255.0:
-            continue
-
-        ra = 1.0 / (1.0 - alpha)
-        T = T * ra
-        fac = alpha * T
         color = colors[g % color_mod]
-        d = depths[g]
-        og = og_base + g
+        wp.tile_scatter_masked(
+            geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
+        )
+        wp.tile_scatter_masked(cd_tile, tr, wp.vec4(color[0], color[1], color[2], depths[g]), True)
+        wp.tile_scatter_masked(id_tile, tr, g, True)
 
-        wp.atomic_add(v_colors, og, v_out * fac)
-        wp.atomic_add(v_depths, og, v_outd * fac)
+        batch_size = wp.min(BLOCK_SIZE, batch_end - range_start + 1)
+        if batch_end - batch_size + 1 <= bin_final:
+            for t in range(batch_size):
+                idx = batch_end - t
+                if idx > bin_final:
+                    continue
+                s = geo_tile[t]
+                dx = s[0] - px
+                dy = s[1] - py
+                sigma = 0.5 * (s[3] * dx * dx + s[5] * dy * dy) + s[4] * dx * dy
+                if sigma < 0.0:
+                    continue
+                vis = wp.exp(-sigma)
+                alpha = wp.min(0.999, s[2] * vis)
+                if alpha < 1.0 / 255.0:
+                    continue
 
-        v_alpha = float(0.0)
-        v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
-        v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
-        v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
-        # depth channel, background depth is 0 so there is no t_final*bg term
-        v_alpha += (d * T - dbuffer * ra) * v_outd
-        v_alpha += -t_final * ra * bg[0] * v_out[0]
-        v_alpha += -t_final * ra * bg[1] * v_out[1]
-        v_alpha += -t_final * ra * bg[2] * v_out[2]
+                ra = 1.0 / (1.0 - alpha)
+                T = T * ra
+                fac = alpha * T
+                cd = cd_tile[t]
+                og = og_base + id_tile[t]
 
-        buffer = buffer + color * fac
-        dbuffer = dbuffer + d * fac
+                wp.atomic_add(v_colors, og, v_out * fac)
+                wp.atomic_add(v_depths, og, v_outd * fac)
 
-        # Where the alpha clamp is active alpha is constant, so the sigma and
-        # opacity paths carry no gradient.
-        if opac * vis <= 0.999:
-            v_sigma = -opac * vis * v_alpha
-            wp.atomic_add(
-                v_conic,
-                og,
-                wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy),
-            )
-            wp.atomic_add(
-                v_xy,
-                og,
-                wp.vec2(
-                    v_sigma * (conic[0] * dx + conic[1] * dy),
-                    v_sigma * (conic[1] * dx + conic[2] * dy),
-                ),
-            )
-            wp.atomic_add(v_opacity, og, vis * v_alpha)
+                v_alpha = float(0.0)
+                v_alpha += (cd[0] * T - buffer[0] * ra) * v_out[0]
+                v_alpha += (cd[1] * T - buffer[1] * ra) * v_out[1]
+                v_alpha += (cd[2] * T - buffer[2] * ra) * v_out[2]
+                # depth channel, background depth is 0 so there is no t_final*bg term
+                v_alpha += (cd[3] * T - dbuffer * ra) * v_outd
+                v_alpha += -t_final * ra * bg[0] * v_out[0]
+                v_alpha += -t_final * ra * bg[1] * v_out[1]
+                v_alpha += -t_final * ra * bg[2] * v_out[2]
+
+                buffer = buffer + wp.vec3(cd[0], cd[1], cd[2]) * fac
+                dbuffer = dbuffer + cd[3] * fac
+
+                # Where the alpha clamp is active alpha is constant, so the
+                # sigma and opacity paths carry no gradient.
+                if s[2] * vis <= 0.999:
+                    v_sigma = -s[2] * vis * v_alpha
+                    wp.atomic_add(
+                        v_conic,
+                        og,
+                        wp.vec3(
+                            0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy
+                        ),
+                    )
+                    wp.atomic_add(
+                        v_xy,
+                        og,
+                        wp.vec2(
+                            v_sigma * (s[3] * dx + s[4] * dy), v_sigma * (s[4] * dx + s[5] * dy)
+                        ),
+                    )
+                    wp.atomic_add(v_opacity, og, vis * v_alpha)
 
 
 def _rasterize_bwd_launch(
