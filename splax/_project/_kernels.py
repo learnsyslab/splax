@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import cast
 
 import warp as wp
-from warp.jax_experimental.ffi import JaxCallableGraphMode, jax_callable
+from warp import JaxCallableGraphMode, jax_callable
 
 from splax._batching import nested_vmap
 from splax._intersect import (

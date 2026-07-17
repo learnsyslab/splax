@@ -1,26 +1,10 @@
 """Benchmark suite comparing splax against gsplat on one training step.
 
-The measured quantity is a full forward plus backward pass. Both frameworks render the
-camera batch, take a scalar L2 loss against a fixed random target image stack, and
-compute gradients with respect to the five splat parameter arrays (means, scales,
-quats, colors, opacities). splax runs a jitted ``jax.value_and_grad`` over a vmapped
-``splax.training.render``, gsplat runs ``loss.backward()`` through its native
-camera-batch rasterization with a CUDA synchronize inside the timed call.
-
-Scenes, camera batches, timing discipline, and memory accounting mirror
-``bench_suite.py``. Every (scene, variant) pair runs in its own subprocess so the JAX
-process-cumulative memory peak reflects only that configuration. On top of the JAX
-allocator peak the splax rows also record the Warp mempool high watermark, since the
-rasterize backward's sort scratch and the autodiff adjoint scratch live in Warp's
-pool, invisible to JAX. Both are cumulative over the ascending batch sweep. gsplat's
-torch peak is reset per batch.
-
-Variants select the splax backward implementation:
-
-  - explicit: the hand-derived backward kernels (default).
-  - autodiff: Warp autodiff adjoint launches for the projection backward, enabled via
-    ``SPLAX_PROJECT_AUTODIFF=1``. The blend backward stays explicit, see
-    reports/perf/exp10_autodiff_backward.md for why its adjoint is infeasible.
+The measured quantity is a full forward plus backward pass. Both frameworks render the camera batch,
+take a scalar L2 loss against a fixed random target image stack, and compute gradients with respect
+to the five splat parameter arrays (means, scales, quats, colors, opacities). splax runs a jitted
+``jax.value_and_grad`` over a vmapped ``splax.training.render``, gsplat runs ``loss.backward()``
+through its native camera-batch rasterization with a CUDA synchronize inside the timed call.
 
 Writes ``reports/bench_backward.json``.
 
@@ -35,6 +19,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import argparse
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -78,8 +63,7 @@ def _target(sc: Scenario, batch: int) -> np.ndarray:
 def make_splax_step(sc: Scenario, batch: int) -> tuple[Callable[[], object], Callable]:
     """Build a jitted value_and_grad of the L2 loss over ``batch`` viewmats.
 
-    Returns the timed call and the jitted step itself so the caller can read its
-    jit cache size.
+    Returns the timed call and the jitted step itself so the caller can read its jit cache size.
     """
     means, scales, quats, colors, opacities, background = sc.scene
     res, focal = sc.res, sc.focal
@@ -162,12 +146,9 @@ def make_gsplat_step(sc: Scenario, batch: int) -> Callable[[], object]:
 def nvml_used_bytes() -> int:
     """Current GPU memory of this process from nvidia-smi.
 
-    Ground-truth cross-check for the allocator peaks. The Warp mempool watermark
-    and the JAX peak each miss what the other pool holds, and neither sees CUDA
-    context or cub workspace memory.
+    Ground-truth cross-check for the allocator peaks. The Warp mempool watermark and the JAX peak
+    each miss what the other pool holds, and neither sees CUDA context or cub workspace memory.
     """
-    import subprocess
-
     out = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
         capture_output=True,
@@ -257,8 +238,6 @@ def run_scenario(sc: Scenario, variant: str) -> dict:
 
 def run_worker(scene: str, variant: str, frag: Path) -> None:
     """Benchmark one (scenario, variant) pair in this process."""
-    if variant == "autodiff":
-        os.environ["SPLAX_PROJECT_AUTODIFF"] = "1"
     result = run_scenario(BUILDERS[scene](), variant)
     frag.write_text(json.dumps(result))
 

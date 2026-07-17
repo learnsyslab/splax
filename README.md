@@ -117,7 +117,17 @@ cd splax
 pixi shell
 ```
 
-Run the test suite with `pixi run -e tests tests`. The suite runs against any splax installation that includes the `tests` extra, from inside the `tests/` folder: `uv pip install "splax[tests]"`, `cd tests`, `pytest .`. Before a release, `pixi run -e tests check-dist` builds the distribution, installs the wheel into a fresh venv exactly like that, and runs the full suite against it.
+Run the test suite with `pixi run -e tests tests`. The suite also runs against any splax installation that includes the `tests` extra. Checking a built distribution before a release therefore is:
+
+```sh
+pixi run -e dist build
+uv venv /tmp/splax-check
+source /tmp/splax-check/bin/activate
+uv pip install "dist/splax-0.1.0-py3-none-any.whl[tests]"
+cd tests && pytest .
+```
+
+The gsplat reference tests JIT-compile a CUDA extension on first use, which needs a CUDA 12.8 compiler toolchain that pip cannot provide. Run the commands inside `pixi shell -e tests` to use the toolchain from the tests environment, or provide a system CUDA 12.8 install.
 
 ## License
 

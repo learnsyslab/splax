@@ -228,11 +228,6 @@ SCIPY_ARRAY_API = "1"
 
 [tool.pixi.feature.tests.tasks]
 tests = { cmd = "pytest -v tests", description = "Run tests" }
-# check-dist verifies the built distribution independently of the development install. The
-# freshly built wheel is installed into an empty venv, exactly as an end user would receive
-# it from PyPI, and the test suite runs against that install from inside tests/. Running in
-# the tests environment provides the CUDA toolchain for gsplat's JIT build.
-check-dist = { cmd = "bash -lc 'set -euo pipefail; wheel=$(ls -t dist/splax-*.whl | head -n 1); venv=\"${TMPDIR:-/tmp}/splax-check-dist\"; rm -rf \"$venv\"; uv venv \"$venv\"; uv pip install -p \"$venv\" \"splax[tests] @ file://$PWD/$wheel\"; cd tests; \"$venv/bin/pytest\" -v .'", depends-on = [{ task = "build", environment = "dist" }], description = "Install the built wheel into a fresh venv and run the test suite against it" }
 
 # Lint feature: ty type checking of the library.
 [tool.pixi.feature.lint.pypi-dependencies]
