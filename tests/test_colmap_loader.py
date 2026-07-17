@@ -1,4 +1,4 @@
-"""COLMAP loader invariants for ``scripts/train_colmap.py``.
+"""COLMAP loader invariants for ``splax.colmap``.
 
 Requires the drone scene unzipped to ``data/drone/sparse/0``. Checks the
 hand-written COLMAP binary parsers and the point-cloud init produce
@@ -8,29 +8,20 @@ needed).
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-if TYPE_CHECKING:
-    import types
+from splax.colmap import init_from_points, read_cameras, read_images, read_points3D
 
-ROOT = Path(__file__).resolve().parent.parent
-SPARSE = ROOT / "data" / "drone" / "sparse" / "0"
-
-
-def _load_module() -> types.ModuleType:
-    return importlib.import_module("scripts.train_colmap")
+SPARSE = Path(__file__).resolve().parents[1] / "data" / "drone" / "sparse" / "0"
 
 
 def test_parsers_and_conventions() -> None:
-    tc = _load_module()
-    cams = tc.read_cameras(SPARSE / "cameras.bin")
-    imgs = tc.read_images(SPARSE / "images.bin")
-    xyz, rgb, ids, _track_lens = tc.read_points3D(SPARSE / "points3D.bin")
+    cams = read_cameras(SPARSE / "cameras.bin")
+    imgs = read_images(SPARSE / "images.bin")
+    xyz, rgb, ids, _track_lens = read_points3D(SPARSE / "points3D.bin")
 
     assert len(cams) >= 1 and len(imgs) > 0 and xyz.shape[0] > 0
     assert xyz.shape[1] == 3 and rgb.shape == xyz.shape
@@ -51,10 +42,9 @@ def test_parsers_and_conventions() -> None:
 
 
 def test_point_init_static_shapes() -> None:
-    tc = _load_module()
-    xyz, rgb, _ids, _track_lens = tc.read_points3D(SPARSE / "points3D.bin")
+    xyz, rgb, _ids, _track_lens = read_points3D(SPARSE / "points3D.bin")
     n = 8000
-    p = tc.init_from_points(xyz[:3000].astype(np.float32), rgb[:3000], n, 0.1, seed=0)
+    p = init_from_points(xyz[:3000].astype(np.float32), rgb[:3000], n, 0.1, seed=0)
     assert p["means"].shape == (n, 3)
     assert p["log_scales"].shape == (n, 3)
     assert p["quats"].shape == (n, 4)

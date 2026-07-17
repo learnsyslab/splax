@@ -1,6 +1,6 @@
 """Batched training-step tests (gsplat ``batch_size`` + sqrt-batch LR).
 
-``scripts/train_colmap.py::_make_step`` takes a static ``batch`` and ``jax.vmap``-s a
+``splax.training.make_step`` takes a static ``batch`` and ``jax.vmap``-s a
 per-view loss over ``batch`` views (loss mean-reduced over the batch, per gsplat), driving
 the batch-native backward as one launch. These tests pin the two properties the
 batched step must preserve:
@@ -11,9 +11,9 @@ batched step must preserve:
   2. **Batch = mean-of-views.** A B=2 step's gradient equals the mean of the two
      corresponding B=1 gradients at identical params (pre-optimizer), the defining
      property of averaging the loss over the batch. Also runs under jit (it always does,
-     ``_make_step`` jits the step) and the duplicate-view sanity (B=2 of one view == B=1).
+     ``make_step`` jits the step) and the duplicate-view sanity (B=2 of one view == B=1).
 
-Gradients are recovered end-to-end through the real ``_make_step`` by using a plain SGD
+Gradients are recovered end-to-end through the real ``make_step`` by using a plain SGD
 optimizer (lr=1, so ``grad = p − step(p)``), so the actual jitted code path is exercised.
 Tolerances follow ``test_depth_reg.py`` / ``test_warp_grad_batched.py`` (atomic-order jitter
 in the batched backward is ~1e-4 rel).
@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from scripts import train_colmap as tc
+from splax import training
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
@@ -76,10 +76,10 @@ def _dummy_pts(B: int) -> tuple[jax.Array, jax.Array, jax.Array]:
 def _recover_grad(
     params: dict[str, jax.Array], batch: int, gts: jax.Array, vms: jax.Array
 ) -> dict[str, np.ndarray]:
-    """Run one real _make_step (SGD lr=1, no depth/exposure) and recover grad = p - new."""
+    """Run one real make_step (SGD lr=1, no depth/exposure) and recover grad = p - new."""
     opt = _sgd_opt(params)
     opt_state = opt.init(params)
-    step = tc._make_step(opt, H, W, INTR, SSIM_L, OREG, SREG, batch=batch)
+    step = training.make_step(opt, H, W, INTR, SSIM_L, OREG, SREG, batch=batch)
     bg = jnp.broadcast_to(jnp.ones(3), (batch, 3))
     new, _os, _l1 = step(params, opt_state, gts, vms, bg, *_dummy_pts(batch))
     return {kk: np.asarray(params[kk] - new[kk]) for kk in params}
@@ -92,8 +92,8 @@ def test_b1_matches_pre_t6_single_view() -> None:
 
     def old_loss(
         p: dict[str, jax.Array],
-    ) -> jax.Array:  # the single-view loss_fn train_colmap uses for one view
-        img, _ = tc.render_params(p, vm, H, W, INTR, background=jnp.ones(3))
+    ) -> jax.Array:  # the single-view loss_fn the trainer uses for one view
+        img, _ = training.render_params(p, vm, H, W, INTR, background=jnp.ones(3))
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
         loss = (1.0 - SSIM_L) * l1 + SSIM_L * dssim
@@ -143,9 +143,9 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
     opt = _sgd_opt(params)
     opt_state = opt.init(params)
     exp_tx = optax.sgd(1.0)
-    exp_p = {"exp": tc.init_exposure(8)}
+    exp_p = {"exp": training.init_exposure(8)}
     exp_state = exp_tx.init(exp_p)
-    step = tc._make_step(
+    step = training.make_step(
         opt, H, W, INTR, SSIM_L, OREG, SREG, depth_loss=True, aux_tx=exp_tx, exp_opt=True, batch=B
     )
     gts = jax.random.uniform(jax.random.key(7), (B, H, W, 3))

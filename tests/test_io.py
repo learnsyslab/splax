@@ -53,7 +53,7 @@ def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Ar
     return jnp.asarray(np.stack(mats), jnp.float32)
 
 
-LEGO_PLY = Path("data/scenes/lego.ply")
+LEGO_PLY = Path(__file__).resolve().parents[1] / "data/scenes/lego.ply"
 
 
 class _RenderKw(TypedDict):

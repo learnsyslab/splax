@@ -13,12 +13,10 @@ import argparse
 import concurrent.futures
 import json
 import logging
-import struct
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, cast
+from typing import TYPE_CHECKING
 
-import dm_pix
 import imageio.v3 as iio
 import jax
 import jax.numpy as jnp
@@ -26,114 +24,18 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import optax
-from scipy.spatial import KDTree
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 
 import splax
+from splax.colmap import init_from_points, read_cameras, read_images, read_points3D
+from splax.training import init_exposure, init_pose_deltas, make_step, render_params
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable
+    from collections.abc import Hashable
 
 logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
-
-
-_CAMERA_MODELS = {
-    0: ("SIMPLE_PINHOLE", 3),
-    1: ("PINHOLE", 4),
-    2: ("SIMPLE_RADIAL", 4),
-    3: ("RADIAL", 5),
-    4: ("OPENCV", 8),
-    5: ("OPENCV_FISHEYE", 8),
-    6: ("FULL_OPENCV", 12),
-    7: ("FOV", 5),
-    8: ("SIMPLE_RADIAL_FISHEYE", 4),
-    9: ("RADIAL_FISHEYE", 5),
-    10: ("THIN_PRISM_FISHEYE", 12),
-}
-
-
-def _r(f: BinaryIO, fmt: str) -> tuple:
-    return struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))
-
-
-def read_cameras(path: str | Path) -> dict[int, tuple[str, int, int, tuple[float, ...]]]:
-    """Return {camera_id: (model_name, w, h, params-tuple)}."""
-    cams = {}
-    with open(path, "rb") as f:
-        (n,) = _r(f, "Q")
-        for _ in range(n):
-            cid, model, w, h = _r(f, "iiQQ")
-            name, npar = _CAMERA_MODELS[model]
-            params = _r(f, "d" * npar)
-            cams[cid] = (name, w, h, params)
-    return cams
-
-
-def read_images(path: str | Path) -> list[dict]:
-    """Return list of dicts {id, qvec, tvec, camera_id, name, obs_xy, obs_pid}.
-
-    ``obs_xy`` (K,2 float64) / ``obs_pid`` (K, int64) are the per-image 2D keypoint
-    observations that have a valid triangulated 3D point. These are the COLMAP sparse points visible
-    in this view, used for depth regularization. Views with no depth loss simply ignore them.
-    """
-    imgs = []
-    with open(path, "rb") as f:
-        (n,) = _r(f, "Q")
-        for _ in range(n):
-            iid, qw, qx, qy, qz, tx, ty, tz, camid = _r(f, "idddddddi")
-            name = b""
-            while True:
-                c = f.read(1)
-                if c == b"\x00":
-                    break
-                name += c
-            (np2d,) = _r(f, "Q")
-            buf = f.read(np2d * 24)  # per point2D: x,y (double) + point3D_id (int64)
-            if np2d:
-                rec = np.frombuffer(buf, dtype=np.uint8).reshape(np2d, 24)
-                xy = rec[:, :16].copy().view(np.float64).reshape(np2d, 2)
-                pid = rec[:, 16:].copy().view(np.int64).reshape(np2d)
-                keep = pid >= 0
-                obs_xy, obs_pid = xy[keep], pid[keep]
-            else:
-                obs_xy = np.zeros((0, 2), np.float64)
-                obs_pid = np.zeros((0,), np.int64)
-            imgs.append(
-                {
-                    "id": iid,
-                    "qvec": np.array([qw, qx, qy, qz]),
-                    "tvec": np.array([tx, ty, tz]),
-                    "camera_id": camid,
-                    "name": name.decode(),
-                    "obs_xy": obs_xy,
-                    "obs_pid": obs_pid,
-                }
-            )
-    imgs.sort(key=lambda d: d["name"])
-    return imgs
-
-
-def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return (xyz (M,3) float64, rgb (M,3) uint8, ids (M,) int64, track_lens (M,) int64)."""
-    xyz, rgb, ids, track_lens = [], [], [], []
-    with open(path, "rb") as f:
-        (n,) = _r(f, "Q")
-        for _ in range(n):
-            pid, x, y, z, rr, gg, bb, err = _r(f, "QdddBBBd")
-            (tl,) = _r(f, "Q")
-            f.read(tl * 8)  # track: (image_id int32, point2D_idx int32) * tl
-            xyz.append((x, y, z))
-            rgb.append((rr, gg, bb))
-            ids.append(pid)
-            track_lens.append(tl)
-    return (
-        np.asarray(xyz, np.float64),
-        np.asarray(rgb, np.uint8),
-        np.asarray(ids, np.int64),
-        np.asarray(track_lens, np.int64),
-    )
 
 
 def _view_depth_targets(
@@ -356,190 +258,7 @@ def load_scene(
     }
 
 
-# region Initialization
-
-
-def knn_scales(xyz: np.ndarray, k: int = 3, cap: float | None = None) -> np.ndarray:
-    """Log-scale init = log(mean distance to k nearest neighbours)."""
-    tree = KDTree(xyz)
-    d, _ = tree.query(xyz, k=k + 1)  # includes self at dist 0
-    dist = d[:, 1:].mean(axis=1)
-    dist = np.clip(dist, 1e-4, cap if cap else np.inf)
-    return np.log(dist).astype(np.float32)
-
-
-def init_from_points(
-    xyz: np.ndarray,
-    rgb: np.ndarray,
-    n: int,
-    opa: float,
-    seed: int = 0,
-    weights: np.ndarray | None = None,
-) -> dict[str, jax.Array]:
-    """Fixed-N init from the sparse cloud (pad by jittered duplication / subsample)."""
-    rng = np.random.default_rng(seed)
-    m = xyz.shape[0]
-    prob = None
-    if weights is not None:
-        prob = np.log1p(np.asarray(weights, np.float64))
-        prob = np.clip(prob, 0.0, None)
-        total = float(prob.sum())
-        if total > 0:
-            prob = prob / total
-        else:
-            prob = None
-    # cap init gaussian size (normalized units, cameras sit at dist ~1) so a few isolated outlier
-    # points don't seed giant gaussians.
-    cap = 0.3
-    if m >= n:
-        sel = rng.choice(m, n, replace=False, p=prob)
-        xyz_n, rgb_n = xyz[sel], rgb[sel]
-        log_scales = knn_scales(xyz_n, cap=cap)
-    else:
-        pad = n - m
-        src = rng.choice(m, pad, replace=True, p=prob)
-        base_ls = knn_scales(xyz, cap=cap)  # (m,) at the SPARSE m-point density
-        # N-aware scale correction. knn_scales is the mean nearest-neighbour distance at the
-        # *sparse* density (m points spread through the scene volume V). Padding to n>m gaussians
-        # raises the density to n/V, and for a roughly uniform cloud the mean NN spacing scales as
-        # density^(-1/3). The per-gaussian scale at the target density is thus smaller by a factor
-        # cbrt(n/m). We correct in log space by subtracting (1/3)ln(n/m) from every knn log-scale.
-        # The jitter that spreads the padded copies uses the corrected (smaller) scale too, so the
-        # seeded points sit at the target spacing. Only fires when padding (n>m).
-        base_ls = base_ls - np.log(n / m) / 3.0
-        jitter = rng.normal(size=(pad, 3)).astype(np.float32) * np.exp(base_ls[src])[:, None]
-        xyz_n = np.concatenate([xyz, xyz[src] + jitter], 0)
-        rgb_n = np.concatenate([rgb, rgb[src]], 0)
-        log_scales = np.concatenate([base_ls, base_ls[src]], 0)
-    colors = np.clip(rgb_n.astype(np.float32) / 255.0, 1e-4, 1 - 1e-4)
-    colors_logit = np.log(colors / (1 - colors))
-    quats = rng.normal(size=(n, 4)).astype(np.float32)
-    opac_logit = np.full((n, 1), float(np.log(opa / (1 - opa))), np.float32)
-    return {
-        "means": jnp.asarray(xyz_n.astype(np.float32)),
-        "log_scales": jnp.asarray(log_scales[:, None].repeat(3, 1)),
-        "quats": jnp.asarray(quats),
-        "colors_logit": jnp.asarray(colors_logit),
-        "opac_logit": jnp.asarray(opac_logit),
-    }
-
-
 # region Rendering / metrics
-
-
-def render_params(
-    p: dict[str, jax.Array],
-    viewmat: jax.Array,
-    H: int,
-    W: int,
-    intr: tuple[float, float, float, float],
-    background: jax.Array | None = None,
-    antialiased: bool = False,
-    render_depth: bool = False,
-) -> tuple[jax.Array, jax.Array | None]:
-    """Render one view from parameterized splats."""
-    fx, fy, cx, cy = intr
-    means = p["means"]
-    scales = jnp.exp(p["log_scales"])
-    quats = p["quats"] / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8)
-    colors = jax.nn.sigmoid(p["colors_logit"])
-    opac = jax.nn.sigmoid(p["opac_logit"])
-    if background is None:
-        background = jnp.ones(3)
-    return splax.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=viewmat,
-        background=background,
-        img_shape=(H, W),
-        f=(fx, fy),
-        c=(cx, cy),
-        glob_scale=1.0,
-        clip_thresh=0.01,
-        antialiased=antialiased,
-        render_depth=render_depth,
-    )
-
-
-def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
-    """Bilinearly sample the (H, W) depth map at pixel coords ``uv`` (K, 2) = (x, y)."""
-    H, W = D.shape
-    x = jnp.clip(uv[:, 0] - 0.5, 0.0, W - 1.0)
-    y = jnp.clip(uv[:, 1] - 0.5, 0.0, H - 1.0)
-    x0 = jnp.floor(x).astype(jnp.int32)
-    y0 = jnp.floor(y).astype(jnp.int32)
-    x1 = jnp.minimum(x0 + 1, W - 1)
-    y1 = jnp.minimum(y0 + 1, H - 1)
-    wx = x - x0
-    wy = y - y0
-    d00 = D[y0, x0]
-    d01 = D[y0, x1]
-    d10 = D[y1, x0]
-    d11 = D[y1, x1]
-    top = d00 * (1.0 - wx) + d01 * wx
-    bot = d10 * (1.0 - wx) + d11 * wx
-    return top * (1.0 - wy) + bot * wy
-
-
-# Per-image exposure correction
-
-# Real captures drift in exposure / white-balance across frames. Without correction the splat
-# absorbs that per-view color error as spurious view-dependent color. The affine fix learns one 3x4
-# color transform per *training* image so the shared 3D color no longer has to explain per-image ISP
-# variation.
-
-# Held-out views have NO learned transform, as letting eval fit its own transform would let it cheat
-# by regressing the render onto the GT. So eval always scores the RAW render vs GT
-
-
-def init_exposure(ntr: int) -> jax.Array:
-    """Per-training-image affine color transforms, identity-initialized."""
-    eye = jnp.broadcast_to(jnp.eye(3, dtype=jnp.float32), (ntr, 3, 3))
-    off = jnp.zeros((ntr, 3, 1), jnp.float32)
-    return jnp.concatenate([eye, off], axis=2)
-
-
-def apply_exposure(img: jax.Array, affine: jax.Array) -> jax.Array:
-    """Apply one image's 3x4 affine color transform to an (H, W, 3) render."""
-    M, b = affine[:, :3], affine[:, 3]
-    return jnp.einsum("ij,hwj->hwi", M, img) + b
-
-
-# Per-image pose refinement
-
-# COLMAP poses of handheld video carry small residual errors (blur, rolling shutter, aliased loop
-# closures). A per-training-view 6D delta (axis-angle w, translation t) is left-composed onto the
-# w2c viewmat and optimized jointly with the splat. splax accumulates viewmat gradients, so this is
-# a first-class parameter. Held-out views keep their raw COLMAP poses: eval stays honest.
-
-
-def init_pose_deltas(ntr: int) -> jax.Array:
-    """Per-training-image 6D pose deltas (axis-angle, translation), zero-initialized."""
-    return jnp.zeros((ntr, 6), jnp.float32)
-
-
-def apply_pose_delta(vm: jax.Array, delta: jax.Array) -> jax.Array:
-    """Left-compose a small SE3 delta onto a w2c viewmat: R' = Rd R, t' = Rd t + td.
-
-    Rodrigues with the smooth A = sin(t)/t, B = (1-cos(t))/t^2 parameterization so the
-    zero-rotation init has well-defined gradients.
-    """
-    w, t = delta[:3], delta[3:]
-    # Not scipy's Rotation.from_rotvec here: it returns NaN gradients at the zero-vector init.
-    # The smooth A/B form below keeps jax.grad finite at theta = 0.
-    theta2 = jnp.sum(w * w) + 1e-12
-    theta = jnp.sqrt(theta2)
-    A = jnp.sin(theta) / theta
-    B = (1.0 - jnp.cos(theta)) / theta2
-    K = jnp.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
-    Rd = jnp.eye(3) + A * K + B * (K @ K)
-    out = jnp.eye(4, dtype=vm.dtype)
-    out = out.at[:3, :3].set(Rd @ vm[:3, :3])
-    out = out.at[:3, 3].set(Rd @ vm[:3, 3] + t)
-    return out
 
 
 def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
@@ -569,166 +288,6 @@ def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.
         return x
 
     return jax.tree.map(z, opt_state)
-
-
-def _make_step(
-    opt: optax.GradientTransformation,
-    H: int,
-    W: int,
-    intr: tuple[float, float, float, float],
-    ssim_lambda: float,
-    opacity_reg: float,
-    scale_reg: float,
-    opacity_entropy: float = 0.0,
-    flat_reg: float = 0.0,
-    antialiased: bool = False,
-    depth_loss: bool = False,
-    depth_lambda: float = 1e-2,
-    aux_tx: optax.GradientTransformation | None = None,
-    exp_opt: bool = False,
-    pose_opt: bool = False,
-    pose_reg: float = 0.0,
-    batch: int = 1,
-) -> Callable:
-    """Build a jitted train step.
-
-    Loss terms:
-        * ``bg`` is a per-step render-side background color
-        * ``depth_loss`` adds a scale-normalized masked L1 between the rendered expected-depth
-        channel and those points' camera-space depths, weighted by ``depth_lambda``
-        * ``aux_tx`` optimizer for the per-image auxiliary tables (dict with any of ``exp`` /
-        ``pose``, per ``exp_opt`` / ``pose_opt``). ``exp`` applies a view's 3x4 affine to the
-        render before the photometric terms; ``pose`` left-composes a 6D delta onto the viewmat.
-    """
-
-    def per_view(
-        p: dict[str, jax.Array],
-        aux_p: dict[str, jax.Array] | None,
-        gt: jax.Array,
-        vm: jax.Array,
-        bg: jax.Array,
-        vi: jax.Array,
-        pts_uv: jax.Array,
-        pts_depth: jax.Array,
-        pts_mask: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """Photometric + depth terms for ONE view (vmapped over the batch axis)."""
-        if pose_opt:
-            assert aux_p is not None
-            dlt = jax.lax.dynamic_index_in_dim(aux_p["pose"], vi, axis=0, keepdims=False)
-            vm = apply_pose_delta(vm, dlt)
-        if depth_loss:
-            img, depth = render_params(
-                p, vm, H, W, intr, background=bg, antialiased=antialiased, render_depth=True
-            )
-            assert depth is not None
-            dpred = _bilinear_sample(depth, pts_uv)
-            npts = jnp.sum(pts_mask) + 1e-8
-            # per-view scale normalization: divide the L1 residual by the mean target
-            # depth so the term is dimensionless / scale-invariant.
-            scale = jnp.sum(pts_mask * pts_depth) / npts + 1e-8
-            dl = jnp.sum(pts_mask * jnp.abs(dpred - pts_depth)) / npts / scale
-        else:
-            img, _ = render_params(p, vm, H, W, intr, background=bg, antialiased=antialiased)
-            dl = jnp.array(0.0, jnp.float32)
-        if exp_opt:
-            assert aux_p is not None
-            affine = jax.lax.dynamic_index_in_dim(aux_p["exp"], vi, axis=0, keepdims=False)
-            img = apply_exposure(img, affine)
-        l1 = jnp.mean(jnp.abs(img - gt))
-        dssim = jnp.asarray(1.0 - dm_pix.ssim(img, gt))
-        return l1, dssim, dl
-
-    def loss_fn(
-        p: dict[str, jax.Array],
-        aux_p: dict[str, jax.Array] | None,
-        gt: jax.Array,
-        vm: jax.Array,
-        bg: jax.Array,
-        vi: jax.Array,
-        pts_uv: jax.Array,
-        pts_depth: jax.Array,
-        pts_mask: jax.Array,
-    ) -> tuple[jax.Array, jax.Array]:
-        l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0))(
-            p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
-        )
-        l1 = jnp.mean(l1s)  # batch-mean photometric (gsplat)
-        loss = (1.0 - ssim_lambda) * l1 + ssim_lambda * jnp.mean(dssims)
-        loss = loss + opacity_reg * jnp.mean(jax.nn.sigmoid(p["opac_logit"]))
-        loss = loss + scale_reg * jnp.mean(jnp.exp(p["log_scales"]))
-        if opacity_entropy > 0:
-            # SuGaR-style binarization: drive opacities toward 0 or 1 so gaussians
-            # act as opaque surface elements rather than semi-transparent fog.
-            a = jax.nn.sigmoid(p["opac_logit"])
-            ent = -(a * jnp.log(a + 1e-8) + (1.0 - a) * jnp.log(1.0 - a + 1e-8))
-            loss = loss + opacity_entropy * jnp.mean(ent)
-        if flat_reg > 0:
-            # SuGaR-style flatness: shrink only the smallest axis so gaussians
-            # become disks that can align with surfaces.
-            loss = loss + flat_reg * jnp.mean(jnp.min(jnp.exp(p["log_scales"]), axis=-1))
-        if depth_loss:
-            loss = loss + depth_lambda * jnp.mean(dls)
-        if pose_opt and pose_reg > 0:
-            # L2 anchor on the pose deltas: keeps the train poses in the COLMAP gauge so the
-            # fixed held-out poses stay consistent with the reconstructed world.
-            assert aux_p is not None
-            loss = loss + pose_reg * jnp.mean(aux_p["pose"] ** 2)
-        return loss, l1
-
-    if aux_tx is None:
-
-        @jax.jit
-        def step(
-            p: dict[str, jax.Array],
-            opt_state: optax.OptState,
-            gt: jax.Array,
-            vm: jax.Array,
-            bg: jax.Array,
-            pts_uv: jax.Array,
-            pts_depth: jax.Array,
-            pts_mask: jax.Array,
-        ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
-            vi = jnp.zeros((batch,), jnp.int32)  # unused when aux_tx is None
-            (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-                p, None, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
-            )
-            updates, opt_state = opt.update(grads, opt_state, p)
-            # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-            return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, l1)
-    else:
-
-        @jax.jit
-        def step(
-            p: dict[str, jax.Array],
-            opt_state: optax.OptState,
-            aux_p: dict[str, jax.Array],
-            aux_state: optax.OptState,
-            gt: jax.Array,
-            vm: jax.Array,
-            bg: jax.Array,
-            vi: jax.Array,
-            pts_uv: jax.Array,
-            pts_depth: jax.Array,
-            pts_mask: jax.Array,
-        ) -> tuple[
-            dict[str, jax.Array], optax.OptState, dict[str, jax.Array], optax.OptState, jax.Array
-        ]:
-            (loss, l1), (grads, aux_grads) = jax.value_and_grad(
-                loss_fn, argnums=(0, 1), has_aux=True
-            )(p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask)
-            updates, opt_state = opt.update(grads, opt_state, p)
-            aux_updates, aux_state = aux_tx.update(aux_grads, aux_state, aux_p)
-            # apply_updates is typed as the broad optax ArrayTree; the pytrees keep their types.
-            return (
-                cast("dict[str, jax.Array]", optax.apply_updates(p, updates)),
-                opt_state,
-                cast("dict[str, jax.Array]", optax.apply_updates(aux_p, aux_updates)),
-                aux_state,
-                l1,
-            )
-
-    return step
 
 
 # region Training
@@ -874,7 +433,7 @@ def train(args: argparse.Namespace) -> dict:
             aux_params["pose"] = init_pose_deltas(ntr)
         aux_tx = optax.multi_transform(aux_txs, {k: k for k in aux_params})
         aux_state = aux_tx.init(aux_params)
-    step_fn = _make_step(
+    step_fn = make_step(
         opt,
         H,
         W,

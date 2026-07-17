@@ -32,8 +32,9 @@ import numpy as np
 import numpy.typing as npt
 
 ROOT = Path(__file__).resolve().parents[1]
+import _gsplat_ref as gref  # noqa: E402
+
 import splax  # noqa: E402
-from tests import _gsplat_ref as gref  # noqa: E402
 
 # Every test here needs the gsplat reference, fail the whole module without it.
 gref.require_working(allow_module_level=True)

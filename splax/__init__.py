@@ -28,7 +28,7 @@ if "scipy" in sys.modules and os.environ.get("SCIPY_ARRAY_API") != "1":
 os.environ["SCIPY_ARRAY_API"] = "1"
 import scipy  # noqa: F401, ensure scipy uses array API features
 
-from splax import inference, io, mcmc
+from splax import colmap, inference, io, mcmc, training
 from splax._intersect import clear_scratch
 from splax._project import opacity_compensation, project
 from splax._rasterize import rasterize, rasterize_depth
@@ -44,4 +44,6 @@ __all__ = [
     "mcmc",
     "io",
     "inference",
+    "training",
+    "colmap",
 ]

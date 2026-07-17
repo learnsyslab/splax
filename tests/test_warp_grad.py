@@ -27,8 +27,9 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+import _gsplat_ref as gref  # noqa: E402
+
 import splax  # noqa: E402
-from tests import _gsplat_ref as gref  # noqa: E402
 
 if TYPE_CHECKING:
     import types

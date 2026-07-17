@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
+import _gsplat_ref as gref
 import imageio.v3 as iio
 import jax
 import jax.numpy as jnp
@@ -33,7 +34,6 @@ import warp as wp
 import splax
 import splax._intersect as _isect
 from splax._intersect import _bits_for_count, _map_intersects_64bit
-from tests import _gsplat_ref as gref
 
 ROOT = Path(__file__).resolve().parents[1]
 

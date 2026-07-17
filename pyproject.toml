@@ -27,6 +27,12 @@ dependencies = [
 
 [project.optional-dependencies]
 viewer = ["viser>=1.0"]
+# The tests extra makes any splax install testable as-is: install splax[tests] with pip or uv,
+# cd into tests/ and run pytest. pixi consumes the same extra as the tests feature. gsplat is
+# the external reference implementation for the kernel tests. torch stays below 2.11 because
+# newer PyPI builds target CUDA 13, while jax and the nvcc that compiles gsplat's extension
+# run on CUDA 12.8.
+tests = ["splax[viewer]", "pytest", "torch>=2.8,<2.11", "gsplat>=1.5"]
 
 [project.urls]
 Homepage = "https://github.com/amacati/splax"
@@ -92,18 +98,6 @@ skip-magic-trailing-comma = true
 line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
-
-[tool.uv]
-# gsplat compiles a CUDA extension against torch, so it must build without isolation
-no-build-isolation-package = ["gsplat"]
-
-[tool.uv.sources]
-torch = { index = "pytorch" }
-
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
 
 [tool.ty.src]
 # The Warp-DSL kernel modules are excluded. Their kernel bodies are written in warp's kernel
@@ -209,9 +203,10 @@ colmap-features = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; col
 colmap-match = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; colmap sequential_matcher --database_path ./database.db' --", depends-on = ["colmap-build"], description = "Run COLMAP sequential matching in a scene folder" }
 colmap-map = { cmd = "bash -lc 'set -euo pipefail; d=\"$1\"; cd \"$d\"; mkdir -p ./sparse; colmap mapper --database_path ./database.db --image_path ./images --output_path ./sparse --Mapper.ba_local_backend CASPAR --Mapper.ba_global_backend CASPAR' --", depends-on = ["colmap-build"], description = "Run COLMAP mapper in a scene folder" }
 
-# Tests feature: pytest plus gsplat as external reference. gsplat JIT-compiles its
-# CUDA extension on first use, so the environment carries the matching CUDA 12.8
-# compiler and headers (torch is cu128). Everything stays inside the pixi env.
+# Tests feature: the pypi test dependencies come from the "tests" extra, which pixi
+# merges into this feature by name. gsplat JIT-compiles its CUDA extension on first
+# use, so the environment carries the matching CUDA 12.8 compiler and headers
+# (torch 2.8-2.10 on PyPI is built for cu128). Everything stays inside the pixi env.
 [tool.pixi.feature.tests.dependencies]
 python = ">=3.11"
 pytest = "*"
@@ -231,14 +226,13 @@ CPATH = "$CONDA_PREFIX/targets/x86_64-linux/include"
 # Required for scipy.spatial.transform's Rotation / RigidTransform to work with JAX
 SCIPY_ARRAY_API = "1"
 
-[tool.pixi.feature.tests.pypi-dependencies]
-# Pin torch to the cu128 index. Without an explicit index pixi pulls PyPI's default torch, which
-# conflicts with jax.
-torch = { version = ">=2.7", index = "https://download.pytorch.org/whl/cu128" }
-gsplat = ">=1.5"
-
 [tool.pixi.feature.tests.tasks]
 tests = { cmd = "pytest -v tests", description = "Run tests" }
+# check-dist verifies the built distribution independently of the development install. The
+# freshly built wheel is installed into an empty venv, exactly as an end user would receive
+# it from PyPI, and the test suite runs against that install from inside tests/. Running in
+# the tests environment provides the CUDA toolchain for gsplat's JIT build.
+check-dist = { cmd = "bash -lc 'set -euo pipefail; wheel=$(ls -t dist/splax-*.whl | head -n 1); venv=\"${TMPDIR:-/tmp}/splax-check-dist\"; rm -rf \"$venv\"; uv venv \"$venv\"; uv pip install -p \"$venv\" \"splax[tests] @ file://$PWD/$wheel\"; cd tests; \"$venv/bin/pytest\" -v .'", depends-on = [{ task = "build", environment = "dist" }], description = "Install the built wheel into a fresh venv and run the test suite against it" }
 
 # Lint feature: ty type checking of the library.
 [tool.pixi.feature.lint.pypi-dependencies]

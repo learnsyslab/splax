@@ -117,6 +117,8 @@ cd splax
 pixi shell
 ```
 
+Run the test suite with `pixi run -e tests tests`. The suite runs against any splax installation that includes the `tests` extra, from inside the `tests/` folder: `uv pip install "splax[tests]"`, `cd tests`, `pytest .`. Before a release, `pixi run -e tests check-dist` builds the distribution, installs the wheel into a fresh venv exactly like that, and runs the full suite against it.
+
 ## License
 
 MIT (see [LICENSE](LICENSE)). gsplat-derived portions are under Apache-2.0 ([licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)).
