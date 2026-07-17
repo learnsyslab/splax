@@ -1,8 +1,8 @@
 site_name: splax
 site_description: Differentiable 3D gaussian splatting for JAX with NVIDIA Warp kernels
-site_url: https://amacati.github.io/splax/
-repo_name: amacati/splax
-repo_url: https://github.com/amacati/splax
+site_url: https://learnsyslab.github.io/splax/
+repo_name: learnsyslab/splax
+repo_url: https://github.com/learnsyslab/splax
 
 docs_dir: docs
 
@@ -89,7 +89,7 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/amacati/splax
+      link: https://github.com/learnsyslab/splax
 
 watch:
   - splax/

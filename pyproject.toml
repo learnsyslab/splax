@@ -35,8 +35,8 @@ viewer = ["viser>=1.0"]
 tests = ["splax[viewer]", "pytest", "torch>=2.8,<2.11", "gsplat>=1.5"]
 
 [project.urls]
-Homepage = "https://github.com/amacati/splax"
-Repository = "https://github.com/amacati/splax"
+Homepage = "https://github.com/learnsyslab/splax"
+Repository = "https://github.com/learnsyslab/splax"
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]

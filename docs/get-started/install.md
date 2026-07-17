@@ -7,7 +7,7 @@ splax needs an NVIDIA GPU and a CUDA-enabled JAX. The `jax[cuda12]` wheel is pul
 ## Install with pip
 
 ```bash
-uv pip install "git+https://github.com/amacati/splax"
+uv pip install "git+https://github.com/learnsyslab/splax"
 ```
 
 Verify the import:
@@ -23,7 +23,7 @@ python -c "import splax; print(splax.__all__)"
 === "pixi"
 
     ```bash
-    git clone https://github.com/amacati/splax.git
+    git clone https://github.com/learnsyslab/splax.git
     cd splax
     pixi shell
     ```
@@ -31,7 +31,7 @@ python -c "import splax; print(splax.__all__)"
 === "pixi + docs"
 
     ```bash
-    git clone https://github.com/amacati/splax.git
+    git clone https://github.com/learnsyslab/splax.git
     cd splax
     pixi shell -e docs
     ```

@@ -15,9 +15,9 @@
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Ruff](https://github.com/amacati/splax/actions/workflows/ruff.yml/badge.svg)](https://github.com/amacati/splax/actions/workflows/ruff.yml)
-[![Ty](https://github.com/amacati/splax/actions/workflows/ty.yml/badge.svg)](https://github.com/amacati/splax/actions/workflows/ty.yml)
-[![Docs](https://github.com/amacati/splax/actions/workflows/docs.yml/badge.svg)](https://amacati.github.io/splax)
+[![Ruff](https://github.com/learnsyslab/splax/actions/workflows/ruff.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/ruff.yml)
+[![Ty](https://github.com/learnsyslab/splax/actions/workflows/ty.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/ty.yml)
+[![Docs](https://github.com/learnsyslab/splax/actions/workflows/docs.yml/badge.svg)](https://learnsyslab.github.io/splax)
 
 </div>
 
@@ -68,7 +68,7 @@ To edit ``.ply`` scenes, we recommend [superspl.at](https://superspl.at/editor).
 
 ## Documentation
 
-Full documentation lives at [amacati.github.io/splax](https://amacati.github.io/splax): installation, a quickstart, a user guide for rendering, training, batching, and IO, and the API reference.
+Full documentation lives at [learnsyslab.github.io/splax](https://learnsyslab.github.io/splax): installation, a quickstart, a user guide for rendering, training, batching, and IO, and the API reference.
 
 ## Why
 
@@ -106,13 +106,13 @@ Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the paper
 Requires an NVIDIA GPU and a CUDA-enabled JAX (`jax[cuda12]`, pulled in as a dependency).
 
 ```sh
-uv pip install "git+https://github.com/amacati/splax"
+uv pip install "git+https://github.com/learnsyslab/splax"
 ```
 
 Developer setup with [pixi](https://pixi.sh/), which installs splax editable with the dev tooling:
 
 ```sh
-git clone https://github.com/amacati/splax.git
+git clone https://github.com/learnsyslab/splax.git
 cd splax
 pixi shell
 ```
