@@ -80,22 +80,22 @@ def test_relocate_teleports_dead_onto_alive() -> None:
     opac_logit = jnp.concatenate([jnp.full((100, 1), -20.0), jnp.full((400, 1), 0.85)])
 
     binoms = mcmc.make_binoms(51)
-    out, reset = mcmc.relocate(
+    (new_means, _, _, _, new_opac_logit), reset = mcmc.relocate(
         k[3], means, log_scales, quats, colors_logit, opac_logit, binoms, min_opacity=0.005
     )
 
     # shapes are static
-    assert out["means"].shape == (n, 3)
-    assert out["opac_logit"].shape == (n, 1)
+    assert new_means.shape == (n, 3)
+    assert new_opac_logit.shape == (n, 1)
     # every dead gaussian was reset and now has opacity above the dead threshold
     reset = np.asarray(reset)
     assert reset[:100].all()
-    new_opac = np.asarray(jax.nn.sigmoid(out["opac_logit"]).reshape(-1))
+    new_opac = np.asarray(jax.nn.sigmoid(new_opac_logit).reshape(-1))
     assert (new_opac[:100] > 0.005).all()
     # relocated means coincide with some alive source position
     alive_means = np.asarray(means[100:])
     for i in range(100):
-        d = np.min(np.linalg.norm(alive_means - np.asarray(out["means"][i]), axis=1))
+        d = np.min(np.linalg.norm(alive_means - np.asarray(new_means[i]), axis=1))
         assert d < 1e-4
 
 

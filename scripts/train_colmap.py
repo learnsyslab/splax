@@ -652,23 +652,14 @@ def train(args: argparse.Namespace) -> dict:
     def relocate(
         p: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
     ) -> tuple[dict[str, jax.Array], optax.OptState]:
-        new, reset = splax.mcmc.relocate(
-            key,
-            p["means"],
-            p["log_scales"],
-            p["quats"],
-            p["colors_logit"],
-            p["opac_logit"],
-            binoms,
-            min_opacity=args.min_opacity,
-        )
-        return new, _reset_opt_state(opt_state, reset)
+        splats = tuple(p[k] for k in SPLAT_KEYS)
+        new, reset = splax.mcmc.relocate(key, *splats, binoms, min_opacity=args.min_opacity)
+        return dict(zip(SPLAT_KEYS, new)), _reset_opt_state(opt_state, reset)
 
     @jax.jit
     def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
-        m = splax.mcmc.inject_noise(
-            key, p["means"], p["log_scales"], p["quats"], p["opac_logit"], scaler
-        )
+        splats = (p["means"], p["log_scales"], p["quats"], p["opac_logit"])
+        m = splax.mcmc.inject_noise(key, *splats, scaler, min_opacity=args.min_opacity)
         return {**p, "means": m}
 
     # Per-image auxiliary tables (exposure affine / pose delta), one optax group per table

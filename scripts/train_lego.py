@@ -217,25 +217,16 @@ def train(args: argparse.Namespace) -> dict:
     def relocate(
         params: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
     ) -> tuple[dict[str, jax.Array], optax.OptState]:
-        new_params, reset_mask = splax.mcmc.relocate(
-            key,
-            params["means"],
-            params["log_scales"],
-            params["quats"],
-            params["colors_logit"],
-            params["opac_logit"],
-            binoms,
-            min_opacity=args.min_opacity,
-        )
-        return new_params, _reset_opt_state(opt_state, reset_mask)
+        splats = tuple(params[k] for k in SPLAT_KEYS)
+        new, reset_mask = splax.mcmc.relocate(key, *splats, binoms, min_opacity=args.min_opacity)
+        return dict(zip(SPLAT_KEYS, new)), _reset_opt_state(opt_state, reset_mask)
 
     @jax.jit
     def add_noise(
         params: dict[str, jax.Array], key: jax.Array, scale: float
     ) -> dict[str, jax.Array]:
-        noisy_means = splax.mcmc.inject_noise(
-            key, params["means"], params["log_scales"], params["quats"], params["opac_logit"], scale
-        )
+        splats = (params["means"], params["log_scales"], params["quats"], params["opac_logit"])
+        noisy_means = splax.mcmc.inject_noise(key, *splats, scale, min_opacity=args.min_opacity)
         return {**params, "means": noisy_means}
 
     steppers = {
