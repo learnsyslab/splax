@@ -3,11 +3,10 @@
 ``load_ply`` reads a 3DGS ``.ply`` and maps the stored fields to render-space inputs.
 
 ``write_ply`` takes the *render-space* splats and writes the inverse activation-space fields so a
-subsequent ``load_ply`` reproduces them. Normals are zeroed and ``f_rest`` is omitted.
+subsequent ``load_ply`` reproduces them.
 
 ``fetch`` downloads remote assets into a local cache and returns the cached path, so examples and
-tests can pull scenes on demand. It validates a cached file against the remote content token so a
-re-uploaded asset is picked up without clearing the cache by hand.
+tests can pull scenes on demand.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from plyfile import PlyData, PlyElement
+from scipy.special import logit
 
 # SH degree-0 basis constant, shared with load_ply (colors = f_dc * C0 + 0.5).
 _C0 = 0.28209479177387814
@@ -32,11 +32,10 @@ _C0 = 0.28209479177387814
 def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
     """Download ``url`` into a local cache and return the path to the cached file.
 
-    A cached file is reused only while its stored ETag still matches the remote, so a re-uploaded
-    asset at the same URL is re-downloaded without clearing the cache. When the remote sends no
-    ETag there is nothing to compare, so the asset is downloaded afresh on every call. Fetching with
-    the ``force`` parameter ensures a fresh download. The cache directory defaults to
-    ``$SPLAX_CACHE`` if set, else ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
+    A cached file is reused only while its stored ETag still matches the remote. When the remote
+    sends no ETag, the asset is downloaded on every call. Fetching with the ``force`` parameter
+    ensures a fresh download. The cache directory defaults to ``$SPLAX_CACHE`` if set, else
+    ``$XDG_CACHE_HOME/splax`` if set, else ``~/.cache/splax``.
 
     Args:
         url: URL to download.
@@ -47,10 +46,10 @@ def fetch(url: str, *, cache: Path | None = None, force: bool = False) -> Path:
         Path to the cached file.
     """
     if cache is None:
-        loc = os.environ.get("SPLAX_CACHE", os.environ.get("XDG_CACHE_HOME"))
-        cache = Path(loc) if loc is not None else Path.home() / ".cache/splax"
+        xdg = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        cache = Path(os.environ["SPLAX_CACHE"]) if "SPLAX_CACHE" in os.environ else xdg / "splax"
     assert isinstance(cache, Path), f"cache must be a Path, got {type(cache)}"
-    name = Path(urllib.parse.urlparse(url).path).name or "download"
+    name = Path(urllib.parse.urlparse(url).path).name
     path = cache / (hashlib.sha256(url.encode()).hexdigest()[:16] + "-" + name)
     token_path = cache / (path.name + ".etag")
     with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as resp:
@@ -89,8 +88,8 @@ def load_ply(path: Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, ja
     quats = jnp.asarray(np.stack([v[f"rot_{i}"] for i in range(4)], axis=-1), jnp.float32)
     quats /= jnp.linalg.norm(quats, axis=-1, keepdims=True)
     sh0 = jnp.asarray(np.stack([v[f"f_dc_{i}"] for i in range(3)], axis=-1), jnp.float32)
-    colors = jnp.clip(sh0 * _C0 + 0.5, 0.0, 1.0)
-    opacities = 1.0 / (1.0 + jnp.exp(-v["opacity"]))[..., None]
+    colors = jnp.clip(sh0 * _C0 + 0.5, 0.0, 1.0)  # files may store out-of-range SH coefficients
+    opacities = jax.nn.sigmoid(jnp.asarray(v["opacity"], jnp.float32))[:, None]
     return means, scales, quats, colors, opacities
 
 
@@ -105,62 +104,24 @@ def write_ply(
     """Write render-space splats to a 3DGS ``.ply``.
 
     Args:
-        path: Path to the output ``.ply`` file
-        means: (N, 3) world positions
-        scales: (N, 3) positive per-axis scales
-        quats: (N, 4) wxyz quaternions
-        colors: (N, 3) RGB in [0, 1]
-        opacities: (N, 1) or (N,) opacity in [0, 1]
+        path: Path to the output ``.ply`` file.
+        means: World positions, shape ``(N, 3)``.
+        scales: Positive per-axis scales, shape ``(N, 3)``.
+        quats: wxyz quaternions, shape ``(N, 4)``.
+        colors: RGB in ``[0, 1]``, shape ``(N, 3)``.
+        opacities: Opacities in ``[0, 1]``, shape ``(N, 1)`` or ``(N,)``.
     """
-    means = np.asarray(means, np.float32)
-    scales = np.asarray(scales, np.float32)
-    quats = np.asarray(quats, np.float32)
-    colors = np.asarray(colors, np.float32)
-    opacities = np.asarray(opacities, np.float32).reshape(-1)
-    n = means.shape[0]
-
-    log_scales = np.log(scales)
+    splats = [np.asarray(x, np.float32) for x in (means, scales, quats, colors, opacities)]
+    means, scales, quats, colors, opacities = splats
     quats = quats / np.linalg.norm(quats, axis=-1, keepdims=True)
     f_dc = (colors - 0.5) / _C0
-    # logit: inverse of sigmoid. Clip away from {0,1} to keep it finite.
-    opac = np.clip(opacities, 1e-7, 1.0 - 1e-7)
-    opacity = np.log(opac / (1.0 - opac))
-
-    fields = [
-        "x",
-        "y",
-        "z",
-        "nx",
-        "ny",
-        "nz",
-        "f_dc_0",
-        "f_dc_1",
-        "f_dc_2",
-        "opacity",
-        "scale_0",
-        "scale_1",
-        "scale_2",
-        "rot_0",
-        "rot_1",
-        "rot_2",
-        "rot_3",
-    ]
+    # logit is infinite at exactly 0 and 1, clip to keep the stored values finite
+    opac_logit = logit(np.clip(opacities.reshape(-1, 1), 1e-7, 1.0 - 1e-7))
+    n = means.shape[0]
+    data = np.hstack([means, np.zeros((n, 3)), f_dc, opac_logit, np.log(scales), quats])
+    fields = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity"]
+    fields += [f"scale_{i}" for i in range(3)] + [f"rot_{i}" for i in range(4)]
     verts = np.empty(n, dtype=[(f, "f4") for f in fields])
-    verts["x"], verts["y"], verts["z"] = means[:, 0], means[:, 1], means[:, 2]
-    verts["nx"] = verts["ny"] = verts["nz"] = 0.0
-    verts["f_dc_0"], verts["f_dc_1"], verts["f_dc_2"] = f_dc[:, 0], f_dc[:, 1], f_dc[:, 2]
-    verts["opacity"] = opacity
-    verts["scale_0"], verts["scale_1"], verts["scale_2"] = (
-        log_scales[:, 0],
-        log_scales[:, 1],
-        log_scales[:, 2],
-    )
-    verts["rot_0"], verts["rot_1"], verts["rot_2"], verts["rot_3"] = (
-        quats[:, 0],
-        quats[:, 1],
-        quats[:, 2],
-        quats[:, 3],
-    )
-
-    el = PlyElement.describe(verts, "vertex")
-    PlyData([el], text=False).write(str(path))
+    for field, column in zip(fields, data.T, strict=True):
+        verts[field] = column
+    PlyData([PlyElement.describe(verts, "vertex")], text=False).write(str(path))
