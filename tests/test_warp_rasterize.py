@@ -27,7 +27,6 @@ import imageio.v3 as iio
 import jax
 import jax.numpy as jnp
 import numpy as np
-import numpy.typing as npt
 import pytest
 import warp as wp
 
@@ -372,12 +371,6 @@ def _id_viewmat(dz: float = 5.0) -> jax.Array:
     return jnp.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32)
 
 
-def _nerf_camera(frame: dict[str, npt.NDArray[np.float64]]) -> np.ndarray:
-    c2w = np.array(frame["transform_matrix"], np.float64)
-    c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
-    return np.linalg.inv(c2w).astype(np.float32)
-
-
 def test_render_lego_vs_gsplat(gsplat_ref: ModuleType) -> None:
     """Splax vs gsplat full render on the real lego scene, from a dataset pose.
 
@@ -392,7 +385,7 @@ def test_render_lego_vs_gsplat(gsplat_ref: ModuleType) -> None:
     H, W = gt.shape[:2]
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
     kw: _RenderKW = {
-        "viewmat": jnp.asarray(_nerf_camera(frame)),
+        "viewmat": jnp.asarray(splax.utils.nerf_camera(frame)),
         "background": jnp.ones(3),
         "img_shape": (H, W),
         "f": (float(ff), float(ff)),

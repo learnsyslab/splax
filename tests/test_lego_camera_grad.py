@@ -40,10 +40,9 @@ def _lego_scene() -> tuple[tuple[jax.Array, ...], np.ndarray, float]:
     """Load the pretrained lego splat and the frame-0 test pose (viewmat, focal)."""
     meta = json.loads((LEGO / "transforms_test.json").read_text())
     gaussians = splax.io.load_ply(PLY)
-    cam_to_world = np.array(meta["frames"][0]["transform_matrix"], np.float64)
-    viewmat = RT.from_matrix(cam_to_world @ np.diag([1.0, -1.0, -1.0, 1.0])).inv()
+    viewmat = splax.utils.nerf_camera(meta["frames"][0])
     focal = float(0.5 * WIDTH / np.tan(0.5 * meta["camera_angle_x"]))
-    return gaussians, viewmat.as_matrix(), focal
+    return gaussians, viewmat, focal
 
 
 def test_lego_viewmat_grad_gsplat_parity(gsplat_ref: types.ModuleType) -> None:

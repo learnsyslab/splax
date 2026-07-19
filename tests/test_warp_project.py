@@ -29,7 +29,6 @@ from typing import TypedDict
 import jax
 import jax.numpy as jnp
 import numpy as np
-import numpy.typing as npt
 
 ROOT = Path(__file__).resolve().parents[1]
 import _gsplat_ref as gref  # noqa: E402
@@ -112,12 +111,6 @@ def test_parity_under_jit() -> None:
     _assert_parity(a, b)
 
 
-def _nerf_camera(frame: dict[str, npt.NDArray[np.float64]]) -> np.ndarray:
-    c2w = np.array(frame["transform_matrix"], np.float64)
-    c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
-    return np.linalg.inv(c2w).astype(np.float32)
-
-
 def test_parity_lego_slice() -> None:
     meta = json.loads((LEGO / "transforms_test.json").read_text())
     means, scales, quats, _colors, _opac = splax.io.load_ply(ROOT / "data/scenes/lego.ply")
@@ -125,7 +118,7 @@ def test_parity_lego_slice() -> None:
     frame = meta["frames"][0]
     W = H = 800
     ff = 0.5 * W / np.tan(0.5 * meta["camera_angle_x"])
-    viewmat = jnp.asarray(_nerf_camera(frame))
+    viewmat = jnp.asarray(splax.utils.nerf_camera(frame))
     args: _ProjArgs = {
         **PROJ_ARGS,
         "img_shape": (H, W),

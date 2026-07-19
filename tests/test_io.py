@@ -40,16 +40,7 @@ def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Ar
     for i in range(num_views):
         az = 2 * np.pi * i / num_views
         eye = center + radius * np.array([np.sin(az), 0.3, np.cos(az)])
-        fwd = center - eye
-        fwd /= np.linalg.norm(fwd)
-        right = np.cross(fwd, [0.0, 1.0, 0.0])
-        right /= np.linalg.norm(right)
-        down = np.cross(fwd, right)
-        R = np.stack([right, down, fwd])  # rows: cam axes in world
-        t = -R @ eye
-        m = np.eye(4)
-        m[:3, :3], m[:3, 3] = R, t
-        mats.append(m)
+        mats.append(splax.utils.look_at(eye, center))
     return jnp.asarray(np.stack(mats), jnp.float32)
 
 

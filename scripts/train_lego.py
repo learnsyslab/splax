@@ -34,13 +34,6 @@ logger = logging.getLogger(__name__)
 LEGO = Path("data/nerf_synthetic/lego")
 
 
-def nerf_camera(frame: dict) -> np.ndarray:
-    """Convert a NeRF camera pose to a view matrix."""
-    c2w = np.array(frame["transform_matrix"], np.float64)
-    c2w = c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
-    return np.linalg.inv(c2w).astype(np.float32)
-
-
 def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
     """Load a composited frame and view matrix."""
     img = iio.imread(LEGO / (frame["file_path"].lstrip("./") + ".png")).astype(np.float32) / 255.0
@@ -49,7 +42,7 @@ def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
     if height != res:
         factor = height // res
         img = img.reshape(res, factor, res, factor, 3).mean((1, 3))
-    return jnp.asarray(img), jnp.asarray(nerf_camera(frame))
+    return jnp.asarray(img), jnp.asarray(splax.utils.nerf_camera(frame))
 
 
 def load_view_alpha(frame: dict, res: int) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -59,7 +52,8 @@ def load_view_alpha(frame: dict, res: int) -> tuple[jax.Array, jax.Array, jax.Ar
     if height != res:
         factor = height // res
         img = img.reshape(res, factor, res, factor, 4).mean((1, 3))
-    return jnp.asarray(img[..., :3]), jnp.asarray(img[..., 3:]), jnp.asarray(nerf_camera(frame))
+    viewmat = jnp.asarray(splax.utils.nerf_camera(frame))
+    return jnp.asarray(img[..., :3]), jnp.asarray(img[..., 3:]), viewmat
 
 
 def init_params(n: int, init_scale: float, init_opa: float, seed: int = 0) -> dict[str, jax.Array]:
