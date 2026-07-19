@@ -6857,13 +6857,13 @@ packages:
   - plyfile
   - matplotlib>=3.11.0
   - warp-lang>=1.14.0
-  - optax>=0.2.8
-  - dm-pix>=0.4.5
   - viser>=1.0 ; extra == 'viewer'
   - splax[viewer] ; extra == 'tests'
   - pytest ; extra == 'tests'
   - torch>=2.8,<2.11 ; extra == 'tests'
   - gsplat>=1.5 ; extra == 'tests'
+  - optax>=0.2.8 ; extra == 'tests'
+  - dm-pix>=0.4.5 ; extra == 'tests'
   requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
   name: jaraco-functools

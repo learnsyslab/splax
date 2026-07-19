@@ -1,9 +1,9 @@
-"""Per-image affine exposure correction (``splax.training``).
+"""Per-image affine exposure correction (``scripts/train_colmap.py``).
 
 All tests here are **pure JAX on CPU**, they exercise only the affine helpers
 (``init_exposure`` / ``apply_exposure``), no renderer, no Warp kernels, no GPU.
 ``JAX_PLATFORMS=cpu`` is pinned below so they never touch the device even if a GPU
-is present. (Importing ``splax.training`` pulls in ``splax``/Warp at module scope,
+is present. (Importing ``train_colmap`` pulls in ``splax``/Warp at module scope,
 but Warp initializes lazily and nothing here launches a kernel.)
 
 The training step itself (``make_step`` with ``exp_opt``) needs the Warp renderer and
@@ -19,8 +19,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
-
-from splax.training import apply_exposure, init_exposure
+from train_colmap import apply_exposure, init_exposure
 
 
 def test_init_exposure_is_identity() -> None:

@@ -174,32 +174,16 @@ def init_params(n: int, H: int, W: int, seed: int = 0) -> dict[str, jax.Array]:
 VIEWMAT = jnp.eye(4)  # camera at origin, +z forward (OpenCV); slab sits at z~1
 
 
-def render_params(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> jax.Array:
+def render_logo(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> jax.Array:
     """Render the current parameter state into an RGB image."""
-    means = p["means"]
-    scales = jnp.exp(p["log_scales"])
-    quats = p["quats"] / (jnp.linalg.norm(p["quats"], axis=-1, keepdims=True) + 1e-8)
-    colors = jax.nn.sigmoid(p["colors_logit"])
-    opac = jax.nn.sigmoid(p["opac_logit"])
-    return splax.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=VIEWMAT,
-        background=jnp.asarray(bg),
-        img_shape=(H, W),
-        f=(F, F),
-        c=(W // 2, H // 2),
-        glob_scale=1.0,
-        clip_thresh=0.01,
-    )[0]
+    splats = (p["means"], p["log_scales"], p["quats"], p["colors_logit"], p["opac_logit"])
+    camera: dict = {"viewmat": VIEWMAT, "background": jnp.asarray(bg), "img_shape": (H, W)}
+    return splax.training.render_log(*splats, f=(F, F), **camera)[0]
 
 
 def frame(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> np.ndarray:
     """Convert a float render to uint8 RGB."""
-    return (np.clip(np.asarray(render_params(p, H, W, bg)), 0, 1) * 255).astype(np.uint8)
+    return (np.clip(np.asarray(render_logo(p, H, W, bg)), 0, 1) * 255).astype(np.uint8)
 
 
 def psnr(frame_u8: np.ndarray, target01: jax.Array) -> float:
@@ -243,7 +227,7 @@ def main() -> tuple[float, float]:
     opt_state = opt.init(params)
 
     def loss_fn(p: dict[str, jax.Array]) -> jax.Array:
-        img = render_params(p, H, W, bg)
+        img = render_logo(p, H, W, bg)
         l1 = jnp.mean(jnp.abs(img - target))
         dssim = 1.0 - dm_pix.ssim(img, target)
         return 0.8 * l1 + 0.2 * dssim

@@ -21,8 +21,6 @@ dependencies = [
     "plyfile",
     "matplotlib>=3.11.0",
     "warp-lang>=1.14.0",
-    "optax>=0.2.8",
-    "dm-pix>=0.4.5",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +30,7 @@ viewer = ["viser>=1.0"]
 # the external reference implementation for the kernel tests. torch stays below 2.11 because
 # newer PyPI builds target CUDA 13, while jax and the nvcc that compiles gsplat's extension
 # run on CUDA 12.8.
-tests = ["splax[viewer]", "pytest", "torch>=2.8,<2.11", "gsplat>=1.5"]
+tests = ["splax[viewer]", "pytest", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5"]
 
 [project.urls]
 Homepage = "https://github.com/learnsyslab/splax"
@@ -120,6 +118,9 @@ platforms = ["linux-64-cuda"]
 
 [tool.pixi.pypi-dependencies]
 splax = { path = "./", editable = true, extras = ["viewer"] }
+# The training scripts need an optimizer and SSIM, the library itself does not.
+optax = ">=0.2.8"
+dm-pix = ">=0.4.5"
 
 [tool.pixi.feature.docs.dependencies]
 python = ">=3.11"
@@ -255,6 +256,10 @@ colmap = { features = ["colmap"], solve-group = "colmap" }
 tests = { features = ["cuda", "tests"], solve-group = "tests" }
 lint = { features = ["lint"], solve-group = "lint" }
 dist = { features = ["cuda", "dist"], solve-group = "dist" }
+
+[tool.pytest.ini_options]
+# The training-toolkit tests import make_step and the exposure helpers from scripts/train_colmap.py
+pythonpath = ["scripts"]
 
 [tool.setuptools.packages]
 find = {include = ["splax*"]}

@@ -32,6 +32,7 @@ matplotlib.use("Agg")
 logger = logging.getLogger(__name__)
 
 LEGO = Path("data/nerf_synthetic/lego")
+SPLAT_KEYS = ("means", "log_scales", "quats", "colors_logit", "opac_logit")
 
 
 def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
@@ -68,39 +69,6 @@ def init_params(n: int, init_scale: float, init_opa: float, seed: int = 0) -> di
     }
 
 
-def render_params(
-    params: dict[str, jax.Array],
-    viewmat: jax.Array,
-    res: int,
-    focal: float,
-    background: jax.Array | None = None,
-    antialiased: bool = False,
-) -> jax.Array:
-    """Render an image from the parameter dictionary."""
-    means = params["means"]
-    scales = jnp.exp(params["log_scales"])
-    quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
-    colors = jax.nn.sigmoid(params["colors_logit"])
-    opac = jax.nn.sigmoid(params["opac_logit"])
-    if background is None:
-        background = jnp.ones(3)
-    return splax.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=viewmat,
-        background=background,
-        img_shape=(res, res),
-        f=(focal, focal),
-        c=(res // 2, res // 2),
-        glob_scale=1.0,
-        clip_thresh=0.01,
-        antialiased=antialiased,
-    )[0]
-
-
 def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
     """Compute the PSNR between two images."""
     mse = float(np.mean((np.clip(np.asarray(a), 0, 1) - np.asarray(b)) ** 2))
@@ -128,6 +96,7 @@ def _make_step(
     antialiased: bool = False,
 ) -> Callable:
     """Build a jitted training step."""
+    camera: dict = {"img_shape": (res, res), "f": (focal, focal), "antialiased": antialiased}
 
     def loss_fn(
         params: dict[str, jax.Array],
@@ -136,7 +105,8 @@ def _make_step(
         bg: jax.Array,
         viewmat: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
-        img = render_params(params, viewmat, res, focal, background=bg, antialiased=antialiased)
+        splats = tuple(params[k] for k in SPLAT_KEYS)
+        img, _ = splax.training.render_log(*splats, viewmat=viewmat, background=bg, **camera)
         gt = gt_alpha * gt_rgb + (1.0 - gt_alpha) * bg
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
@@ -218,16 +188,16 @@ def train(args: argparse.Namespace) -> dict:
     eval_focal = 0.5 * eval_res / np.tan(0.5 * camera_angle_x)
 
     params = init_params(args.n, args.init_scale, args.init_opa, args.seed)
+    eval_camera: dict = {"img_shape": (eval_res, eval_res), "f": (eval_focal, eval_focal)}
+    eval_camera |= {"background": jnp.ones(3), "antialiased": args.antialiased}
+
+    def eval_render(viewmat: jax.Array) -> jax.Array:
+        splats = tuple(params[k] for k in SPLAT_KEYS)
+        return splax.training.render_log(*splats, viewmat=viewmat, **eval_camera)[0]
 
     def eval_psnr() -> tuple[float, list[float]]:
         """Evaluate the current parameters on held out frames."""
-        scores = [
-            psnr(
-                render_params(params, viewmat, eval_res, eval_focal, antialiased=args.antialiased),
-                gt,
-            )
-            for gt, viewmat in zip(eval_imgs, eval_viewmats)
-        ]
+        scores = [psnr(eval_render(viewmat), gt) for gt, viewmat in zip(eval_imgs, eval_viewmats)]
         return float(np.mean(scores)), scores
 
     means_sched = optax.exponential_decay(args.means_lr, args.steps, 0.01)
@@ -348,27 +318,13 @@ def train(args: argparse.Namespace) -> dict:
 
     Path("results").mkdir(exist_ok=True)
     for frame_idx, (gt, viewmat) in zip(args.eval_frames, zip(eval_imgs, eval_viewmats)):
-        rendered = np.clip(
-            np.asarray(
-                render_params(params, viewmat, eval_res, eval_focal, antialiased=args.antialiased)
-            ),
-            0,
-            1,
-        )
+        rendered = np.clip(np.asarray(eval_render(viewmat)), 0, 1)
         iio.imwrite(
             f"results/train_lego_eval_f{frame_idx}.png",
             (np.concatenate([rendered, gt], 1) * 255).astype(np.uint8),
         )
 
-    preview = np.clip(
-        np.asarray(
-            render_params(
-                params, eval_viewmats[0], eval_res, eval_focal, antialiased=args.antialiased
-            )
-        ),
-        0,
-        1,
-    )
+    preview = np.clip(np.asarray(eval_render(eval_viewmats[0])), 0, 1)
     iio.imwrite(
         "results/train_lego_after.png",
         (np.concatenate([preview, eval_imgs[0]], 1) * 255).astype(np.uint8),

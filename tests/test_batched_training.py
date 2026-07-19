@@ -1,6 +1,6 @@
 """Batched training-step tests (gsplat ``batch_size`` + sqrt-batch LR).
 
-``splax.training.make_step`` takes a static ``batch`` and ``jax.vmap``-s a
+``train_colmap.make_step`` takes a static ``batch`` and ``jax.vmap``-s a
 per-view loss over ``batch`` views (loss mean-reduced over the batch, per gsplat), driving
 the batch-native backward as one launch. These tests pin the two properties the
 batched step must preserve:
@@ -28,14 +28,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from train_colmap import init_exposure, make_step
 
-from splax import training
+from splax.training import render_log
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
 
 H = W = 48
 INTR = (48.0, 48.0, 24.0, 24.0)
+CAMERA = {"img_shape": (H, W), "f": INTR[:2], "c": INTR[2:]}
 SSIM_L, OREG, SREG = 0.2, 0.01, 0.01
 
 
@@ -79,7 +81,7 @@ def _recover_grad(
     """Run one real make_step (SGD lr=1, no depth/exposure) and recover grad = p - new."""
     opt = _sgd_opt(params)
     opt_state = opt.init(params)
-    step = training.make_step(opt, H, W, INTR, SSIM_L, OREG, SREG, batch=batch)
+    step = make_step(opt, H, W, INTR, SSIM_L, OREG, SREG, batch=batch)
     bg = jnp.broadcast_to(jnp.ones(3), (batch, 3))
     new, _os, _l1 = step(params, opt_state, gts, vms, bg, *_dummy_pts(batch))
     return {kk: np.asarray(params[kk] - new[kk]) for kk in params}
@@ -93,7 +95,8 @@ def test_b1_matches_pre_t6_single_view() -> None:
     def old_loss(
         p: dict[str, jax.Array],
     ) -> jax.Array:  # the single-view loss_fn the trainer uses for one view
-        img, _ = training.render_params(p, vm, H, W, INTR, background=jnp.ones(3))
+        splats = (p["means"], p["log_scales"], p["quats"], p["colors_logit"], p["opac_logit"])
+        img, _ = render_log(*splats, viewmat=vm, background=jnp.ones(3), **CAMERA)
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
         loss = (1.0 - SSIM_L) * l1 + SSIM_L * dssim
@@ -143,9 +146,9 @@ def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
     opt = _sgd_opt(params)
     opt_state = opt.init(params)
     exp_tx = optax.sgd(1.0)
-    exp_p = {"exp": training.init_exposure(8)}
+    exp_p = {"exp": init_exposure(8)}
     exp_state = exp_tx.init(exp_p)
-    step = training.make_step(
+    step = make_step(
         opt, H, W, INTR, SSIM_L, OREG, SREG, depth_loss=True, aux_tx=exp_tx, exp_opt=True, batch=B
     )
     gts = jax.random.uniform(jax.random.key(7), (B, H, W, 3))
