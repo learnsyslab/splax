@@ -113,13 +113,30 @@ def test_projection_matches_manual_transform() -> None:
     kw = _kw(128, 128)
     rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
     T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
-    args = (n, kw["img_shape"], kw["f"], kw["c"], 1.0, 0.01)
     tf_ids = jnp.full((n,), -1, jnp.int32).at[:1000].set(0)
-    a = splax._project._project_call(
-        means, scales, quats, kw["viewmat"], opac.reshape(n), *args, jnp.asarray(T)[None], tf_ids
+    a = splax.project(
+        means,
+        scales,
+        quats,
+        kw["viewmat"],
+        opacities=opac,
+        img_shape=kw["img_shape"],
+        f=kw["f"],
+        c=kw["c"],
+        gaussian_transforms=jnp.asarray(T)[None],
+        transform_ids=tf_ids,
     )
     m2, q2 = _manual_move(means, quats, T, 0, 1000)
-    b = splax._project._project_call(m2, scales, q2, kw["viewmat"], opac.reshape(n), *args)
+    b = splax.project(
+        m2,
+        scales,
+        q2,
+        kw["viewmat"],
+        opacities=opac,
+        img_shape=kw["img_shape"],
+        f=kw["f"],
+        c=kw["c"],
+    )
 
     ra, rb = np.asarray(a[2]).ravel(), np.asarray(b[2]).ravel()
     np.testing.assert_array_equal(ra > 0, rb > 0)
@@ -281,7 +298,9 @@ def test_invalid_transform_inputs_raise() -> None:
 N = 2000
 SLICES = ((0, 700), (1000, 1600))
 K = len(SLICES)
-IDS = np.asarray(splax._project._transform_ids(N, SLICES))
+IDS = np.full(N, -1, np.int32)
+for k, (start, stop) in enumerate(SLICES):
+    IDS[start:stop] = k
 MOVED = IDS >= 0
 
 ROTVECS = jnp.asarray([[0.15, -0.08, 0.3], [-0.2, 0.12, 0.05]], jnp.float32)

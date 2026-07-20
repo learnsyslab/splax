@@ -1,11 +1,9 @@
 """Warp projection kernels and their JAX FFI callables.
 
-This module holds the GPU side of the projection stage: the forward kernel that projects each
-gaussian to screen space and counts the tiles its opacity-aware tight ellipse touches, the four
-backward kernels (gaussians only, viewmat only, joint, transform-aware), and the shared ``wp.func``
-vjp helpers. The
-host-side ``_*_launch`` functions are wrapped into JAX FFI callables that the API layer in
-``splax._project`` composes with ``jax.custom_vjp``.
+The forward kernel projects each gaussian to screen space and counts the tiles its opacity-aware
+ellipse touches. One backward kernel computes every gradient for the projection in a single pass,
+skipping the transform read and reduction when no transforms are active. Each kernel is wrapped into
+a JAX FFI callable that the API exposes via ``jax.custom_vjp``.
 """
 
 from __future__ import annotations
@@ -24,18 +22,15 @@ from splax._intersect import (
     ellipse_tile_count,
 )
 
-# Compile with approximate transcendentals and fp contraction, matching the CUDA reference's
-# -use_fast_math build flag.
-wp.set_module_options({"fast_math": True})
+wp.set_module_options({"fast_math": True})  # fastmath significantly accelerates the kernels
 
 VIEW_BLOCK = wp.constant(256)  # threads per block for the tile_sum viewmat reduce
-_BWD_BLOCK = int(VIEW_BLOCK)
 
 
 # region forward kernels
 
 
-def _project_launch(
+def _project_warp(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
     quats: wp.array[wp.vec4],
@@ -62,6 +57,7 @@ def _project_launch(
     num_tiles_hit: wp.array[wp.int32],
     cum_tiles_hit: wp.array[wp.int32],
 ) -> None:
+    """Launch the kernel behind the ffi, deriving the batch selectors from runtime shapes."""
     # N is passed statically because jax.vmap hides the batch axis from this
     # wrapper. B is recovered from an output shape, always full batch under
     # expand_dims. Each input is batched (leading dim above base, selector 1) or
@@ -74,37 +70,34 @@ def _project_launch(
     sel_view = viewmat.shape[0] > 4
     sel_opac = opacities.shape[0] > n
     sel_transforms = gaussian_transforms.shape[0] > num_transforms
-    wp.launch(
-        _project_kernel,
-        dim=total,
-        inputs=[
-            means3d,
-            scales,
-            quats,
-            viewmat,
-            opacities,
-            gaussian_transforms,
-            transform_ids,
-            n,
-            num_transforms,
-            has_transforms,
-            sel_means,
-            sel_scales,
-            sel_quats,
-            sel_view,
-            sel_opac,
-            sel_transforms,
-            img_h,
-            img_w,
-            fx,
-            fy,
-            cx,
-            cy,
-            glob_scale,
-            clip_thresh,
-        ],
-        outputs=[xys, depths, radii, conics, num_tiles_hit],
-    )
+    inputs = [
+        means3d,
+        scales,
+        quats,
+        viewmat,
+        opacities,
+        gaussian_transforms,
+        transform_ids,
+        n,
+        num_transforms,
+        has_transforms,
+        sel_means,
+        sel_scales,
+        sel_quats,
+        sel_view,
+        sel_opac,
+        sel_transforms,
+        img_h,
+        img_w,
+        fx,
+        fy,
+        cx,
+        cy,
+        glob_scale,
+        clip_thresh,
+    ]
+    outputs = [xys, depths, radii, conics, num_tiles_hit]
+    wp.launch(_project_kernel, dim=total, inputs=inputs, outputs=outputs)
     # One global inclusive prefix sum over the flattened B*N tile counts, so all
     # images' intersections are laid out contiguously for a single global sort.
     wp.utils.array_scan(num_tiles_hit, cum_tiles_hit, inclusive=True)
@@ -119,7 +112,7 @@ def _project_launch(
 # base rank and reduces to the unbatched path exactly.
 _project_ffi = nested_vmap(
     jax_callable(
-        _project_launch,
+        _project_warp,
         num_outputs=6,
         graph_mode=JaxCallableGraphMode.WARP,
         vmap_method="expand_dims",
@@ -372,155 +365,7 @@ def _quat_to_rotmat(q: wp.vec4) -> wp.mat33:
 # case, see _rasterize.
 
 
-def _project_bwd_gaussians_launch(
-    means3d: wp.array[wp.vec3],
-    scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
-    viewmat: wp.array2d[wp.float32],
-    radii: wp.array[wp.int32],
-    conics: wp.array[wp.vec3],
-    v_xy: wp.array[wp.vec2],
-    v_depth: wp.array[wp.float32],
-    v_conic: wp.array[wp.vec3],
-    num_gaussians: int,
-    fx: float,
-    fy: float,
-    glob_scale: float,
-    v_mean3d: wp.array[wp.vec3],
-    v_scale: wp.array[wp.vec3],
-    v_quat: wp.array[wp.vec4],
-) -> None:
-    n = num_gaussians
-    B = v_mean3d.shape[0] // n
-    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
-    v_mean3d.zero_()
-    v_scale.zero_()
-    v_quat.zero_()
-    wp.launch(
-        _project_bwd_gaussians_kernel,
-        dim=B * n,
-        inputs=[
-            means3d,
-            scales,
-            quats,
-            viewmat,
-            radii,
-            conics,
-            v_xy,
-            v_depth,
-            v_conic,
-            n,
-            *sels,
-            fx,
-            fy,
-            glob_scale,
-        ],
-        outputs=[v_mean3d, v_scale, v_quat],
-        device=means3d.device,
-    )
-
-
-def _project_bwd_viewmat_launch(
-    means3d: wp.array[wp.vec3],
-    scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
-    viewmat: wp.array2d[wp.float32],
-    radii: wp.array[wp.int32],
-    conics: wp.array[wp.vec3],
-    v_xy: wp.array[wp.vec2],
-    v_depth: wp.array[wp.float32],
-    v_conic: wp.array[wp.vec3],
-    num_gaussians: int,
-    fx: float,
-    fy: float,
-    glob_scale: float,
-    v_viewmat: wp.array2d[wp.float32],
-) -> None:
-    n = num_gaussians
-    B = v_viewmat.shape[0] // 4
-    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
-    v_viewmat.zero_()
-    blocks_per_image = (n + _BWD_BLOCK - 1) // _BWD_BLOCK
-    wp.launch_tiled(
-        _project_bwd_viewmat_kernel,
-        dim=[B * blocks_per_image],
-        inputs=[
-            means3d,
-            scales,
-            quats,
-            viewmat,
-            radii,
-            conics,
-            v_xy,
-            v_depth,
-            v_conic,
-            n,
-            blocks_per_image,
-            *sels,
-            fx,
-            fy,
-            glob_scale,
-        ],
-        outputs=[v_viewmat],
-        block_dim=_BWD_BLOCK,
-        device=means3d.device,
-    )
-
-
-def _project_bwd_joint_launch(
-    means3d: wp.array[wp.vec3],
-    scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
-    viewmat: wp.array2d[wp.float32],
-    radii: wp.array[wp.int32],
-    conics: wp.array[wp.vec3],
-    v_xy: wp.array[wp.vec2],
-    v_depth: wp.array[wp.float32],
-    v_conic: wp.array[wp.vec3],
-    num_gaussians: int,
-    fx: float,
-    fy: float,
-    glob_scale: float,
-    v_mean3d: wp.array[wp.vec3],
-    v_scale: wp.array[wp.vec3],
-    v_quat: wp.array[wp.vec4],
-    v_viewmat: wp.array2d[wp.float32],
-) -> None:
-    n = num_gaussians
-    B = v_mean3d.shape[0] // n
-    sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
-    v_mean3d.zero_()
-    v_scale.zero_()
-    v_quat.zero_()
-    v_viewmat.zero_()
-    blocks_per_image = (n + _BWD_BLOCK - 1) // _BWD_BLOCK
-    wp.launch_tiled(
-        _project_bwd_joint_kernel,
-        dim=[B * blocks_per_image],
-        inputs=[
-            means3d,
-            scales,
-            quats,
-            viewmat,
-            radii,
-            conics,
-            v_xy,
-            v_depth,
-            v_conic,
-            n,
-            blocks_per_image,
-            *sels,
-            fx,
-            fy,
-            glob_scale,
-        ],
-        outputs=[v_mean3d, v_scale, v_quat, v_viewmat],
-        block_dim=_BWD_BLOCK,
-        device=means3d.device,
-    )
-
-
-def _project_bwd_transforms_launch(
+def _project_bwd_warp(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
     quats: wp.array[wp.vec4],
@@ -534,6 +379,7 @@ def _project_bwd_transforms_launch(
     transform_ids: wp.array[wp.int32],
     num_gaussians: int,
     num_transforms: int,
+    has_transforms: bool,
     fx: float,
     fy: float,
     glob_scale: float,
@@ -543,6 +389,7 @@ def _project_bwd_transforms_launch(
     v_viewmat: wp.array2d[wp.float32],
     v_transforms: wp.array3d[wp.float32],
 ) -> None:
+    """Launch the single projection backward, deriving batch selectors from runtime shapes."""
     n = num_gaussians
     B = v_mean3d.shape[0] // n
     sels = _bwd_selectors(n, viewmat, means3d, scales, quats, radii, conics, v_xy, v_depth, v_conic)
@@ -552,9 +399,9 @@ def _project_bwd_transforms_launch(
     v_quat.zero_()
     v_viewmat.zero_()
     v_transforms.zero_()
-    blocks_per_image = (n + _BWD_BLOCK - 1) // _BWD_BLOCK
+    blocks_per_image = (n + VIEW_BLOCK - 1) // VIEW_BLOCK
     wp.launch_tiled(
-        _project_bwd_transforms_kernel,
+        _project_bwd_kernel,
         dim=[B * blocks_per_image],
         inputs=[
             means3d,
@@ -570,6 +417,7 @@ def _project_bwd_transforms_launch(
             transform_ids,
             n,
             num_transforms,
+            has_transforms,
             blocks_per_image,
             *sels,
             sel_transforms,
@@ -578,53 +426,23 @@ def _project_bwd_transforms_launch(
             glob_scale,
         ],
         outputs=[v_mean3d, v_scale, v_quat, v_viewmat, v_transforms],
-        block_dim=_BWD_BLOCK,
+        block_dim=VIEW_BLOCK,
         device=means3d.device,
     )
 
 
 # Batch-native backward, exactly like the forward. Gaussian grads come out per
-# view and JAX reduces broadcast inputs over the batch axis. The viewmat grad is
-# a per-image accumulator.
-_project_bwd_gaussians_ffi = nested_vmap(
+# view and JAX reduces broadcast inputs over the batch axis. The viewmat and
+# transform grads are per-image accumulators.
+_project_bwd_ffi = nested_vmap(
     jax_callable(
-        _project_bwd_gaussians_launch,
-        num_outputs=3,
-        graph_mode=JaxCallableGraphMode.WARP,
-        vmap_method="expand_dims",
-    ),
-    n_arrays=9,
-    name="project_bwd_gaussians",
-)
-_project_bwd_viewmat_ffi = nested_vmap(
-    jax_callable(
-        _project_bwd_viewmat_launch,
-        num_outputs=1,
-        graph_mode=JaxCallableGraphMode.WARP,
-        vmap_method="expand_dims",
-    ),
-    n_arrays=9,
-    name="project_bwd_viewmat",
-)
-_project_bwd_joint_ffi = nested_vmap(
-    jax_callable(
-        _project_bwd_joint_launch,
-        num_outputs=4,
-        graph_mode=JaxCallableGraphMode.WARP,
-        vmap_method="expand_dims",
-    ),
-    n_arrays=9,
-    name="project_bwd_joint",
-)
-_project_bwd_transforms_ffi = nested_vmap(
-    jax_callable(
-        _project_bwd_transforms_launch,
+        _project_bwd_warp,
         num_outputs=5,
         graph_mode=JaxCallableGraphMode.WARP,
         vmap_method="expand_dims",
     ),
     n_arrays=11,
-    name="project_bwd_transforms",
+    name="project_bwd",
 )
 
 
@@ -662,213 +480,11 @@ def _bwd_selectors(
     )
 
 
-# Gaussian-grad kernel. Launched over B*N flat threads like the forward. Gaussian
-# grads are written per view at the flat idx. When the gaussian inputs were
-# broadcast under vmap, JAX reduces the per-view grads over the batch axis.
-@wp.kernel
-def _project_bwd_gaussians_kernel(
-    means3d: wp.array[wp.vec3],
-    scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
-    viewmat: wp.array2d[wp.float32],
-    radii: wp.array[wp.int32],
-    conics: wp.array[wp.vec3],
-    v_xy_in: wp.array[wp.vec2],
-    v_depth_in: wp.array[wp.float32],
-    v_conic_in: wp.array[wp.vec3],
-    num_gaussians: wp.int32,
-    sel_means: wp.bool,
-    sel_scales: wp.bool,
-    sel_quats: wp.bool,
-    sel_view: wp.bool,
-    sel_radii: wp.bool,
-    sel_conics: wp.bool,
-    sel_vxy: wp.bool,
-    sel_vdepth: wp.bool,
-    sel_vconic: wp.bool,
-    fx: wp.float32,
-    fy: wp.float32,
-    glob_scale: wp.float32,
-    v_mean3d: wp.array[wp.vec3],
-    v_scale: wp.array[wp.vec3],
-    v_quat: wp.array[wp.vec4],
-):
-    idx = wp.tid()
-    n = num_gaussians
-    bid = idx // n
-    gid = idx % n
-    # Every operand is either batched (own leading dim B*N, read at idx) or
-    # broadcast (leading dim N, read at gid). A cotangent can arrive broadcast even
-    # when the geometry is batched. The depth cotangent is zero for an image loss,
-    # so JAX hands it back at size N, and indexing it at idx would read OOB.
-    r_idx = wp.where(sel_radii, idx, gid)
-    if radii[r_idx] <= 0:
-        return  # culled gaussian keeps its pre-zeroed grad
-    m_idx = wp.where(sel_means, idx, gid)
-    s_idx = wp.where(sel_scales, idx, gid)
-    q_idx = wp.where(sel_quats, idx, gid)
-    c_idx = wp.where(sel_conics, idx, gid)
-    vx_idx = wp.where(sel_vxy, idx, gid)
-    vd_idx = wp.where(sel_vdepth, idx, gid)
-    vc_idx = wp.where(sel_vconic, idx, gid)
-    vb = wp.where(sel_view, bid, 0) * 4
-    mean = means3d[m_idx]
-    W, trans = _load_W_trans(viewmat, vb)
-    g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
-    vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
-    v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
-    v_mean3d[idx] = wp.transpose(g.W) * v_p
-    vs, vq = _scale_quat_vjp(g, quats[q_idx], _v_M_from_vV(v_V, g.M), glob_scale)
-    v_scale[idx] = vs
-    v_quat[idx] = vq
-
-
-# Viewmat kernel. Skips the whole scale/quat/cov3d grad chain and the gaussian
-# grad arrays, accumulating only v_viewmat. The accumulator is per image. Under
-# vmap each gaussian contributes to its own image's 12-float row block only, so
-# per-view camera grads come out independent.
-@wp.kernel
-def _project_bwd_viewmat_kernel(
-    means3d: wp.array[wp.vec3],
-    scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
-    viewmat: wp.array2d[wp.float32],
-    radii: wp.array[wp.int32],
-    conics: wp.array[wp.vec3],
-    v_xy_in: wp.array[wp.vec2],
-    v_depth_in: wp.array[wp.float32],
-    v_conic_in: wp.array[wp.vec3],
-    num_gaussians: wp.int32,
-    blocks_per_image: wp.int32,
-    sel_means: wp.bool,
-    sel_scales: wp.bool,
-    sel_quats: wp.bool,
-    sel_view: wp.bool,
-    sel_radii: wp.bool,
-    sel_conics: wp.bool,
-    sel_vxy: wp.bool,
-    sel_vdepth: wp.bool,
-    sel_vconic: wp.bool,
-    fx: wp.float32,
-    fy: wp.float32,
-    glob_scale: wp.float32,
-    v_viewmat: wp.array2d[wp.float32],
-):
-    # launch_tiled over B*blocks_per_image blocks. Each block belongs to one image,
-    # so the block-collective tile_sum never crosses an image boundary. Threads
-    # outside N or culled contribute zero but must still take part in the tile_sum.
-    blk, tr = wp.tid()
-    n = num_gaussians
-    image_id = blk // blocks_per_image
-    local_block = blk % blocks_per_image
-    gid = local_block * VIEW_BLOCK + tr
-    idx = image_id * n + gid
-    v_R = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    v_t = wp.vec3(0.0, 0.0, 0.0)
-    r_idx = wp.where(sel_radii, idx, gid)
-    if gid < n and radii[r_idx] > 0:
-        m_idx = wp.where(sel_means, idx, gid)
-        s_idx = wp.where(sel_scales, idx, gid)
-        q_idx = wp.where(sel_quats, idx, gid)
-        c_idx = wp.where(sel_conics, idx, gid)
-        vx_idx = wp.where(sel_vxy, idx, gid)
-        vd_idx = wp.where(sel_vdepth, idx, gid)
-        vc_idx = wp.where(sel_vconic, idx, gid)
-        vb = wp.where(sel_view, image_id, 0) * 4
-        mean = means3d[m_idx]
-        W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
-        vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
-        v_p, v_T, _v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
-        v_R, v_t = _view_grad(g, mean, v_p, v_T)
-    ob = image_id * 4
-    for i in range(3):
-        for j in range(3):
-            s = wp.tile_sum(wp.tile(v_R[i, j]))
-            if tr == 0:
-                wp.atomic_add(v_viewmat, ob + i, j, wp.tile_extract(s, 0))
-        st = wp.tile_sum(wp.tile(v_t[i]))
-        if tr == 0:
-            wp.atomic_add(v_viewmat, ob + i, 3, wp.tile_extract(st, 0))
-
-
-# Joint kernel, gaussians plus viewmat. Per-image block layout like the viewmat
-# kernel so the tile_sum stays within one image. The gaussian grads compose the
-# helpers in the same order as the gaussians-only kernel, so they are
-# bit-identical to it.
-@wp.kernel
-def _project_bwd_joint_kernel(
-    means3d: wp.array[wp.vec3],
-    scales: wp.array[wp.vec3],
-    quats: wp.array[wp.vec4],
-    viewmat: wp.array2d[wp.float32],
-    radii: wp.array[wp.int32],
-    conics: wp.array[wp.vec3],
-    v_xy_in: wp.array[wp.vec2],
-    v_depth_in: wp.array[wp.float32],
-    v_conic_in: wp.array[wp.vec3],
-    num_gaussians: wp.int32,
-    blocks_per_image: wp.int32,
-    sel_means: wp.bool,
-    sel_scales: wp.bool,
-    sel_quats: wp.bool,
-    sel_view: wp.bool,
-    sel_radii: wp.bool,
-    sel_conics: wp.bool,
-    sel_vxy: wp.bool,
-    sel_vdepth: wp.bool,
-    sel_vconic: wp.bool,
-    fx: wp.float32,
-    fy: wp.float32,
-    glob_scale: wp.float32,
-    v_mean3d: wp.array[wp.vec3],
-    v_scale: wp.array[wp.vec3],
-    v_quat: wp.array[wp.vec4],
-    v_viewmat: wp.array2d[wp.float32],
-):
-    blk, tr = wp.tid()
-    n = num_gaussians
-    image_id = blk // blocks_per_image
-    local_block = blk % blocks_per_image
-    gid = local_block * VIEW_BLOCK + tr
-    idx = image_id * n + gid
-    v_R = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    v_t = wp.vec3(0.0, 0.0, 0.0)
-    r_idx = wp.where(sel_radii, idx, gid)
-    if gid < n and radii[r_idx] > 0:
-        m_idx = wp.where(sel_means, idx, gid)
-        s_idx = wp.where(sel_scales, idx, gid)
-        q_idx = wp.where(sel_quats, idx, gid)
-        c_idx = wp.where(sel_conics, idx, gid)
-        vx_idx = wp.where(sel_vxy, idx, gid)
-        vd_idx = wp.where(sel_vdepth, idx, gid)
-        vc_idx = wp.where(sel_vconic, idx, gid)
-        vb = wp.where(sel_view, image_id, 0) * 4
-        mean = means3d[m_idx]
-        W, trans = _load_W_trans(viewmat, vb)
-        g = _recompute_geom(mean, quats[q_idx], scales[s_idx], W, trans, glob_scale, fx, fy)
-        vcov2d = _vcov2d_from_conic(conics[c_idx], v_conic_in[vc_idx])
-        v_p, v_T, v_V = _proj_vjp(g, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
-        v_mean3d[idx] = wp.transpose(g.W) * v_p
-        vs, vq = _scale_quat_vjp(g, quats[q_idx], _v_M_from_vV(v_V, g.M), glob_scale)
-        v_scale[idx] = vs
-        v_quat[idx] = vq
-        v_R, v_t = _view_grad(g, mean, v_p, v_T)
-    ob = image_id * 4
-    for i in range(3):
-        for j in range(3):
-            s = wp.tile_sum(wp.tile(v_R[i, j]))
-            if tr == 0:
-                wp.atomic_add(v_viewmat, ob + i, j, wp.tile_extract(s, 0))
-        st = wp.tile_sum(wp.tile(v_t[i]))
-        if tr == 0:
-            wp.atomic_add(v_viewmat, ob + i, 3, wp.tile_extract(st, 0))
-
-
-# Transform-aware kernel, used whenever rigid transforms are active, no matter
-# which gradients were requested: the recompute must apply the same transforms
-# as the forward, or every gradient is taken at the wrong geometry. It computes
-# all gradient sets in one pass and the API layer discards the unperturbed ones.
+# The projection backward, computing every gradient set in one pass so gradient
+# selection is jax.grad's job, not the kernel's. With has_transforms false it
+# skips the transform read, apply, and reduction and reduces to the plain gaussian
+# plus viewmat grads. The recompute must apply the same transforms as the forward,
+# or every gradient is taken at the wrong geometry.
 #
 # With mean' = R_tf mean + t_tf and M' = R_tf M the chain rules are
 #     v_mean = R_tf^T v_mean'          v_M = R_tf^T v_M'
@@ -883,7 +499,7 @@ def _project_bwd_joint_kernel(
 # the backward at 50% coverage with a single transform (one contended
 # accumulator), the block reduction removes that.
 @wp.kernel
-def _project_bwd_transforms_kernel(
+def _project_bwd_kernel(
     means3d: wp.array[wp.vec3],
     scales: wp.array[wp.vec3],
     quats: wp.array[wp.vec4],
@@ -897,6 +513,7 @@ def _project_bwd_transforms_kernel(
     transform_ids: wp.array[wp.int32],
     num_gaussians: wp.int32,
     num_transforms: wp.int32,
+    has_transforms: wp.bool,
     blocks_per_image: wp.int32,
     sel_means: wp.bool,
     sel_scales: wp.bool,
@@ -929,7 +546,7 @@ def _project_bwd_transforms_kernel(
     v_t_tf = wp.vec3(0.0, 0.0, 0.0)
     moved = wp.bool(False)
     tf_id = wp.int32(-1)
-    if gid < n:
+    if gid < n and has_transforms:
         tf_id = transform_ids[gid]  # read even when culled, for the uniformity vote
     r_idx = wp.where(sel_radii, idx, gid)
     if gid < n and radii[r_idx] > 0:
@@ -973,26 +590,37 @@ def _project_bwd_transforms_kernel(
             v_R_tf = wp.outer(v_mean_world, mean_local) + v_M_world * wp.transpose(M_local)
             v_t_tf = v_mean_world
     ob = image_id * 4
-    tmin = wp.tile_extract(wp.tile_min(wp.tile(tf_id)), 0)
-    tmax = wp.tile_extract(wp.tile_max(wp.tile(tf_id)), 0)
-    uniform = tmin == tmax and tmin >= 0
-    mask = wp.where(uniform, 1.0, 0.0)  # masked so the tile ops run unconditionally
-    ob_tf = image_id * num_transforms + wp.max(tmin, 0)
+    # viewmat grad reduces in every block, the transform grad only when transforms are active. Both
+    # branches on has_transforms are uniform across the block, so the tile ops stay collective.
+    uniform = wp.bool(False)
+    mask = wp.float32(0.0)
+    ob_tf = wp.int32(0)
+    tmin = wp.int32(-1)
+    tmax = wp.int32(-1)
+    if has_transforms:
+        tmin = wp.tile_extract(wp.tile_min(wp.tile(tf_id)), 0)
+        tmax = wp.tile_extract(wp.tile_max(wp.tile(tf_id)), 0)
+        uniform = tmin == tmax and tmin >= 0
+        mask = wp.where(uniform, 1.0, 0.0)  # masked so the tile ops run unconditionally
+        ob_tf = image_id * num_transforms + wp.max(tmin, 0)
     for i in range(3):
         for j in range(3):
             s = wp.tile_sum(wp.tile(v_R[i, j]))
-            stf = wp.tile_sum(wp.tile(mask * v_R_tf[i, j]))
             if tr == 0:
                 wp.atomic_add(v_viewmat, ob + i, j, wp.tile_extract(s, 0))
-                if uniform:
+            if has_transforms:
+                stf = wp.tile_sum(wp.tile(mask * v_R_tf[i, j]))
+                if tr == 0 and uniform:
                     wp.atomic_add(v_transforms, ob_tf, i, j, wp.tile_extract(stf, 0))
         st = wp.tile_sum(wp.tile(v_t[i]))
-        sttf = wp.tile_sum(wp.tile(mask * v_t_tf[i]))
         if tr == 0:
             wp.atomic_add(v_viewmat, ob + i, 3, wp.tile_extract(st, 0))
-            if uniform:
+        if has_transforms:
+            sttf = wp.tile_sum(wp.tile(mask * v_t_tf[i]))
+            if tr == 0 and uniform:
                 wp.atomic_add(v_transforms, ob_tf, i, 3, wp.tile_extract(sttf, 0))
-    if moved and tmin != tmax:  # mixed block at a slice boundary, per-thread fallback
+    # mixed block at a slice boundary, per-thread fallback
+    if has_transforms and moved and tmin != tmax:
         out_tf = image_id * num_transforms + tf_id
         for i in range(3):
             for j in range(3):
