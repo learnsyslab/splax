@@ -25,12 +25,9 @@ dependencies = [
 
 [project.optional-dependencies]
 viewer = ["viser>=1.0"]
-# The tests extra makes any splax install testable as-is: install splax[tests] with pip or uv,
-# cd into tests/ and run pytest. pixi consumes the same extra as the tests feature. gsplat is
-# the external reference implementation for the kernel tests. torch stays below 2.11 because
-# newer PyPI builds target CUDA 13, while jax and the nvcc that compiles gsplat's extension
-# run on CUDA 12.8.
-tests = ["splax[viewer]", "pytest", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5"]
+# pycolmap loads a sparse reconstruction for the training toolkit. torch stays below 2.11 because
+# newer versions target CUDA 13, while jax and the nvcc that compiles gsplat run on CUDA 12.8.
+tests = ["splax[viewer]", "pytest", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5", "pycolmap>=4.1"]
 
 [project.urls]
 Homepage = "https://github.com/learnsyslab/splax"
@@ -118,8 +115,9 @@ platforms = ["linux-64-cuda"]
 
 [tool.pixi.pypi-dependencies]
 splax = { path = "./", editable = true, extras = ["viewer"] }
-# The training scripts need an optimizer and SSIM, the library itself does not.
+# The training scripts need an optimizer, SSIM, and a COLMAP scene loader. The library does not.
 optax = ">=0.2.8"
+pycolmap = ">=4.1"
 dm-pix = ">=0.4.5"
 
 [tool.pixi.feature.docs.dependencies]

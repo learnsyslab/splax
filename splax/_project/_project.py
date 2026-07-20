@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 # region public API
 
 
-def _transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
+def transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
     """Map each gaussian to the transform it follows.
 
     Slices must be non-overlapping and inside [0, n). Violations raise

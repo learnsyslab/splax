@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 
-from splax._project import _transform_ids, opacity_compensation, project
+from splax._project import opacity_compensation, project, transform_ids
 from splax._rasterize import rasterize, rasterize_depth
 
 if TYPE_CHECKING:
@@ -80,14 +80,14 @@ def render(
     """
     if (gaussian_transforms is None) != (gaussian_slices is None):
         raise ValueError("gaussian_transforms and gaussian_slices must be passed together")
-    transform_ids = None
+    tf_ids = None
     if gaussian_transforms is not None and gaussian_slices is not None:
         if gaussian_transforms.shape[-3:] != (len(gaussian_slices), 4, 4):
             raise ValueError(
                 f"gaussian_transforms shape {gaussian_transforms.shape} does not "
                 f"match {len(gaussian_slices)} slices, expected (K, 4, 4)"
             )
-        transform_ids = _transform_ids(means3d.shape[0], gaussian_slices)
+        tf_ids = transform_ids(means3d.shape[0], gaussian_slices)
 
     camera: dict = {"img_shape": img_shape, "f": f, "c": c}
     camera |= {"glob_scale": glob_scale, "clip_thresh": clip_thresh}
@@ -99,7 +99,7 @@ def render(
         opacities=opacities,
         **camera,
         gaussian_transforms=gaussian_transforms,
-        transform_ids=transform_ids,
+        transform_ids=tf_ids,
     )
 
     blend_opacities = opacities

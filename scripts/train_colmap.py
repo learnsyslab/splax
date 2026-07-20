@@ -25,12 +25,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import optax
+from colmap import init_from_points, read_reconstruction
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 
 import splax
 from splax import render_log
-from splax.colmap import init_from_points, read_cameras, read_images, read_points3D
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable
@@ -351,8 +351,7 @@ def load_scene(
     # COLMAP can emit several disconnected sub-models (sparse/0, 1, ...); the largest
     # is not always 0, so the index is selectable.
     sparse = data_dir / sparse_dir / str(sparse_model)
-    cams = read_cameras(sparse / "cameras.bin")
-    images = read_images(sparse / "images.bin")
+    cams, images, points = read_reconstruction(sparse)
     if min_obs > 0:
         # Views with few triangulated observations have weakly constrained poses (frequent
         # misregistrations on long video captures); drop them from train AND eval.
@@ -380,7 +379,7 @@ def load_scene(
             f"pose filter: kept {len(images)}/{n_all} views "
             f"(<= {pose_filter:g} x median step {med_step:.4f} off the median path)"
         )
-    pts_xyz, pts_rgb, pts_ids, pts_track_lens = read_points3D(sparse / "points3D.bin")
+    pts_xyz, pts_rgb, pts_ids, pts_track_lens = points
     id2row = {int(pid): i for i, pid in enumerate(pts_ids)}
 
     # camera centers + similarity normalization. The gauge comes from the full filtered list,

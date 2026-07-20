@@ -1,17 +1,17 @@
 """COLMAP sparse reconstruction ingestion.
 
-Binary readers for ``cameras.bin`` / ``images.bin`` / ``points3D.bin`` and the fixed-N splat
-initialization from the sparse point cloud.
+Loads a sparse model through pycolmap and initializes a fixed-N splat from the point cloud.
 """
 
 from __future__ import annotations
 
-import struct
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 import numpy as np
+import pycolmap
 from scipy.spatial import KDTree
+from scipy.spatial.transform import Rotation
 from scipy.special import logit
 
 if TYPE_CHECKING:
@@ -19,112 +19,54 @@ if TYPE_CHECKING:
 
     import jax
 
-_CAMERA_MODELS = {
-    0: ("SIMPLE_PINHOLE", 3),
-    1: ("PINHOLE", 4),
-    2: ("SIMPLE_RADIAL", 4),
-    3: ("RADIAL", 5),
-    4: ("OPENCV", 8),
-    5: ("OPENCV_FISHEYE", 8),
-    6: ("FULL_OPENCV", 12),
-    7: ("FOV", 5),
-    8: ("SIMPLE_RADIAL_FISHEYE", 4),
-    9: ("RADIAL_FISHEYE", 5),
-    10: ("THIN_PRISM_FISHEYE", 12),
-}
+Points = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
-def _r(f: BinaryIO, fmt: str) -> tuple:
-    return struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))
-
-
-def read_cameras(path: str | Path) -> dict[int, tuple[str, int, int, tuple[float, ...]]]:
-    """Read ``cameras.bin``.
+def read_reconstruction(
+    path: str | Path,
+) -> tuple[dict[int, tuple[str, int, int, tuple[float, ...]]], list[dict], Points]:
+    """Read a COLMAP sparse model directory.
 
     Args:
-        path: Path to the ``cameras.bin`` file.
+        path: Path to the sparse model directory holding ``cameras``, ``images``, and ``points3D``.
 
     Returns:
-        Mapping of camera id to ``(model_name, width, height, params)``.
+        cams: Mapping of camera id to ``(model_name, width, height, params)``.
+        images: List of per-image dicts with keys ``id``, ``qvec`` (wxyz), ``tvec``, ``camera_id``,
+            ``name``, ``obs_xy`` (K, 2 float64), and ``obs_pid`` (K, int64), sorted by image name.
+            The observations are the 2D keypoints with a valid triangulated 3D point, used for depth
+            regularization. Views with no depth loss simply ignore them.
+        points: Positions (M, 3) float64, colors (M, 3) uint8, point ids (M,) int64, and track
+            lengths (M,) int64.
     """
-    cams = {}
-    with open(path, "rb") as f:
-        (n,) = _r(f, "Q")
-        for _ in range(n):
-            cid, model, w, h = _r(f, "iiQQ")
-            name, n_params = _CAMERA_MODELS[model]
-            cams[cid] = (name, w, h, _r(f, "d" * n_params))
-    return cams
-
-
-def read_images(path: str | Path) -> list[dict]:
-    """Read ``images.bin`` into per-image pose and observation records.
-
-    Args:
-        path: Path to the ``images.bin`` file.
-
-    Returns:
-        List of dicts with keys ``id``, ``qvec`` (wxyz), ``tvec``, ``camera_id``, ``name``,
-        ``obs_xy`` (K, 2 float64), and ``obs_pid`` (K, int64), sorted by image name. The
-        observations are the 2D keypoints with a valid triangulated 3D point, used for depth
-        regularization. Views with no depth loss simply ignore them.
-    """
-    imgs = []
-    with open(path, "rb") as f:
-        (n,) = _r(f, "Q")
-        for _ in range(n):
-            iid, qw, qx, qy, qz, tx, ty, tz, camid = _r(f, "idddddddi")
-            name = b""
-            while (c := f.read(1)) != b"\x00":
-                name += c
-            (np2d,) = _r(f, "Q")
-            # per point2D: x, y (double) + point3D_id (int64)
-            rec = np.frombuffer(f.read(np2d * 24), np.uint8).reshape(np2d, 24)
-            xy = rec[:, :16].copy().view(np.float64)
-            pid = rec[:, 16:].copy().view(np.int64).ravel()
-            keep = pid >= 0
-            imgs.append(
-                {
-                    "id": iid,
-                    "qvec": np.array([qw, qx, qy, qz]),
-                    "tvec": np.array([tx, ty, tz]),
-                    "camera_id": camid,
-                    "name": name.decode(),
-                    "obs_xy": xy[keep],
-                    "obs_pid": pid[keep],
-                }
-            )
-    imgs.sort(key=lambda d: d["name"])
-    return imgs
-
-
-def read_points3D(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Read ``points3D.bin``.
-
-    Args:
-        path: Path to the ``points3D.bin`` file.
-
-    Returns:
-        Positions (M, 3) float64, colors (M, 3) uint8, point ids (M,) int64, and track lengths
-        (M,) int64.
-    """
-    xyz, rgb, ids, track_lens = [], [], [], []
-    with open(path, "rb") as f:
-        (n,) = _r(f, "Q")
-        for _ in range(n):
-            pid, x, y, z, rr, gg, bb, err = _r(f, "QdddBBBd")
-            (tl,) = _r(f, "Q")
-            f.read(tl * 8)  # track: (image_id int32, point2D_idx int32) * tl
-            xyz.append((x, y, z))
-            rgb.append((rr, gg, bb))
-            ids.append(pid)
-            track_lens.append(tl)
-    return (
-        np.asarray(xyz, np.float64),
-        np.asarray(rgb, np.uint8),
-        np.asarray(ids, np.int64),
-        np.asarray(track_lens, np.int64),
+    rec = pycolmap.Reconstruction(str(path))
+    cams = {
+        cid: (c.model_name, c.width, c.height, tuple(c.params)) for cid, c in rec.cameras.items()
+    }
+    images = []
+    for iid, im in rec.images.items():
+        pose = im.cam_from_world()
+        valid = [p for p in im.points2D if p.has_point3D()]
+        images.append(
+            {
+                "id": iid,
+                "qvec": Rotation.from_matrix(pose.rotation.matrix()).as_quat(scalar_first=True),
+                "tvec": np.asarray(pose.translation),
+                "camera_id": im.camera_id,
+                "name": im.name,
+                "obs_xy": np.array([p.xy for p in valid], np.float64).reshape(-1, 2),
+                "obs_pid": np.array([p.point3D_id for p in valid], np.int64),
+            }
+        )
+    images.sort(key=lambda d: d["name"])
+    items = list(rec.points3D.items())
+    points = (
+        np.array([p.xyz for _, p in items], np.float64).reshape(-1, 3),
+        np.array([p.color for _, p in items], np.uint8).reshape(-1, 3),
+        np.array([pid for pid, _ in items], np.int64),
+        np.array([p.track.length() for _, p in items], np.int64),
     )
+    return cams, images, points
 
 
 def knn_scales(xyz: np.ndarray, cap: float, k: int = 3) -> np.ndarray:

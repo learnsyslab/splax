@@ -1,4 +1,4 @@
-"""N-aware init-scale correction for ``splax.colmap``.
+"""N-aware init-scale correction for the ``colmap`` training-toolkit module.
 
 CPU-only, data-independent (synthetic point cloud): checks the density-ratio
 scale correction is applied iff the fixed-N init pads the sparse cloud (n>m),
@@ -8,8 +8,7 @@ and with exactly the (1/3)ln(n/m) log-space magnitude. See ``init_from_points``.
 from __future__ import annotations
 
 import numpy as np
-
-from splax.colmap import init_from_points, knn_scales
+from colmap import init_from_points, knn_scales
 
 
 def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
