@@ -1,14 +1,15 @@
 """Warp rasterization kernels and their JAX FFI callables.
 
-This module holds the GPU side of the rasterization stage: the tiled front-to-back blend kernels
-(plain and depth-augmented), their backward twins, and the shared sort and bin build. The host-side
-``_*_launch`` functions are wrapped into JAX FFI callables that the API layer in
+Blend kernels are available with and without depth support, their backward implementation, and
+shared kernels for sorting and binning.
+
+Kernel launch functions are wrapped into JAX FFI callables that the API layer in
 ``splax._rasterize`` composes with ``jax.custom_vjp``.
 
 Batching is native. Under jax.vmap the callable launches a single grid over the whole batch. The
 image index is decoded from the block rank, packed into the sort key, and used to offset per-image
-bin edges, outputs, and backgrounds. There is no host loop. Because of the host readback and
-data-dependent scratch, the forward callable is not CUDA-graph capturable, so graph_mode=NONE.
+bin edges, outputs, and backgrounds. Because of the host readback and data-dependent scratch, the
+forward callable is not CUDA-graph capturable.
 """
 
 from __future__ import annotations
@@ -19,18 +20,12 @@ from warp import JaxCallableGraphMode, jax_callable
 from splax._batching import nested_vmap
 from splax._intersect import BLOCK_SIZE, BLOCK_WIDTH, _cached_launch, _sort_and_bin
 
-# Compile with approximate transcendentals and fp contraction, matching the CUDA reference's
-# -use_fast_math build flag.
-wp.set_module_options({"fast_math": True})
+wp.set_module_options({"fast_math": True})  # Fastmath significantly accelerates the kernels.
 
-# One staged gaussian record: xy (2), opacity (1), conic (3). Packing every field
-# the alpha test needs into one vector lets a thread stage its gaussian with a
-# single shared write, and the whole record arrives with one shared read per
-# tested gaussian in the blend loop.
+# Gaussian records consist of xy (2), opacity (1) and conic (3). Packing everything into one vector
+# allows single shared writes/reads per gaussian in the blend loop.
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
-# The depth forward stages depth inside the geometry record. A 7-float record also
-# avoids the shared-memory access pattern that made the previous 6-float-plus-vec4
-# tile split run 2x slower, see the kernel comment on _rasterize_fwd_depth.
+# When including depth, the record grows by one to xy (2), opacity (1), conic (3), depth (1).
 _vec7 = wp.types.vector(length=7, dtype=wp.float32)
 
 
@@ -55,14 +50,13 @@ def _rasterize_fwd(
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
 ):
-    # Cooperative shared-memory blend. One 256-thread block per (image, tile)
-    # stages 256 gaussian records per batch into shared memory, each thread
-    # gathering exactly one gaussian with a single masked shared write per tile.
-    # image_id = block // num_tiles decodes the batch element. Outputs are the
-    # collapsed batched buffers (B*H, W), written at row image_id*H + i. The
-    # gathered gaussian ids are flat (b*N + gid). xys and conics are batched, so
-    # the flat id indexes them directly, while broadcast size-N colors and
-    # opacities are shifted back via a per-thread modulo at gather time.
+    # Cooperative shared-memory blend. One 256-thread block per (image, tile) stages 256 gaussians
+    # per batch into shared memory, each thread gathering exactly one gaussian with a single masked
+    # shared write per tile. image_id = block // num_tiles decodes the batch element. Outputs are
+    # the collapsed batched buffers (B*H, W), written at row image_id*H + i. The gathered gaussian
+    # ids are flat (b*N + gid). xys and conics are batched, so the flat id indexes them directly,
+    # while broadcast size-N colors and opacities are shifted back via a per-thread modulo at gather
+    # time.
     tile_g, tr = wp.tid()  # launch_tiled: block index and thread rank
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
@@ -298,7 +292,7 @@ def _blend_setup(
     return (gaussian_ids, tile_bins, num_intersects, tile_bounds_x, tile_bounds_x * tile_bounds_y)
 
 
-def _rasterize_launch(
+def _rasterize_warp(
     colors: wp.array[wp.vec3],
     opacities: wp.array[wp.float32],
     map_opacities: wp.array[wp.float32],
@@ -359,7 +353,7 @@ def _rasterize_launch(
 
 _rasterize_ffi = nested_vmap(
     jax_callable(
-        _rasterize_launch,
+        _rasterize_warp,
         num_outputs=3,
         graph_mode=JaxCallableGraphMode.NONE,
         vmap_method="expand_dims",
@@ -369,7 +363,7 @@ _rasterize_ffi = nested_vmap(
 )
 
 
-def _rasterize_depth_launch(
+def _rasterize_depth_warp(
     colors: wp.array[wp.vec3],
     opacities: wp.array[wp.float32],
     map_opacities: wp.array[wp.float32],
@@ -388,7 +382,7 @@ def _rasterize_depth_launch(
     out_img: wp.array2d[wp.vec3],
     out_depth: wp.array2d[wp.float32],
 ) -> None:
-    # Depth-augmented twin of _rasterize_launch. Shares the exact sort and bin, so
+    # Depth-augmented twin of _rasterize_warp. Shares the exact sort and bin, so
     # the blend order matches the plain path bit for bit.
     n = num_gaussians
     B = out_img.shape[0] // img_h
@@ -429,7 +423,7 @@ def _rasterize_depth_launch(
 
 _rasterize_depth_ffi = nested_vmap(
     jax_callable(
-        _rasterize_depth_launch,
+        _rasterize_depth_warp,
         num_outputs=4,
         graph_mode=JaxCallableGraphMode.NONE,
         vmap_method="expand_dims",
@@ -1056,7 +1050,7 @@ def _rasterize_bwd_depth_warp_kernel(
             wp.atomic_add(v_depths, og, s_dep)
 
 
-def _rasterize_bwd_launch(
+def _rasterize_bwd_warp(
     colors: wp.array[wp.vec3],
     opacities: wp.array[wp.float32],
     map_opacities: wp.array[wp.float32],
@@ -1175,7 +1169,7 @@ def _rasterize_bwd_launch(
 
 _rasterize_bwd_ffi = nested_vmap(
     jax_callable(
-        _rasterize_bwd_launch,
+        _rasterize_bwd_warp,
         num_outputs=4,
         graph_mode=JaxCallableGraphMode.NONE,
         vmap_method="expand_dims",
@@ -1185,7 +1179,7 @@ _rasterize_bwd_ffi = nested_vmap(
 )
 
 
-def _rasterize_bwd_depth_launch(
+def _rasterize_bwd_depth_warp(
     colors: wp.array[wp.vec3],
     opacities: wp.array[wp.float32],
     map_opacities: wp.array[wp.float32],
@@ -1228,7 +1222,7 @@ def _rasterize_bwd_depth_launch(
     v_depths.zero_()
     if num_intersects == 0:
         return
-    # Kernel choice by mean tile range, as in _rasterize_bwd_launch.
+    # Kernel choice by mean tile range, as in _rasterize_bwd_warp.
     if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
         _cached_launch(
             _rasterize_bwd_depth_warp_kernel,
@@ -1307,7 +1301,7 @@ def _rasterize_bwd_depth_launch(
 
 _rasterize_bwd_depth_ffi = nested_vmap(
     jax_callable(
-        _rasterize_bwd_depth_launch,
+        _rasterize_bwd_depth_warp,
         num_outputs=5,
         graph_mode=JaxCallableGraphMode.NONE,
         vmap_method="expand_dims",

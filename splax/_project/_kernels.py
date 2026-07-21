@@ -1,9 +1,9 @@
 """Warp projection kernels and their JAX FFI callables.
 
 The forward kernel projects each gaussian to screen space and counts the tiles its opacity-aware
-ellipse touches. One backward kernel computes every gradient for the projection in a single pass,
+ellipse touches. The backward kernel computes every gradient for the projection in a single pass,
 skipping the transform read and reduction when no transforms are active. Each kernel is wrapped into
-a JAX FFI callable that the API exposes via ``jax.custom_vjp``.
+a JAX FFI callable that is used to define the custom_vjps in _project.py.
 """
 
 from __future__ import annotations
@@ -57,13 +57,18 @@ def _project_warp(
     num_tiles_hit: wp.array[wp.int32],
     cum_tiles_hit: wp.array[wp.int32],
 ) -> None:
-    """Launch the kernel behind the ffi, deriving the batch selectors from runtime shapes."""
-    # N is passed statically because jax.vmap hides the batch axis from this
-    # wrapper. B is recovered from an output shape, always full batch under
-    # expand_dims. Each input is batched (leading dim above base, selector 1) or
-    # broadcast (equal to base, selector 0).
+    """Launch the kernel behind the ffi, deriving the batch selectors from runtime shapes.
+    
+    Native batch handling in jax requires jax.vmap with vmap_method="expand_dims". Warp's FFI
+    callback, however, collapses batches into the leading array dimension. We detect this and
+    configure the kernel to account for it, enabling one single kernel launch over all batches.
+    """
+    # N is passed statically because jax.vmap hides the batch axis from this wrapper. B is recovered
+    # from an output shape. Inputs arrive flattened, so batched inputs have shape  (B1 * ... * N).
+    # We thus check if the input is batched by comparing its leading dim to N. If batched, the flat
+    # idx is used to read the input, otherwise the gaussian idx is used.
     n = num_gaussians
-    total = xys.shape[0]  # B*N
+    total = xys.shape[0]  # B1 * ... * N
     sel_means = means3d.shape[0] > n
     sel_scales = scales.shape[0] > n
     sel_quats = quats.shape[0] > n
@@ -98,24 +103,18 @@ def _project_warp(
     ]
     outputs = [xys, depths, radii, conics, num_tiles_hit]
     wp.launch(_project_kernel, dim=total, inputs=inputs, outputs=outputs)
-    # One global inclusive prefix sum over the flattened B*N tile counts, so all
-    # images' intersections are laid out contiguously for a single global sort.
+    # One global inclusive prefix sum over the flattened tile counts, so all images' intersections
+    # are laid out contiguously for a single global sort. array_scan requires host-side temp
+    # management, so cannot be captured in the JAX graph.
     wp.utils.array_scan(num_tiles_hit, cum_tiles_hit, inclusive=True)
 
 
-# graph_mode=WARP keeps array_scan's host-side temp management out of the JAX graph
-# capture. Warp captures and replays a CUDA graph keyed on buffer addresses and
-# re-captures when a batch size or address changes.
-# vmap_method="expand_dims" makes batching native. Under jax.vmap every operand
-# gains a leading batch axis that warp's FFI callback collapses into the leading
-# array dim, and the callable launches once over B*N. A non-vmapped call keeps
-# base rank and reduces to the unbatched path exactly.
 _project_ffi = nested_vmap(
     jax_callable(
         _project_warp,
         num_outputs=6,
         graph_mode=JaxCallableGraphMode.WARP,
-        vmap_method="expand_dims",
+        vmap_method="expand_dims",  # native batch handling in one single kernel launch
     ),
     n_arrays=7,
     name="project",

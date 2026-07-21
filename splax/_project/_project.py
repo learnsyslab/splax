@@ -22,26 +22,6 @@ if TYPE_CHECKING:
 # region public API
 
 
-def transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
-    """Map each gaussian to the transform it follows.
-
-    Slices must be non-overlapping and inside [0, n). Violations raise
-    immediately because a bad slice map silently corrupts the render. The checks
-    are pure Python on the static slice values, so they work under jit.
-    """
-    for k, (start, stop) in enumerate(slices):
-        if not (0 <= start < stop <= n):
-            raise ValueError(f"gaussian slice {k} = [{start}, {stop}) outside [0, {n})")
-    ordered = sorted(slices)
-    for (_, prev_stop), (start, _) in zip(ordered, ordered[1:]):
-        if start < prev_stop:
-            raise ValueError(f"gaussian slices overlap: {list(slices)}")
-    ids = jnp.full((n,), -1, jnp.int32)
-    for k, (start, stop) in enumerate(slices):
-        ids = ids.at[start:stop].set(k)
-    return ids
-
-
 def project(
     mean3ds: jax.Array,
     scales: jax.Array,
@@ -61,8 +41,8 @@ def project(
 
     The projection is differentiable through ``jax.custom_vjp`` with respect to the means, scales,
     quaternions, viewmat, and rigid transforms. A single backward kernel computes every gradient in
-    one pass, and ``jax.grad`` keeps the ones its argnums select. Opacities feed the integer tile
-    counts and carry no gradient through projection, their gradient flows through rasterization
+    one pass, and ``jax.grad`` keeps the ones its argnums select. Opacities determine the integer
+    tile counts and carry no gradient through projection. Their gradient flows through rasterization
     instead.
 
     Args:
@@ -112,16 +92,12 @@ def project(
 def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) -> jax.Array:
     """Compute the Mip-Splatting anti-aliased opacity compensation factor per gaussian.
 
-    The factor is ``sqrt(det(cov2d) / det(cov2d + eps I))``, the determinant ratio of the undilated
-    2d covariance over the eps-dilated one that projection already applies. Multiplying it into the
-    opacity before the blend cancels the artificial area inflation the dilation grants thin
-    gaussians.
+    It cancels the artificial area inflation from the low-pass guard in the projection kernel by
+    scaling back the opacities.
 
     The factor is computed in closed form from the projection's conics, so its gradient flows back
     to the scales, quaternions, and means through the existing projection vjp without any Warp
-    kernel change. For a conic with entries ``a``, ``b``, and ``c`` the ratio is
-    ``1 - eps (a + c) + eps^2 (a c - b^2)``, clipped to ``[0, 1]`` for float safety. Culled
-    gaussians with non-positive radii get a factor of 1.
+    kernel change. Culled gaussians with non-positive radii get a factor of 1.
 
     Args:
         conics: Inverse 2d covariances from projection, shape ``(N, 3)``.
@@ -131,14 +107,30 @@ def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) 
     Returns:
         Per-gaussian compensation factor, shape ``(N,)``.
     """
-    c = conics.reshape(-1, 3)
-    a = c[:, 0]
-    b = c[:, 1]
-    cc = c[:, 2]
-    rho2 = 1.0 - eps * (a + cc) + (eps * eps) * (a * cc - b * b)
+    conics = conics.reshape(-1, 3)
+    a, b, c = conics[:, 0], conics[:, 1], conics[:, 2]
+    rho2 = 1.0 - eps * (a + c) + (eps * eps) * (a * c - b * b)
     rho = jnp.sqrt(jnp.clip(rho2, 0.0, 1.0))
-    valid = radii.reshape(-1) > 0
-    return jnp.where(valid, rho, 1.0)
+    return jnp.where(radii.reshape(-1) > 0, rho, 1.0)
+
+
+def transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
+    """Map each gaussian to the transform it follows.
+
+    Slices must be static, non-overlapping and inside [0, n). Violations raise to prevent corrupted
+    renderings.
+    """
+    for k, (start, stop) in enumerate(slices):
+        if not (0 <= start < stop <= n):
+            raise ValueError(f"gaussian slice {k} = [{start}, {stop}) outside [0, {n})")
+    ordered = sorted(slices)
+    for (_, prev_stop), (start, _) in zip(ordered, ordered[1:]):
+        if start < prev_stop:
+            raise ValueError(f"gaussian slices overlap: {list(slices)}")
+    ids = jnp.full((n,), -1, jnp.int32)
+    for k, (start, stop) in enumerate(slices):
+        ids = ids.at[start:stop].set(k)
+    return ids
 
 
 # region custom vjp
@@ -161,126 +153,11 @@ def _project(
     clip_thresh: float,
     has_transforms: bool,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Attach the custom vjp, which needs a rigid array signature the public API cannot have."""
-    return _project_core(
-        mean3ds,
-        scales,
-        quats,
-        viewmat,
-        opac,
-        n,
-        img_shape,
-        f,
-        c,
-        glob_scale,
-        clip_thresh,
-        gaussian_transforms,
-        transform_ids,
-        has_transforms,
-    )
+    """Custom vjp for the projection.
 
-
-def _project_fwd_rule(
-    mean3ds: jax.Array,
-    scales: jax.Array,
-    quats: jax.Array,
-    viewmat: jax.Array,
-    opac: jax.Array,
-    gaussian_transforms: jax.Array,
-    transform_ids: jax.Array,
-    n: int,
-    img_shape: tuple[int, int],
-    f: tuple[float, float],
-    c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
-    has_transforms: bool,
-) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array], tuple]:
-    """Save the residuals the single backward kernel recomputes geometry from."""
-    # opacities carry no gradient through projection, they only drive integer tile counts. The
-    # opacity gradient flows through rasterize.
-    out = _project_core(
-        mean3ds,
-        scales,
-        quats,
-        viewmat,
-        opac,
-        n,
-        img_shape,
-        f,
-        c,
-        glob_scale,
-        clip_thresh,
-        gaussian_transforms,
-        transform_ids,
-        has_transforms,
-    )
-    _xys, _depths, radii, conics, _nth, _cum = out
-    return out, (mean3ds, scales, quats, viewmat, gaussian_transforms, transform_ids, radii, conics)
-
-
-def _project_bwd_rule(
-    n: int,
-    img_shape: tuple[int, int],
-    f: tuple[float, float],
-    c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
-    has_transforms: bool,
-    residuals: tuple,
-    cotangents: tuple,
-) -> tuple[jax.Array | None, ...]:
-    """Run the single backward kernel, which computes every gradient so jax.grad selects them."""
-    m, s, q, vm, tf, ids, radii, conics = residuals
-    v_xys, v_depths, _v_radii, v_conics, _v_nth, _v_cum = cotangents
-    r = radii.reshape(n).astype(jnp.int32)
-    k = tf.shape[-3]
-    dims = {"v_mean3d": n, "v_scale": n, "v_quat": n}
-    dims["v_viewmat"] = (4, 4)
-    dims["v_transforms"] = (k, 4, 4)
-    v_mean, v_scale, v_quat, v_viewmat, v_transforms = _project_bwd_ffi(
-        m,
-        s,
-        q,
-        vm,
-        r,
-        conics,
-        v_xys,
-        v_depths.reshape(-1),
-        v_conics,
-        tf,
-        ids,
-        int(n),
-        int(k),
-        has_transforms,
-        float(f[0]),
-        float(f[1]),
-        float(glob_scale),
-        output_dims=dims,
-    )
-    return (v_mean, v_scale, v_quat, v_viewmat, None, v_transforms, None)
-
-
-_project.defvjp(_project_fwd_rule, _project_bwd_rule)
-
-
-def _project_core(
-    mean3ds: jax.Array,
-    scales: jax.Array,
-    quats: jax.Array,
-    viewmat: jax.Array,
-    opac: jax.Array,
-    n: int,
-    img_shape: tuple[int, int],
-    f: tuple[float, float],
-    c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
-    gaussian_transforms: jax.Array,
-    transform_ids: jax.Array,
-    has_transforms: bool,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Run the forward once, shared by the two custom vjp entries that cannot call each other."""
+    JAX requires a rigid array signature for custom_vjps. Since we allow for default None values in
+    ``project``, the custom_vjp cannot be applied to ``project`` directly.
+    """
     # gaussian_transforms and transform_ids are concrete arrays, the (1, 4, 4) / (1,) dummy
     # sentinels when has_transforms is False. The kernel skips the transform block in that case, so
     # the dummies never enter the math.
@@ -312,3 +189,87 @@ def _project_core(
     num_tiles_hit = num_tiles_hit.reshape(n, 1).astype(jnp.uint32)
     cum_tiles_hit = cum_tiles_hit.reshape(n, 1).astype(jnp.uint32)
     return xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit
+
+
+def _project_fwd(
+    mean3ds: jax.Array,
+    scales: jax.Array,
+    quats: jax.Array,
+    viewmat: jax.Array,
+    opac: jax.Array,
+    gaussian_transforms: jax.Array,
+    transform_ids: jax.Array,
+    n: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    has_transforms: bool,
+) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array], tuple]:
+    """Forward pass of _project, the custom_vjp of project."""
+    # opacities carry no gradient through projection, they only drive integer tile counts. The
+    # opacity gradient flows through rasterize.
+    out = _project(
+        mean3ds,
+        scales,
+        quats,
+        viewmat,
+        opac,
+        gaussian_transforms,
+        transform_ids,
+        n,
+        img_shape,
+        f,
+        c,
+        glob_scale,
+        clip_thresh,
+        has_transforms,
+    )
+    _, _, radii, conics, _, _ = out
+    return out, (mean3ds, scales, quats, viewmat, gaussian_transforms, transform_ids, radii, conics)
+
+
+def _project_bwd(
+    n: int,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float,
+    clip_thresh: float,
+    has_transforms: bool,
+    residuals: tuple,
+    cotangents: tuple,
+) -> tuple[jax.Array | None, ...]:
+    """Backward pass of _project, the custom_vjp of project."""
+    m, s, q, vm, tf, ids, radii, conics = residuals
+    v_xys, v_depths, _v_radii, v_conics, _v_nth, _v_cum = cotangents
+    r = radii.reshape(n).astype(jnp.int32)
+    k = tf.shape[-3]
+    dims = {"v_mean3d": n, "v_scale": n, "v_quat": n}
+    dims["v_viewmat"] = (4, 4)
+    dims["v_transforms"] = (k, 4, 4)
+    v_mean, v_scale, v_quat, v_viewmat, v_transforms = _project_bwd_ffi(
+        m,
+        s,
+        q,
+        vm,
+        r,
+        conics,
+        v_xys,
+        v_depths.reshape(-1),
+        v_conics,
+        tf,
+        ids,
+        int(n),
+        int(k),
+        has_transforms,
+        float(f[0]),
+        float(f[1]),
+        float(glob_scale),
+        output_dims=dims,
+    )
+    return (v_mean, v_scale, v_quat, v_viewmat, None, v_transforms, None)
+
+
+_project.defvjp(_project_fwd, _project_bwd)
