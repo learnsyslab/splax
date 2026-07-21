@@ -30,7 +30,7 @@ _vec7 = wp.types.vector(length=7, dtype=wp.float32)
 
 
 @wp.kernel
-def _rasterize_fwd(
+def _rasterize_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
@@ -149,13 +149,13 @@ def _rasterize_fwd(
 # D(p) = sum_i w_i d_i with the alpha-blend weights w_i, for sparse-point depth
 # regularization. A separate kernel so the default render never pays for the
 # extra accumulator and load. Blend math, early-exit vote, staging, and batched
-# indexing are identical to _rasterize_fwd, with depth packed into the geometry
+# indexing are identical to _rasterize_kernel, with depth packed into the geometry
 # record. The packing matters: staging depth in a second vec4 tile alongside a
 # vec6 geometry tile ran the whole kernel 2x slower than the plain color blend,
 # while the 7-float record restores parity with it (bit-identical output).
 # Background depth is 0, so the depth channel has no T*bg term.
 @wp.kernel
-def _rasterize_fwd_depth(
+def _rasterize_depth_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
@@ -325,7 +325,7 @@ def _rasterize_warp(
     )
 
     _cached_launch(
-        _rasterize_fwd,
+        _rasterize_kernel,
         B * num_tiles,
         [
             img_h,
@@ -393,7 +393,7 @@ def _rasterize_depth_warp(
     )
 
     _cached_launch(
-        _rasterize_fwd_depth,
+        _rasterize_depth_kernel,
         B * num_tiles,
         [
             img_h,
@@ -431,6 +431,99 @@ _rasterize_depth_ffi = nested_vmap(
     n_arrays=9,
     name="rasterize_depth",
 )
+
+
+@wp.func
+def _blend_color_vjp(
+    dx: wp.float32,
+    dy: wp.float32,
+    a: wp.float32,
+    b: wp.float32,
+    c: wp.float32,
+    opac: wp.float32,
+    vis: wp.float32,
+    alpha: wp.float32,
+    color: wp.vec3,
+    T_in: wp.float32,
+    buffer_in: wp.vec3,
+    t_final: wp.float32,
+    bg: wp.vec3,
+    v_out: wp.vec3,
+) -> tuple[wp.vec3, wp.vec3, wp.vec2, wp.float32, wp.float32, wp.vec3]:
+    # Per-gaussian blend vjp for one pixel, shared by the staged and aggregated backward walks.
+    # From the blend state at this gaussian (running transmittance T_in, colour accumulator
+    # buffer_in), it returns the colour, conic, xy and opacity cotangent contributions, plus the T
+    # and buffer for the next (front-ward) gaussian. The conic/xy/opacity grads are zero where the
+    # alpha clamp is active, since alpha is then constant. The caller accumulates the grads its own
+    # way (per-thread atomics or a warp tile_sum).
+    ra = 1.0 / (1.0 - alpha)
+    T = T_in * ra
+    fac = alpha * T
+    v_rgb = v_out * fac
+    v_alpha = (color[0] * T - buffer_in[0] * ra) * v_out[0]
+    v_alpha += (color[1] * T - buffer_in[1] * ra) * v_out[1]
+    v_alpha += (color[2] * T - buffer_in[2] * ra) * v_out[2]
+    v_alpha += -t_final * ra * bg[0] * v_out[0]
+    v_alpha += -t_final * ra * bg[1] * v_out[1]
+    v_alpha += -t_final * ra * bg[2] * v_out[2]
+    buffer = buffer_in + color * fac
+    v_con = wp.vec3(0.0, 0.0, 0.0)
+    v_xy = wp.vec2(0.0, 0.0)
+    v_op = wp.float32(0.0)
+    if opac * vis <= 0.999:
+        v_sigma = -opac * vis * v_alpha
+        v_con = wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy)
+        v_xy = wp.vec2(v_sigma * (a * dx + b * dy), v_sigma * (b * dx + c * dy))
+        v_op = vis * v_alpha
+    return v_rgb, v_con, v_xy, v_op, T, buffer
+
+
+@wp.func
+def _blend_depth_vjp(
+    dx: wp.float32,
+    dy: wp.float32,
+    a: wp.float32,
+    b: wp.float32,
+    c: wp.float32,
+    opac: wp.float32,
+    vis: wp.float32,
+    alpha: wp.float32,
+    color: wp.vec3,
+    depth: wp.float32,
+    T_in: wp.float32,
+    buffer_in: wp.vec3,
+    dbuffer_in: wp.float32,
+    t_final: wp.float32,
+    bg: wp.vec3,
+    v_out: wp.vec3,
+    v_outd: wp.float32,
+) -> tuple[wp.vec3, wp.float32, wp.vec3, wp.vec2, wp.float32, wp.float32, wp.vec3, wp.float32]:
+    # Depth-augmented _blend_color_vjp. The depth channel blends like a colour channel, so it
+    # adds a term to v_alpha and produces its own cotangent v_depth and accumulator dbuffer.
+    # Background depth is zero, so there is no t_final*bg term for it.
+    ra = 1.0 / (1.0 - alpha)
+    T = T_in * ra
+    fac = alpha * T
+    v_rgb = v_out * fac
+    v_depth = v_outd * fac
+    v_alpha = (color[0] * T - buffer_in[0] * ra) * v_out[0]
+    v_alpha += (color[1] * T - buffer_in[1] * ra) * v_out[1]
+    v_alpha += (color[2] * T - buffer_in[2] * ra) * v_out[2]
+    v_alpha += (depth * T - dbuffer_in * ra) * v_outd
+    v_alpha += -t_final * ra * bg[0] * v_out[0]
+    v_alpha += -t_final * ra * bg[1] * v_out[1]
+    v_alpha += -t_final * ra * bg[2] * v_out[2]
+    buffer = buffer_in + color * fac
+    dbuffer = dbuffer_in + depth * fac
+    v_con = wp.vec3(0.0, 0.0, 0.0)
+    v_xy = wp.vec2(0.0, 0.0)
+    v_op = wp.float32(0.0)
+    if opac * vis <= 0.999:
+        v_sigma = -opac * vis * v_alpha
+        v_con = wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy)
+        v_xy = wp.vec2(v_sigma * (a * dx + b * dy), v_sigma * (b * dx + c * dy))
+        v_op = vis * v_alpha
+    return v_rgb, v_depth, v_con, v_xy, v_op, T, buffer, dbuffer
 
 
 # Backward pass. A staged lockstep walk mirroring the forward blend. All 256
@@ -572,43 +665,18 @@ def _rasterize_bwd_kernel(
                 if alpha < 1.0 / 255.0:
                     continue
 
-                ra = 1.0 / (1.0 - alpha)
-                T = T * ra
-                fac = alpha * T
                 color = color_tile[t]
                 og = og_base + id_tile[t]
-
-                wp.atomic_add(v_colors, og, v_out * fac)
-
-                v_alpha = float(0.0)
-                v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
-                v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
-                v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
-                v_alpha += -t_final * ra * bg[0] * v_out[0]
-                v_alpha += -t_final * ra * bg[1] * v_out[1]
-                v_alpha += -t_final * ra * bg[2] * v_out[2]
-
-                buffer = buffer + color * fac
-
-                # Where the alpha clamp is active alpha is constant, so the
-                # sigma and opacity paths carry no gradient.
+                v_rgb, v_con, v_xyl, v_op, T, buffer = _blend_color_vjp(
+                    dx, dy, s[3], s[4], s[5], s[2], vis, alpha, color, T, buffer, t_final, bg, v_out
+                )
+                wp.atomic_add(v_colors, og, v_rgb)
+                # Where the alpha clamp is active alpha is constant, so the sigma and opacity paths
+                # carry no gradient and their atomics are skipped.
                 if s[2] * vis <= 0.999:
-                    v_sigma = -s[2] * vis * v_alpha
-                    wp.atomic_add(
-                        v_conic,
-                        og,
-                        wp.vec3(
-                            0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy
-                        ),
-                    )
-                    wp.atomic_add(
-                        v_xy,
-                        og,
-                        wp.vec2(
-                            v_sigma * (s[3] * dx + s[4] * dy), v_sigma * (s[4] * dx + s[5] * dy)
-                        ),
-                    )
-                    wp.atomic_add(v_opacity, og, vis * v_alpha)
+                    wp.atomic_add(v_conic, og, v_con)
+                    wp.atomic_add(v_xy, og, v_xyl)
+                    wp.atomic_add(v_opacity, og, v_op)
 
 
 # Depth-augmented backward. The depth channel is handled exactly like
@@ -729,47 +797,21 @@ def _rasterize_bwd_depth_kernel(
                 if alpha < 1.0 / 255.0:
                     continue
 
-                ra = 1.0 / (1.0 - alpha)
-                T = T * ra
-                fac = alpha * T
                 cd = cd_tile[t]
                 og = og_base + id_tile[t]
-
-                wp.atomic_add(v_colors, og, v_out * fac)
-                wp.atomic_add(v_depths, og, v_outd * fac)
-
-                v_alpha = float(0.0)
-                v_alpha += (cd[0] * T - buffer[0] * ra) * v_out[0]
-                v_alpha += (cd[1] * T - buffer[1] * ra) * v_out[1]
-                v_alpha += (cd[2] * T - buffer[2] * ra) * v_out[2]
-                # depth channel, background depth is 0 so there is no t_final*bg term
-                v_alpha += (cd[3] * T - dbuffer * ra) * v_outd
-                v_alpha += -t_final * ra * bg[0] * v_out[0]
-                v_alpha += -t_final * ra * bg[1] * v_out[1]
-                v_alpha += -t_final * ra * bg[2] * v_out[2]
-
-                buffer = buffer + wp.vec3(cd[0], cd[1], cd[2]) * fac
-                dbuffer = dbuffer + cd[3] * fac
-
-                # Where the alpha clamp is active alpha is constant, so the
-                # sigma and opacity paths carry no gradient.
+                color = wp.vec3(cd[0], cd[1], cd[2])
+                v_rgb, v_dep, v_con, v_xyl, v_op, T, buffer, dbuffer = _blend_depth_vjp(
+                    dx, dy, s[3], s[4], s[5], s[2], vis, alpha, color, cd[3], T, buffer, dbuffer,
+                    t_final, bg, v_out, v_outd,
+                )
+                wp.atomic_add(v_colors, og, v_rgb)
+                wp.atomic_add(v_depths, og, v_dep)
+                # Where the alpha clamp is active alpha is constant, so the sigma and opacity paths
+                # carry no gradient and their atomics are skipped.
                 if s[2] * vis <= 0.999:
-                    v_sigma = -s[2] * vis * v_alpha
-                    wp.atomic_add(
-                        v_conic,
-                        og,
-                        wp.vec3(
-                            0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy
-                        ),
-                    )
-                    wp.atomic_add(
-                        v_xy,
-                        og,
-                        wp.vec2(
-                            v_sigma * (s[3] * dx + s[4] * dy), v_sigma * (s[4] * dx + s[5] * dy)
-                        ),
-                    )
-                    wp.atomic_add(v_opacity, og, vis * v_alpha)
+                    wp.atomic_add(v_conic, og, v_con)
+                    wp.atomic_add(v_xy, og, v_xyl)
+                    wp.atomic_add(v_opacity, og, v_op)
 
 
 # Warp-aggregated backward twin for short tile ranges. One 32-thread block per
@@ -785,7 +827,7 @@ _SUBTILES = BLOCK_SIZE // 32
 
 
 @wp.kernel
-def _rasterize_bwd_warp_kernel(
+def _rasterize_bwd_agg_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
@@ -871,30 +913,11 @@ def _rasterize_bwd_warp_kernel(
         v_xyl = wp.vec2(0.0, 0.0)
         v_op = wp.float32(0.0)
         if valid:
-            ra = 1.0 / (1.0 - alpha)
-            T = T * ra
-            fac = alpha * T
             color = colors[g % color_mod]
-            v_rgb = v_out * fac
-
-            v_alpha = float(0.0)
-            v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
-            v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
-            v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
-            v_alpha += -t_final * ra * bg[0] * v_out[0]
-            v_alpha += -t_final * ra * bg[1] * v_out[1]
-            v_alpha += -t_final * ra * bg[2] * v_out[2]
-
-            buffer = buffer + color * fac
-
-            if opac * vis <= 0.999:
-                v_sigma = -opac * vis * v_alpha
-                v_con = wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy)
-                v_xyl = wp.vec2(
-                    v_sigma * (conic[0] * dx + conic[1] * dy),
-                    v_sigma * (conic[1] * dx + conic[2] * dy),
-                )
-                v_op = vis * v_alpha
+            v_rgb, v_con, v_xyl, v_op, T, buffer = _blend_color_vjp(
+                dx, dy, conic[0], conic[1], conic[2], opac, vis, alpha, color, T, buffer, t_final,
+                bg, v_out,
+            )
 
         s_rgb = wp.tile_sum(wp.tile(v_rgb, preserve_type=True))[0]
         s_con = wp.tile_sum(wp.tile(v_con, preserve_type=True))[0]
@@ -908,11 +931,11 @@ def _rasterize_bwd_warp_kernel(
             wp.atomic_add(v_opacity, og, s_op)
 
 
-# Depth-augmented twin of _rasterize_bwd_warp_kernel. Walk, aggregation, and
+# Depth-augmented twin of _rasterize_bwd_agg_kernel. Walk, aggregation, and
 # color-grad math are identical, with the depth channel handled as in
 # _rasterize_bwd_depth_kernel.
 @wp.kernel
-def _rasterize_bwd_depth_warp_kernel(
+def _rasterize_bwd_depth_agg_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
@@ -1006,35 +1029,11 @@ def _rasterize_bwd_depth_warp_kernel(
         v_op = wp.float32(0.0)
         v_dep = wp.float32(0.0)
         if valid:
-            ra = 1.0 / (1.0 - alpha)
-            T = T * ra
-            fac = alpha * T
             color = colors[g % color_mod]
-            d = depths[g]
-            v_rgb = v_out * fac
-            v_dep = v_outd * fac
-
-            v_alpha = float(0.0)
-            v_alpha += (color[0] * T - buffer[0] * ra) * v_out[0]
-            v_alpha += (color[1] * T - buffer[1] * ra) * v_out[1]
-            v_alpha += (color[2] * T - buffer[2] * ra) * v_out[2]
-            # depth channel, background depth is 0 so there is no t_final*bg term
-            v_alpha += (d * T - dbuffer * ra) * v_outd
-            v_alpha += -t_final * ra * bg[0] * v_out[0]
-            v_alpha += -t_final * ra * bg[1] * v_out[1]
-            v_alpha += -t_final * ra * bg[2] * v_out[2]
-
-            buffer = buffer + color * fac
-            dbuffer = dbuffer + d * fac
-
-            if opac * vis <= 0.999:
-                v_sigma = -opac * vis * v_alpha
-                v_con = wp.vec3(0.5 * v_sigma * dx * dx, v_sigma * dx * dy, 0.5 * v_sigma * dy * dy)
-                v_xyl = wp.vec2(
-                    v_sigma * (conic[0] * dx + conic[1] * dy),
-                    v_sigma * (conic[1] * dx + conic[2] * dy),
-                )
-                v_op = vis * v_alpha
+            v_rgb, v_dep, v_con, v_xyl, v_op, T, buffer, dbuffer = _blend_depth_vjp(
+                dx, dy, conic[0], conic[1], conic[2], opac, vis, alpha, color, depths[g], T, buffer,
+                dbuffer, t_final, bg, v_out, v_outd,
+            )
 
         s_rgb = wp.tile_sum(wp.tile(v_rgb, preserve_type=True))[0]
         s_con = wp.tile_sum(wp.tile(v_con, preserve_type=True))[0]
@@ -1101,7 +1100,7 @@ def _rasterize_bwd_warp(
     # warp-aggregated walk wins, above it the staged lockstep walk does.
     if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
         _cached_launch(
-            _rasterize_bwd_warp_kernel,
+            _rasterize_bwd_agg_kernel,
             B_out * num_tiles * int(_SUBTILES),
             [
                 img_h,
@@ -1225,7 +1224,7 @@ def _rasterize_bwd_depth_warp(
     # Kernel choice by mean tile range, as in _rasterize_bwd_warp.
     if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
         _cached_launch(
-            _rasterize_bwd_depth_warp_kernel,
+            _rasterize_bwd_depth_agg_kernel,
             B_out * num_tiles * int(_SUBTILES),
             [
                 img_h,
