@@ -11,7 +11,6 @@ deterministically from the saved cum_tiles_hit.
 from __future__ import annotations
 
 from functools import partial
-from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -23,10 +22,104 @@ from splax._rasterize._kernels import (
     _rasterize_ffi,
 )
 
+# region public API
 
-def _rasterize_call(
+
+def rasterize(
     colors: jax.Array,
     opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    *,
+    img_shape: tuple[int, int],
+    map_opacities: jax.Array | None = None,
+) -> jax.Array:
+    """Blend projected gaussians into an (H, W, 3) image.
+
+    Differentiable with respect to colors, opacities, xys, and conics via jax.custom_vjp.
+    background, depths, radii, and cum_tiles_hit are non-diff. Without gradients the primal is
+    identical to the forward-only path, so pure inference does not regress.
+
+    The key emission walks the same opacity-aware ellipse as the projection that produced
+    cum_tiles_hit, so the inputs must come from splax.project. map_opacities is the raw opacity for
+    the key emission in antialiased mode, where opacities is the compensated blend opacity. It
+    defaults to opacities.
+    """
+    n = colors.shape[0]
+    H, W = img_shape
+    if map_opacities is None:
+        map_opacities = opacities
+    out_img, _, _ = _rasterize(
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        int(n),
+        int(H),
+        int(W),
+    )
+    return out_img
+
+
+def rasterize_depth(
+    colors: jax.Array,
+    opacities: jax.Array,
+    background: jax.Array,
+    xys: jax.Array,
+    depths: jax.Array,
+    radii: jax.Array,
+    conics: jax.Array,
+    cum_tiles_hit: jax.Array,
+    *,
+    img_shape: tuple[int, int],
+    map_opacities: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Blend gaussians into (image, expected_depth).
+
+    Identical to rasterize but additionally renders the alpha-blended expected depth map with the
+    same visibility weights as the color blend, used for sparse-point depth regularization. The
+    depths input carries a nonzero cotangent that flows through splax.project's backward to the
+    gaussian geometry and camera pose. This is a separate kernel, so the plain render never pays for
+    the extra channel.
+    """
+    n = colors.shape[0]
+    H, W = img_shape
+    if map_opacities is None:
+        map_opacities = opacities
+    out_img, out_depth, _, _ = _rasterize_depth(
+        colors,
+        opacities,
+        map_opacities,
+        background,
+        xys,
+        depths,
+        radii,
+        conics,
+        cum_tiles_hit,
+        int(n),
+        int(H),
+        int(W),
+    )
+    return out_img, out_depth
+
+
+# region custom vjp
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
+def _rasterize(
+    colors: jax.Array,
+    opacities: jax.Array,
+    map_opacities: jax.Array,
     background: jax.Array,
     xys: jax.Array,
     depths: jax.Array,
@@ -36,15 +129,15 @@ def _rasterize_call(
     n: int,
     H: int,
     W: int,
-    map_opacities: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    # map_opacities is the raw opacity for the key emission and must match the
-    # projection that produced cum_tiles_hit. It defaults to opacities, which is
-    # the plain path. In antialiased mode opacities is compensated for the blend
-    # while map_opacities stays raw, so the key total still matches.
-    if map_opacities is None:
-        map_opacities = opacities
-    out = _rasterize_ffi(
+    """Custom vjp for the blend, returning (out_img, final_Ts, final_idx).
+
+    final_Ts and final_idx are the backward residuals, the per-pixel final transmittance and last
+    contributing gaussian. The public rasterize discards them; the fwd rule keeps them. JAX requires
+    a rigid array signature for custom_vjps, so the None default of map_opacities is resolved in the
+    public rasterize before this is called.
+    """
+    final_Ts, final_idx, out_img = _rasterize_ffi(
         colors,
         opacities.reshape(n),
         map_opacities.reshape(n),
@@ -59,11 +152,10 @@ def _rasterize_call(
         int(W),
         output_dims=(H, W),
     )
-    return cast("tuple[jax.Array, jax.Array, jax.Array]", out)
+    return out_img, final_Ts, final_idx
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
-def _rasterize_differentiable(
+def _rasterize_fwd(
     colors: jax.Array,
     opacities: jax.Array,
     map_opacities: jax.Array,
@@ -76,10 +168,12 @@ def _rasterize_differentiable(
     n: int,
     H: int,
     W: int,
-) -> jax.Array:
-    _final_Ts, _final_idx, out_img = _rasterize_call(
+) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
+    """Forward pass of _rasterize, reusing the primitive and keeping its residuals."""
+    out = _rasterize(
         colors,
         opacities,
+        map_opacities,
         background,
         xys,
         depths,
@@ -89,39 +183,8 @@ def _rasterize_differentiable(
         n,
         H,
         W,
-        map_opacities,
     )
-    return out_img
-
-
-def _rasterize_fwd_rule(
-    colors: jax.Array,
-    opacities: jax.Array,
-    map_opacities: jax.Array,
-    background: jax.Array,
-    xys: jax.Array,
-    depths: jax.Array,
-    radii: jax.Array,
-    conics: jax.Array,
-    cum_tiles_hit: jax.Array,
-    n: int,
-    H: int,
-    W: int,
-) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-    final_Ts, final_idx, out_img = _rasterize_call(
-        colors,
-        opacities,
-        background,
-        xys,
-        depths,
-        radii,
-        conics,
-        cum_tiles_hit,
-        n,
-        H,
-        W,
-        map_opacities,
-    )
+    _, final_Ts, final_idx = out
     residuals = (
         colors,
         opacities,
@@ -135,12 +198,13 @@ def _rasterize_fwd_rule(
         final_Ts,
         final_idx,
     )
-    return out_img, residuals
+    return out, residuals
 
 
-def _rasterize_bwd_rule(
-    n: int, H: int, W: int, residuals: tuple[jax.Array, ...], v_img: jax.Array
+def _rasterize_bwd(
+    n: int, H: int, W: int, residuals: tuple[jax.Array, ...], cotangents: tuple[jax.Array, ...]
 ) -> tuple[jax.Array | None, ...]:
+    """Backward pass of _rasterize."""
     (
         colors,
         opacities,
@@ -154,6 +218,7 @@ def _rasterize_bwd_rule(
         final_Ts,
         final_idx,
     ) = residuals
+    v_img, _, _ = cotangents  # only the image cotangent is nonzero
     v_colors, v_opacity, v_xy, v_conic = _rasterize_bwd_ffi(
         colors,
         opacities.reshape(n),
@@ -173,63 +238,20 @@ def _rasterize_bwd_rule(
         output_dims=n,
     )
     v_opacity = v_opacity.reshape(opacities.shape)
-    # Cotangents for (colors, opacities, map_opacities, background, xys, depths,
-    # radii, conics, cum_tiles_hit). map_opacities feeds only the integer key
-    # emission, so it is non-diff like background, depths, radii, and the cumsum.
-    return (v_colors, v_opacity, None, None, v_xy, None, None, v_conic, None)
+    # Cotangents for (colors, opacities, map_opacities, background, xys, depths, radii, conics,
+    # cum_tiles_hit). map_opacities feeds only the integer key emission, so it is non-diff like
+    # background, depths, radii, and the cumsum.
+    return v_colors, v_opacity, None, None, v_xy, None, None, v_conic, None
 
 
-_rasterize_differentiable.defvjp(_rasterize_fwd_rule, _rasterize_bwd_rule)
+_rasterize.defvjp(_rasterize_fwd, _rasterize_bwd)
 
 
-def rasterize(
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
+def _rasterize_depth(
     colors: jax.Array,
     opacities: jax.Array,
-    background: jax.Array,
-    xys: jax.Array,
-    depths: jax.Array,
-    radii: jax.Array,
-    conics: jax.Array,
-    cum_tiles_hit: jax.Array,
-    *,
-    img_shape: tuple[int, int],
-    map_opacities: jax.Array | None = None,
-) -> jax.Array:
-    """Blend projected gaussians into an (H, W, 3) image.
-
-    Differentiable with respect to colors, opacities, xys, and conics via
-    jax.custom_vjp. background, depths, radii, and cum_tiles_hit are non-diff.
-    Without gradients the primal is identical to the forward-only path, so pure
-    inference does not regress.
-
-    The key emission walks the same opacity-aware ellipse as the projection that
-    produced cum_tiles_hit, so the inputs must come from splax.project.
-    map_opacities is the raw opacity for the key emission in antialiased mode,
-    where opacities is the compensated blend opacity. It defaults to opacities.
-    """
-    n = colors.shape[0]
-    H, W = img_shape
-    if map_opacities is None:
-        map_opacities = opacities
-    return _rasterize_differentiable(
-        colors,
-        opacities,
-        map_opacities,
-        background,
-        xys,
-        depths,
-        radii,
-        conics,
-        cum_tiles_hit,
-        int(n),
-        int(H),
-        int(W),
-    )
-
-
-def _rasterize_depth_call(
-    colors: jax.Array,
-    opacities: jax.Array,
+    map_opacities: jax.Array,
     background: jax.Array,
     xys: jax.Array,
     depths: jax.Array,
@@ -239,11 +261,9 @@ def _rasterize_depth_call(
     n: int,
     H: int,
     W: int,
-    map_opacities: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    if map_opacities is None:
-        map_opacities = opacities
-    out = _rasterize_depth_ffi(
+    """Custom vjp for the depth blend, returning (out_img, out_depth, final_Ts, final_idx)."""
+    final_Ts, final_idx, out_img, out_depth = _rasterize_depth_ffi(
         colors,
         opacities.reshape(n),
         map_opacities.reshape(n),
@@ -258,11 +278,10 @@ def _rasterize_depth_call(
         int(W),
         output_dims=(H, W),
     )
-    return cast("tuple[jax.Array, jax.Array, jax.Array, jax.Array]", out)
+    return out_img, out_depth, final_Ts, final_idx
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11))
-def _rasterize_depth_differentiable(
+def _rasterize_depth_fwd(
     colors: jax.Array,
     opacities: jax.Array,
     map_opacities: jax.Array,
@@ -275,10 +294,12 @@ def _rasterize_depth_differentiable(
     n: int,
     H: int,
     W: int,
-) -> tuple[jax.Array, jax.Array]:
-    _final_Ts, _final_idx, out_img, out_depth = _rasterize_depth_call(
+) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
+    """Forward pass of _rasterize_depth, reusing the primitive and keeping its residuals."""
+    out = _rasterize_depth(
         colors,
         opacities,
+        map_opacities,
         background,
         xys,
         depths,
@@ -288,39 +309,8 @@ def _rasterize_depth_differentiable(
         n,
         H,
         W,
-        map_opacities,
     )
-    return out_img, out_depth
-
-
-def _rasterize_depth_fwd_rule(
-    colors: jax.Array,
-    opacities: jax.Array,
-    map_opacities: jax.Array,
-    background: jax.Array,
-    xys: jax.Array,
-    depths: jax.Array,
-    radii: jax.Array,
-    conics: jax.Array,
-    cum_tiles_hit: jax.Array,
-    n: int,
-    H: int,
-    W: int,
-) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, ...]]:
-    final_Ts, final_idx, out_img, out_depth = _rasterize_depth_call(
-        colors,
-        opacities,
-        background,
-        xys,
-        depths,
-        radii,
-        conics,
-        cum_tiles_hit,
-        n,
-        H,
-        W,
-        map_opacities,
-    )
+    _, _, final_Ts, final_idx = out
     residuals = (
         colors,
         opacities,
@@ -334,16 +324,13 @@ def _rasterize_depth_fwd_rule(
         final_Ts,
         final_idx,
     )
-    return (out_img, out_depth), residuals
+    return out, residuals
 
 
-def _rasterize_depth_bwd_rule(
-    n: int,
-    H: int,
-    W: int,
-    residuals: tuple[jax.Array, ...],
-    cotangents: tuple[jax.Array, jax.Array],
+def _rasterize_depth_bwd(
+    n: int, H: int, W: int, residuals: tuple[jax.Array, ...], cotangents: tuple[jax.Array, ...]
 ) -> tuple[jax.Array | None, ...]:
+    """Backward pass of _rasterize_depth."""
     (
         colors,
         opacities,
@@ -357,7 +344,7 @@ def _rasterize_depth_bwd_rule(
         final_Ts,
         final_idx,
     ) = residuals
-    v_img, v_depth_img = cotangents
+    v_img, v_depth_img, _, _ = cotangents
     v_colors, v_opacity, v_xy, v_conic, v_depths = _rasterize_bwd_depth_ffi(
         colors,
         opacities.reshape(n),
@@ -379,51 +366,9 @@ def _rasterize_depth_bwd_rule(
     )
     v_opacity = v_opacity.reshape(opacities.shape)
     v_depths = v_depths.reshape(depths.shape)
-    # Unlike the plain rasterize, depths carries a nonzero cotangent that flows
-    # through project's backward to the geometry and camera pose.
-    return (v_colors, v_opacity, None, None, v_xy, v_depths, None, v_conic, None)
+    # Unlike the plain rasterize, depths carries a nonzero cotangent that flows through project's
+    # backward to the geometry and camera pose.
+    return v_colors, v_opacity, None, None, v_xy, v_depths, None, v_conic, None
 
 
-_rasterize_depth_differentiable.defvjp(_rasterize_depth_fwd_rule, _rasterize_depth_bwd_rule)
-
-
-def rasterize_depth(
-    colors: jax.Array,
-    opacities: jax.Array,
-    background: jax.Array,
-    xys: jax.Array,
-    depths: jax.Array,
-    radii: jax.Array,
-    conics: jax.Array,
-    cum_tiles_hit: jax.Array,
-    *,
-    img_shape: tuple[int, int],
-    map_opacities: jax.Array | None = None,
-) -> tuple[jax.Array, jax.Array]:
-    """Blend gaussians into (image, expected_depth).
-
-    Identical to rasterize but additionally renders the alpha-blended expected
-    depth map with the same visibility weights as the color blend, used for
-    sparse-point depth regularization. The depths input carries a nonzero
-    cotangent that flows through splax.project's backward to the gaussian
-    geometry and camera pose. This is a separate kernel, so the plain render
-    never pays for the extra channel.
-    """
-    n = colors.shape[0]
-    H, W = img_shape
-    if map_opacities is None:
-        map_opacities = opacities
-    return _rasterize_depth_differentiable(
-        colors,
-        opacities,
-        map_opacities,
-        background,
-        xys,
-        depths,
-        radii,
-        conics,
-        cum_tiles_hit,
-        int(n),
-        int(H),
-        int(W),
-    )
+_rasterize_depth.defvjp(_rasterize_depth_fwd, _rasterize_depth_bwd)
