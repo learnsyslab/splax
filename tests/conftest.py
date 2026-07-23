@@ -23,8 +23,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 BASE = os.environ.get(
-    "SPLAX_TEST_DATA",
-    "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main",
+    "SPLAX_TEST_DATA", "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main"
 )
 
 

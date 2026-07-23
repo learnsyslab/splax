@@ -104,7 +104,7 @@ def sort_and_bin(
     assert isect_ids is not None and gaussian_ids is not None
 
     if num_intersects == 0:
-        return gaussian_ids, tile_bins, 0
+        return gaussian_ids, tile_bins, 0, tile_bounds_x, num_tiles
 
     # The kernels and the sort take explicit counts, so the full-capacity scratch
     # arrays are passed without per-frame slicing. Every access stays inside
