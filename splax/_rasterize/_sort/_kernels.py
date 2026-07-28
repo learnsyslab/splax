@@ -25,23 +25,23 @@ wp.set_module_options({"fast_math": True})
 
 # Each thread privately reduces this many gaussians before one atomic pair,
 # cutting global atomics and their contention by the same factor.
-_MINMAX_CHUNK = wp.constant(32)
+MINMAX_CHUNK = wp.constant(32)
 
 
 @wp.kernel
-def _seed_minmax(out_mm: wp.array[wp.float32]):
+def seed_minmax(out_mm: wp.array[wp.float32]):
     b = wp.tid()  # one thread per image
     out_mm[2 * b] = 1.0e30
     out_mm[2 * b + 1] = -1.0e30
 
 
 @wp.kernel
-def _depth_minmax(
+def depth_minmax(
     depths: wp.array[wp.float32],
     radii: wp.array[wp.int32],
     total: wp.int32,
     num_gaussians: wp.int32,
-    # output, per-image [min, max] pairs of length 2*B, pre-seeded by _seed_minmax
+    # output, per-image [min, max] pairs of length 2*B, pre-seeded by seed_minmax
     out_mm: wp.array[wp.float32],
 ):
     # The range is kept per image (image = idx // n) so a batched render quantizes
@@ -49,11 +49,11 @@ def _depth_minmax(
     # at most one image boundary (n >> 32), handled by flushing the accumulator
     # when the image changes.
     tid = wp.tid()
-    base = tid * _MINMAX_CHUNK
+    base = tid * MINMAX_CHUNK
     img_cur = wp.int32(-1)
     lo = wp.float32(1.0e30)
     hi = wp.float32(-1.0e30)
-    for k in range(_MINMAX_CHUNK):
+    for k in range(MINMAX_CHUNK):
         idx = base + k
         if idx < total:
             if radii[idx] > 0:  # culled gaussians emit no keys, exclude from range
@@ -74,7 +74,7 @@ def _depth_minmax(
 
 
 @wp.kernel
-def _map_intersects_32bit(
+def map_intersects_32bit(
     xys: wp.array[wp.vec2],
     depths: wp.array[wp.float32],
     radii: wp.array[wp.int32],
@@ -154,7 +154,7 @@ def _map_intersects_32bit(
 
 
 @wp.kernel
-def _map_intersects_64bit(
+def map_intersects_64bit(
     xys: wp.array[wp.vec2],
     depths_int: wp.array[wp.int32],
     radii: wp.array[wp.int32],
@@ -170,7 +170,7 @@ def _map_intersects_64bit(
     isect_ids: wp.array[wp.int64],
     gaussian_ids: wp.array[wp.int32],
 ):
-    # 64 bit twin of _map_intersects_32bit for the too-many-tiles case. The key is
+    # 64 bit twin of map_intersects_32bit for the too-many-tiles case. The key is
     # (iid | tile_id) << 32 | depth_bits, with the positive float depth's raw bits
     # sorting correctly as ints. Identical tile emission, only the key differs.
     idx = wp.tid()
@@ -212,7 +212,7 @@ def _map_intersects_64bit(
 
 
 @wp.kernel
-def _tile_bin_edges_32bit(
+def tile_bin_edges_32bit(
     num_intersects: wp.int32,
     isect_ids_sorted: wp.array[wp.int32],
     num_tiles: wp.int32,
@@ -242,7 +242,7 @@ def _tile_bin_edges_32bit(
 
 
 @wp.kernel
-def _tile_bin_edges_64bit(
+def tile_bin_edges_64bit(
     num_intersects: wp.int32,
     isect_ids_sorted: wp.array[wp.int64],
     num_tiles: wp.int32,
@@ -250,7 +250,7 @@ def _tile_bin_edges_64bit(
     # output
     tile_bins: wp.array[wp.vec2i],
 ):
-    # 64 bit twin of _tile_bin_edges_32bit. The (iid | tile) field sits above bit 32.
+    # 64 bit twin of tile_bin_edges_32bit. The (iid | tile) field sits above bit 32.
     idx = wp.tid()
     if idx >= num_intersects:
         return

@@ -30,7 +30,7 @@ import warp as wp
 import splax
 import splax._cache as _cache
 import splax._rasterize._sort._sort as _sort
-from splax._rasterize._sort._kernels import _map_intersects_64bit
+from splax._rasterize._sort._kernels import map_intersects_64bit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -467,7 +467,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     gids = wp.array(np.full(total, -1, np.int32), dtype=wp.int32, device=dev)
 
     wp.launch(
-        _map_intersects_64bit,
+        map_intersects_64bit,
         dim=n,
         inputs=[xys_w, depths_int, radii_w, conics_w, opac_w, cum_w, n, n, tile_n_bits, tbx, tby],
         outputs=[isect, gids],

@@ -21,7 +21,7 @@ ALPHA_THRESHOLD = wp.constant(1.0 / 255.0)
 
 
 @wp.struct
-class _Ellipse:
+class Ellipse:
     """Opacity-aware ellipse and its tile walk state, from gsplat's SNUGBOX and AccuTile."""
 
     A: wp.float32  # conic, the inverse 2d covariance upper triangle
@@ -53,13 +53,13 @@ def ellipse_init(
     py: wp.float32,
     tile_width: wp.int32,
     tile_height: wp.int32,
-) -> _Ellipse:
+) -> Ellipse:
     """Initialize the ellipse and its tile walk state.
 
     We compute the tight axis-aligned bounding box of the ellipse plus its tile rectangle, and then
     pick the shorter tile span as the walk's outer axis.
     """
-    s = _Ellipse()
+    s = Ellipse()
     s.valid = wp.bool(False)
     s.A = A
     s.B = B
@@ -134,7 +134,7 @@ def _ellipse_intersect(
 
 
 @wp.func
-def ellipse_init_span(s: _Ellipse) -> wp.vec2:
+def ellipse_init_span(s: Ellipse) -> wp.vec2:
     """Cross-axis extent of the ellipse at the leading line of the walk."""
     min_line0 = wp.float32(s.rect_min[0]) * wp.float32(BLOCK_WIDTH)
     # Return a degenerate default when the line lies outside the bbox.
@@ -144,7 +144,7 @@ def ellipse_init_span(s: _Ellipse) -> wp.vec2:
 
 
 @wp.func
-def ellipse_column_tile_range(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.vec4:
+def ellipse_column_tile_range(u: wp.int32, s: Ellipse, I_min: wp.vec2) -> wp.vec4:
     """Cross-axis tile range of the ellipse at one outer tile column."""
     # One outer column of the walk. Returns min_tile_v, max_tile_v, and I_max, where I_max feeds the
     # next column as its I_min following gsplat's rolling intersect lines. The cross-axis tile range
@@ -170,7 +170,7 @@ def ellipse_column_tile_range(u: wp.int32, s: _Ellipse, I_min: wp.vec2) -> wp.ve
 
 
 @wp.func
-def ellipse_tile_count(s: _Ellipse) -> wp.int32:
+def ellipse_tile_count(s: Ellipse) -> wp.int32:
     # Total tiles the ellipse touches, written to num_tiles_hit by projection.
     if not s.valid:
         return wp.int32(0)

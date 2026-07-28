@@ -12,10 +12,10 @@ import jax
 import jax.numpy as jnp
 
 from splax._rasterize._kernels import (
-    _rasterize_bwd_depth_ffi,
-    _rasterize_bwd_ffi,
-    _rasterize_depth_ffi,
-    _rasterize_ffi,
+    rasterize_bwd_depth_ffi,
+    rasterize_bwd_ffi,
+    rasterize_depth_ffi,
+    rasterize_ffi,
 )
 
 # region public API
@@ -124,7 +124,7 @@ def _rasterize(
     a rigid array signature for custom_vjps, so the None default of map_opacities is resolved in the
     public rasterize before this is called.
     """
-    final_Ts, final_idx, out_img = _rasterize_ffi(
+    final_Ts, final_idx, out_img = rasterize_ffi(
         colors,
         opacities.reshape(n),
         map_opacities.reshape(n),
@@ -206,7 +206,7 @@ def _rasterize_bwd(
         final_idx,
     ) = residuals
     v_img, _, _ = cotangents  # only the image cotangent is nonzero
-    v_colors, v_opacity, v_xy, v_conic = _rasterize_bwd_ffi(
+    v_colors, v_opacity, v_xy, v_conic = rasterize_bwd_ffi(
         colors,
         opacities.reshape(n),
         map_opacities.reshape(n),
@@ -250,7 +250,7 @@ def _rasterize_depth(
     W: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Custom vjp for the depth blend, returning (out_img, out_depth, final_Ts, final_idx)."""
-    final_Ts, final_idx, out_img, out_depth = _rasterize_depth_ffi(
+    final_Ts, final_idx, out_img, out_depth = rasterize_depth_ffi(
         colors,
         opacities.reshape(n),
         map_opacities.reshape(n),
@@ -332,7 +332,7 @@ def _rasterize_depth_bwd(
         final_idx,
     ) = residuals
     v_img, v_depth_img, _, _ = cotangents
-    v_colors, v_opacity, v_xy, v_conic, v_depths = _rasterize_bwd_depth_ffi(
+    v_colors, v_opacity, v_xy, v_conic, v_depths = rasterize_bwd_depth_ffi(
         colors,
         opacities.reshape(n),
         map_opacities.reshape(n),

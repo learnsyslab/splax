@@ -107,7 +107,7 @@ def _project_warp(
     wp.utils.array_scan(num_tiles_hit, cum_tiles_hit, inclusive=True)
 
 
-_project_ffi = nested_vmap(
+project_ffi = nested_vmap(
     jax_callable(
         _project_warp,
         num_outputs=6,
@@ -341,7 +341,7 @@ def _project_bwd_warp(
     )
 
 
-_project_bwd_ffi = nested_vmap(
+project_bwd_ffi = nested_vmap(
     jax_callable(
         _project_bwd_warp,
         num_outputs=5,

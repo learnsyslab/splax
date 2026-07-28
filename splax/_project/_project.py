@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 
-from splax._project._kernels import _project_bwd_ffi, _project_ffi
+from splax._project._kernels import project_bwd_ffi, project_ffi
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -166,7 +166,7 @@ def _project(
     # the dummies never enter the math.
     H, W = img_shape
     num_transforms = gaussian_transforms.shape[-3]
-    xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit = _project_ffi(
+    xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit = project_ffi(
         mean3ds,
         scales,
         quats,
@@ -252,7 +252,7 @@ def _project_bwd(
     dims = {"v_mean3d": n, "v_scale": n, "v_quat": n}
     dims["v_viewmat"] = (4, 4)
     dims["v_transforms"] = (k, 4, 4)
-    v_mean, v_scale, v_quat, v_viewmat, v_transforms = _project_bwd_ffi(
+    v_mean, v_scale, v_quat, v_viewmat, v_transforms = project_bwd_ffi(
         m,
         s,
         q,

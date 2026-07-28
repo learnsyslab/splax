@@ -87,7 +87,7 @@ def _rasterize_warp(
     )
 
 
-_rasterize_ffi = nested_vmap(
+rasterize_ffi = nested_vmap(
     jax_callable(
         _rasterize_warp,
         num_outputs=3,
@@ -262,7 +262,7 @@ def _rasterize_depth_warp(
     )
 
 
-_rasterize_depth_ffi = nested_vmap(
+rasterize_depth_ffi = nested_vmap(
     jax_callable(
         _rasterize_depth_warp,
         num_outputs=4,
@@ -460,7 +460,7 @@ def _rasterize_bwd_warp(
     cached_launch(_rasterize_bwd_kernel, dim, args, colors.device, block_dim=BLOCK_SIZE)
 
 
-_rasterize_bwd_ffi = nested_vmap(
+rasterize_bwd_ffi = nested_vmap(
     jax_callable(
         _rasterize_bwd_warp,
         num_outputs=4,
@@ -846,7 +846,7 @@ def _rasterize_bwd_depth_warp(
     )
 
 
-_rasterize_bwd_depth_ffi = nested_vmap(
+rasterize_bwd_depth_ffi = nested_vmap(
     jax_callable(
         _rasterize_bwd_depth_warp,
         num_outputs=5,

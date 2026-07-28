@@ -10,13 +10,13 @@ import warp as wp
 from splax._cache import begin_count_read, cached_launch, cached_scratch, fetch_count_read
 from splax._intersect import BLOCK_WIDTH
 from splax._rasterize._sort._kernels import (
-    _MINMAX_CHUNK,
-    _depth_minmax,
-    _map_intersects_32bit,
-    _map_intersects_64bit,
-    _seed_minmax,
-    _tile_bin_edges_32bit,
-    _tile_bin_edges_64bit,
+    MINMAX_CHUNK,
+    depth_minmax,
+    map_intersects_32bit,
+    map_intersects_64bit,
+    seed_minmax,
+    tile_bin_edges_32bit,
+    tile_bin_edges_64bit,
 )
 
 
@@ -85,10 +85,10 @@ def sort_and_bin(
         # Count-independent, so it launches before the readback wait. depth_mm persists across
         # frames and its reduction is an atomic min-max, so seed the sentinels before accumulating.
         depth_mm = scratch["depth_mm"]
-        cached_launch(_seed_minmax, B, [depth_mm], device)
+        cached_launch(seed_minmax, B, [depth_mm], device)
         cached_launch(
-            _depth_minmax,
-            (total + int(_MINMAX_CHUNK) - 1) // int(_MINMAX_CHUNK),
+            depth_minmax,
+            (total + int(MINMAX_CHUNK) - 1) // int(MINMAX_CHUNK),
             [depths, radii, total, n, depth_mm],
             device,
         )
@@ -112,7 +112,7 @@ def sort_and_bin(
     # repacking their array arguments each frame.
     if packed:
         cached_launch(
-            _map_intersects_32bit,
+            map_intersects_32bit,
             total,
             [
                 xys,
@@ -135,14 +135,14 @@ def sort_and_bin(
         )
         wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
         cached_launch(
-            _tile_bin_edges_32bit,
+            tile_bin_edges_32bit,
             num_intersects,
             [num_intersects, isect_ids, num_tiles, tile_n_bits, depth_bits, tile_bins],
             device,
         )
     else:
         cached_launch(
-            _map_intersects_64bit,
+            map_intersects_64bit,
             total,
             [
                 xys,
@@ -163,7 +163,7 @@ def sort_and_bin(
         )
         wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, num_intersects)
         cached_launch(
-            _tile_bin_edges_64bit,
+            tile_bin_edges_64bit,
             num_intersects,
             [num_intersects, isect_ids, num_tiles, tile_n_bits, tile_bins],
             device,
