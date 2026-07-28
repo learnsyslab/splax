@@ -405,16 +405,9 @@ def _rasterize_bwd_warp(
     v_xy: wp.array[wp.vec2],
     v_conic: wp.array[wp.vec3],
 ) -> None:
-    # Two batch sizes. B_out comes from the grad output v_xy, always full batch
-    # under expand_dims, and is how many images the blend walks. B_geom comes from
-    # the geometry residual cum_tiles_hit and is how many distinct renders the
-    # sort covers. They agree in the multi-view regime, but a shared render
-    # differentiated against B target images gives B_geom=1 < B_out. A residual or
-    # cotangent is not a reliable B_out signal because a cotangent can arrive
-    # broadcast, which is why B_out comes from an output.
     n = num_gaussians
-    B_out = v_xy.shape[0] // n
-    B_geom = cum_tiles_hit.shape[0] // n
+    B_out = v_xy.shape[0] // n  # Number of output gradients. >B_geom if multiple targets per view
+    B_geom = cum_tiles_hit.shape[0] // n  # Number of distinct renders/views
     sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
     vout_rows = v_out_img.shape[0]
@@ -430,74 +423,41 @@ def _rasterize_bwd_warp(
     v_conic.zero_()
     if num_intersects == 0:
         return
-    # Kernel choice by mean tile range. Below one staged batch per tile the
-    # warp-aggregated walk wins, above it the staged lockstep walk does.
-    if num_intersects < B_geom * num_tiles * int(BLOCK_SIZE):
-        cached_launch(
-            _rasterize_bwd_agg_kernel,
-            B_out * num_tiles * int(_SUBTILES),
-            [
-                img_h,
-                img_w,
-                tile_bounds_x,
-                num_tiles,
-                n,
-                sel_geom,
-                colors.shape[0],
-                opacities.shape[0],
-                sel_bg,
-                vout_rows,
-                gaussian_ids,
-                tile_bins,
-                xys,
-                conics,
-                colors,
-                opacities,
-                background,
-                final_Ts,
-                final_idx,
-                v_out_img,
-                v_xy,
-                v_conic,
-                v_colors,
-                v_opacity,
-            ],
-            colors.device,
-            block_dim=32,
-        )
+
+    args = [
+        img_h,
+        img_w,
+        tile_bounds_x,
+        num_tiles,
+        n,
+        sel_geom,
+        colors.shape[0],
+        opacities.shape[0],
+        sel_bg,
+        vout_rows,
+        gaussian_ids,
+        tile_bins,
+        xys,
+        conics,
+        colors,
+        opacities,
+        background,
+        final_Ts,
+        final_idx,
+        v_out_img,
+        v_xy,
+        v_conic,
+        v_colors,
+        v_opacity,
+    ]
+    # Depending on the tile range, the aggregated kernel is faster than the staged one. We choose an
+    # empirical threshold and decide which kernel to launch.
+    if num_intersects < B_geom * num_tiles * BLOCK_SIZE:
+        dim = B_out * num_tiles * _SUBTILES
+        cached_launch(_rasterize_bwd_agg_kernel, dim, args, colors.device, block_dim=32)
         return
-    cached_launch(
-        _rasterize_bwd_kernel,
-        B_out * num_tiles,
-        [
-            img_h,
-            img_w,
-            tile_bounds_x,
-            num_tiles,
-            n,
-            sel_geom,
-            colors.shape[0],
-            opacities.shape[0],
-            sel_bg,
-            vout_rows,
-            gaussian_ids,
-            tile_bins,
-            xys,
-            conics,
-            colors,
-            opacities,
-            background,
-            final_Ts,
-            final_idx,
-            v_out_img,
-            v_xy,
-            v_conic,
-            v_colors,
-            v_opacity,
-        ],
-        colors.device,
-        block_dim=int(BLOCK_SIZE),
-    )
+    dim = B_out * num_tiles
+    cached_launch(_rasterize_bwd_kernel, dim, args, colors.device, block_dim=BLOCK_SIZE)
 
 
 _rasterize_bwd_ffi = nested_vmap(
@@ -510,21 +470,6 @@ _rasterize_bwd_ffi = nested_vmap(
     n_arrays=12,
     name="rasterize_bwd",
 )
-
-
-# Backward pass. A staged lockstep walk mirroring the forward blend. All 256
-# threads of a tile block walk the sorted range back to front in shared-staged
-# batches, starting at the block maximum of the pixels' final_idx. Each pixel
-# reconstructs T by dividing out (1 - alpha) and accumulates parameter gradients
-# with per-lane atomics, guarded per pixel so only indices at or below its own
-# final_idx contribute, with the same sigma and alpha culling as the forward.
-#
-# The sort and bin structures are not saved from the forward. They are recomputed
-# from the saved cum_tiles_hit via the shared sort_and_bin. The sort is
-# deterministic, so it reproduces the forward order and the saved final_Ts and
-# final_idx line up.
-#
-# The alpha cotangent is zero because rasterize returns only the image.
 
 
 @wp.kernel
@@ -555,16 +500,11 @@ def _rasterize_bwd_kernel(
     v_colors: wp.array[wp.vec3],
     v_opacity: wp.array[wp.float32],
 ):
-    # One block per (output image, tile). image_id decodes the output image. The
-    # geometry has its own batch B_geom, either equal to B_out (sel_geom True) or
-    # 1 (sel_geom False, a single shared render differentiated against B target
-    # images). Batched geometry writes grads at the flat id and broadcast
-    # geometry gets one slot per output image. JAX reduces broadcast inputs over
-    # the batch axis.
-    tile_g, tr = wp.tid()
+    """Rasterization backward kernel with cooperative shared-memory blend."""
+    tile_g, tr = wp.tid()  # One block per (output image, tile)
     image_id = tile_g // num_tiles
     tile_local = tile_g % num_tiles
-    geom_image = wp.where(sel_geom, image_id, 0)
+    geom_image = wp.where(sel_geom, image_id, 0)  # Use the first geom if broadcasted, else image_id
     og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
@@ -576,34 +516,31 @@ def _rasterize_bwd_kernel(
     tile_range = tile_bins[geom_image * num_tiles + tile_local]
     range_start = tile_range[0]
     range_end = tile_range[1]
-    if range_end <= range_start:
+    if range_end <= range_start:  # Early exit if no gaussians in this tile
         return
 
     px = wp.float32(j) + 0.5
     py = wp.float32(i) + 0.5
 
-    # Threads mapping outside the image stay live for the collective staging but
-    # never pass the validity guard, their bin_final sits below the range.
-    inside = (i < img_h) and (j < img_w)
+    inside = (i < img_h) and (j < img_w)  # Threads outside the image stay live for cooperative load
     bin_final = range_start - 1
     T = wp.float32(1.0)
     t_final = wp.float32(1.0)
     v_out = wp.vec3(0.0, 0.0, 0.0)
     bg = wp.vec3(0.0, 0.0, 0.0)
-    if inside:
-        frow = geom_image * img_h + i  # final_Ts and final_idx are geometry outputs
-        bin_final = final_idx[frow, j]
-        t_final = final_Ts[frow, j]
+    if inside:  # outside pixels stay at bin_final's default, skipping the loop below
+        final_row = geom_image * img_h + i  # final_Ts and final_idx are geometry outputs
+        bin_final = final_idx[final_row, j]
+        t_final = final_Ts[final_row, j]
         T = t_final
-        # The image cotangent arrives batched (B_out*H rows) for a view-dependent
-        # loss but broadcast (H rows) for a view-independent one. Modulo by its
-        # own row count reads the right row either way.
+        # The image cotangent arrives batched (B_out*H rows) for a view-dependent loss but broadcast
+        # (H rows) for an independent one. Modulo by its row count reads the right row either way.
         v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
         bg = background[wp.where(sel_bg, image_id, 0)]
     buffer = wp.vec3(0.0, 0.0, 0.0)
 
-    # Gaussians behind every pixel's last contributor never matter, so the walk
-    # starts at the block maximum of final_idx instead of range_end.
+    # Gaussians behind every pixel's last contributor never matter, so the walk starts at the block
+    # maximum of final_idx instead of range_end.
     start_idx = wp.tile_max(wp.tile(bin_final))[0]
     num_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
 
@@ -613,16 +550,11 @@ def _rasterize_bwd_kernel(
     sync_tile = wp.tile_empty(shape=1, dtype=wp.int32, storage="shared")
 
     for b in range(num_batches):
-        # The scatters place their barrier after the write, so an empty scatter
-        # guards the previous batch's shared reads against this batch's staging.
-        wp.tile_scatter_add(sync_tile, 0, 0, False)
+        wp.tile_scatter_add(sync_tile, 0, 0, False)  # Sync barrier to ensure reads are complete
 
-        # Per-thread gather of one gaussian record, back to front. Tail lanes
-        # clamp to range_start, staging a duplicate record the guarded loop
-        # never reads. Broadcast size-N attributes are read at the local gid,
-        # batched size B*N ones at the flat id, via modulo as in the forward.
+        # Gather gaussian records for this batch into shared memory. Order is from back to front
         batch_end = start_idx - b * BLOCK_SIZE
-        src = wp.max(batch_end - tr, range_start)
+        src = wp.max(batch_end - tr, range_start)  # Clamp to range_start to avoid underflow
         g = gaussian_ids_sorted[src]
         xy = xys[g]
         conic = conics[g]
@@ -633,9 +565,8 @@ def _rasterize_bwd_kernel(
         wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
         wp.tile_scatter_masked(id_tile, tr, g, True)
 
-        # Pixels whose last contributor lies below this batch skip it whole.
         batch_size = wp.min(BLOCK_SIZE, batch_end - range_start + 1)
-        if batch_end - batch_size + 1 <= bin_final:
+        if batch_end - batch_size + 1 <= bin_final:  # Skip pixels if the last splat is not in range
             for t in range(batch_size):
                 idx = batch_end - t
                 if idx > bin_final:
@@ -657,8 +588,8 @@ def _rasterize_bwd_kernel(
                     dx, dy, s[3], s[4], s[5], s[2], vis, alpha, color, T, buffer, t_final, bg, v_out
                 )
                 wp.atomic_add(v_colors, og, v_rgb)
-                # Where the alpha clamp is active alpha is constant, so the sigma and opacity paths
-                # carry no gradient and their atomics are skipped.
+                # Alpha is constant where the clamp is active, so the other gradients would be zero.
+                # Skipping reduces atomics pressure
                 if s[2] * vis <= 0.999:
                     wp.atomic_add(v_conic, og, v_con)
                     wp.atomic_add(v_xy, og, v_xyl)
@@ -705,6 +636,7 @@ def _rasterize_bwd_agg_kernel(
     v_colors: wp.array[wp.vec3],
     v_opacity: wp.array[wp.float32],
 ):
+    """Rasterization backward kernel with warp-aggregated atomic writes."""
     blk, tr = wp.tid()
     tile_g = blk // _SUBTILES
     sub = blk % _SUBTILES
@@ -735,9 +667,9 @@ def _rasterize_bwd_agg_kernel(
     v_out = wp.vec3(0.0, 0.0, 0.0)
     bg = wp.vec3(0.0, 0.0, 0.0)
     if inside:
-        frow = geom_image * img_h + i
-        bin_final = final_idx[frow, j]
-        t_final = final_Ts[frow, j]
+        final_row = geom_image * img_h + i
+        bin_final = final_idx[final_row, j]
+        t_final = final_Ts[final_row, j]
         T = t_final
         v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
         bg = background[wp.where(sel_bg, image_id, 0)]
@@ -993,9 +925,9 @@ def _rasterize_bwd_depth_kernel(
     v_outd = wp.float32(0.0)
     bg = wp.vec3(0.0, 0.0, 0.0)
     if inside:
-        frow = geom_image * img_h + i
-        bin_final = final_idx[frow, j]
-        t_final = final_Ts[frow, j]
+        final_row = geom_image * img_h + i
+        bin_final = final_idx[final_row, j]
+        t_final = final_Ts[final_row, j]
         T = t_final
         v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
         v_outd = v_out_depth[(image_id * img_h + i) % vdepth_rows, j]
@@ -1142,9 +1074,9 @@ def _rasterize_bwd_depth_agg_kernel(
     v_outd = wp.float32(0.0)
     bg = wp.vec3(0.0, 0.0, 0.0)
     if inside:
-        frow = geom_image * img_h + i
-        bin_final = final_idx[frow, j]
-        t_final = final_Ts[frow, j]
+        final_row = geom_image * img_h + i
+        bin_final = final_idx[final_row, j]
+        t_final = final_Ts[final_row, j]
         T = t_final
         v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
         v_outd = v_out_depth[(image_id * img_h + i) % vdepth_rows, j]
