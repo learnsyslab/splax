@@ -57,7 +57,7 @@ def project(
         glob_scale: Global factor applied to all scales.
         clip_thresh: Near-plane clipping threshold.
         gaussian_transforms: Rigid world-space transforms, shape ``(K, 4, 4)``.
-        transform_ids: Per-gaussian transform index from ``_transform_ids``, shape ``(N,)``. Passed
+        transform_ids: Per-gaussian transform index from ``transform_ids``, shape ``(N,)``. Passed
             together with ``gaussian_transforms``.
 
     Returns:

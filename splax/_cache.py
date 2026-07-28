@@ -98,8 +98,7 @@ def cached_launch(
     Records the launch on first use and afterwards replays it, repacking only the arguments whose
     recorded state changed. FFI callbacks are serialized by Warp's callback lock.
 
-    Entries are keyed on (kernel, device) and the static shape signatures, and drop entries if the
-    signature changes.
+    Entries are keyed on (kernel, device) and cleared when the scratch buffers move.
     """
     entry = _launch_cache.get((kernel, str(device)))
     if entry is None:

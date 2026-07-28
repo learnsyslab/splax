@@ -1,7 +1,6 @@
 """Warp rasterization kernels and their JAX FFI callables.
 
-Blend kernels are available with and without depth support, their backward implementation, and
-shared kernels for sorting and binning.
+Blend kernels are available with and without depth support, and their backward implementation.
 
 Kernel launch functions are wrapped into JAX FFI callables that the API layer in
 ``splax._rasterize`` composes with ``jax.custom_vjp``.

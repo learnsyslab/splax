@@ -1,14 +1,13 @@
-"""Warp kernels for intersection key emission and tile bin edges.
+"""Warp kernels for intersection sorting and binning.
 
-The forward blend and the backward pass both walk the sorted per-tile gaussian lists these kernels
-feed. Projection's ellipse walk counts the tiles each gaussian touches, and here the identical walk
-emits one sort key per intersection, later scanned into per-tile bin edges.
+The forward blend and the backward pass both need a sorted per-tile gaussian list. The kernels here
+produce these lists in a single batched launch. We reuse the ellipse criterion from the projection
+stage, emit one sort key per intersection, and return the bin edges for each tile.
 
 Sort keys come in two widths. When the image and tile ids leave at least 16 low bits, the whole key
 packs into one non-negative int32 holding the image id, the tile id, and the quantized depth. This
-halves the radix sort passes and quarters the bytes moved, dropping the sort stage by 2.7 to 3.1x on
-large frames. Otherwise a 64 bit key carrying the image and tile ids above the depth bits is the
-automatic fallback.
+halves the radix sort passes and quarters the bytes moved. Otherwise a 64 bit key carrying the image
+and tile ids above the depth bits is the automatic fallback.
 """
 
 import warp as wp
@@ -23,9 +22,7 @@ from splax._intersect import (
 
 wp.set_module_options({"fast_math": True})
 
-# Each thread privately reduces this many gaussians before one atomic pair,
-# cutting global atomics and their contention by the same factor.
-MINMAX_CHUNK = wp.constant(32)
+MINMAX_CHUNK = wp.constant(32)  # Number of gaussians reduced per thread before an atomic update
 
 
 @wp.kernel
@@ -44,10 +41,6 @@ def depth_minmax(
     # output, per-image [min, max] pairs of length 2*B, pre-seeded by seed_minmax
     out_mm: wp.array[wp.float32],
 ):
-    # The range is kept per image (image = idx // n) so a batched render quantizes
-    # each view exactly as the corresponding unbatched render would. A chunk spans
-    # at most one image boundary (n >> 32), handled by flushing the accumulator
-    # when the image changes.
     tid = wp.tid()
     base = tid * MINMAX_CHUNK
     img_cur = wp.int32(-1)
@@ -58,7 +51,7 @@ def depth_minmax(
         if idx < total:
             if radii[idx] > 0:  # culled gaussians emit no keys, exclude from range
                 im = idx // num_gaussians
-                if im != img_cur:
+                if im != img_cur:  # If the image changed, flush accumulators
                     if img_cur >= 0:
                         wp.atomic_min(out_mm, 2 * img_cur, lo)
                         wp.atomic_max(out_mm, 2 * img_cur + 1, hi)
@@ -92,16 +85,9 @@ def map_intersects_32bit(
     isect_ids: wp.array[wp.int32],
     gaussian_ids: wp.array[wp.int32],
 ):
-    # Packed 32 bit key. The key is (iid | tile_id | quant_depth) with
-    # depth_bits = 31 - (image_n_bits + tile_n_bits), at least 16 when this kernel
-    # is selected. The sign bit stays 0, so cub's signed radix sort orders the keys
-    # as plain unsigned ascending over 4 passes instead of 8.
-    # quant_depth linearly quantizes the camera depth into depth_bits buckets over
-    # the per-image [dmin, dmax] range, which is monotone in depth. Near-coincident
-    # gaussians in the same bucket keep gaussian-id order under the stable sort,
-    # a perceptually negligible blend-order change (80+ dB vs the 64 bit key).
-    # Linear-over-range beats truncating the float mantissa. It spends every bucket
-    # inside the scene's actual depth span.
+    # The 32 bit key is (iid | tile_id | quant_depth) with depth_bits >= 16.
+    # The sign bit stays 0, so cub's signed radix sort orders the keys as plain unsigned ascending
+    # over 4 passes instead of 8.
     idx = wp.tid()
     if radii[idx] <= 0:
         return
@@ -113,6 +99,9 @@ def map_intersects_32bit(
     if idx > 0:
         cur_idx = cum_tiles_hit[idx - 1]
 
+    # We linearly quantize the camera depth into depth_bits buckets over the per-image [dmin, dmax]
+    # range, which is monotone in depth. Near-coincident gaussians in the same bucket keep
+    # gaussian-id order under the stable sort, a perceptually negligible blend-order change.
     dmin = depth_mm[2 * bid]
     drange = depth_mm[2 * bid + 1] - dmin
     maxq = wp.float32((wp.int32(1) << depth_bits) - wp.int32(1))
@@ -122,14 +111,9 @@ def map_intersects_32bit(
         depth_q = wp.clamp(
             wp.int32(f * maxq), wp.int32(0), (wp.int32(1) << depth_bits) - wp.int32(1)
         )
-    iid_enc = bid << (depth_bits + tile_n_bits)
 
-    # The same ellipse walk as projection's tile count, emitting exactly
-    # num_tiles_hit keys per gaussian so the cum offsets stay valid.
-    # map_opacities is the raw opacity projection counted with. When the blend uses
-    # a compensated opacity (antialiased mode) this stays raw so the emitted key
-    # total still matches cum_tiles_hit exactly.
-    opac = map_opacities[idx % opac_mod]
+    # We reuse the ellipse criterion from the projection stage, so num_tiles_hit matches exactly.
+    opac = map_opacities[idx % opac_mod]  # Raw opacity projection to ensure matching tile counts.
     t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
     conic = conics[idx]
     setup = ellipse_init(
@@ -147,6 +131,7 @@ def map_intersects_32bit(
                 tile_id = u * tile_bounds_x + v
             else:
                 tile_id = v * tile_bounds_x + u
+            iid_enc = bid << (depth_bits + tile_n_bits)
             isect_ids[cur_idx] = iid_enc | (tile_id << depth_bits) | depth_q
             gaussian_ids[cur_idx] = idx
             cur_idx = cur_idx + 1
@@ -170,9 +155,10 @@ def map_intersects_64bit(
     isect_ids: wp.array[wp.int64],
     gaussian_ids: wp.array[wp.int32],
 ):
-    # 64 bit twin of map_intersects_32bit for the too-many-tiles case. The key is
-    # (iid | tile_id) << 32 | depth_bits, with the positive float depth's raw bits
-    # sorting correctly as ints. Identical tile emission, only the key differs.
+    # 64 bit twin of map_intersects_32bit. Used if we do not have enough space to pack everything
+    # into the 32bit key. The key becomes (iid | tile_id) << 32 | depth. Positive float depths
+    # sort correctly when interpreted as ints. Apart from packing, keys are identical to the 32 bit
+    # version
     idx = wp.tid()
     if radii[idx] <= 0:
         return
@@ -221,8 +207,7 @@ def tile_bin_edges_32bit(
     # output
     tile_bins: wp.array[wp.vec2i],
 ):
-    # Per (image, tile) bin edges into a [B*num_tiles] array. The flat bin index is
-    # iid*num_tiles + tile_id, decoded from the key field above the depth bits.
+    # Compute the bin edges for each tile. The flat index is image_id*num_tiles + tile_id
     idx = wp.tid()
     if idx >= num_intersects:
         return
