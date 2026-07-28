@@ -114,7 +114,7 @@ def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) 
     a, b, c = conics[:, 0], conics[:, 1], conics[:, 2]
     rho2 = 1.0 - eps * (a + c) + (eps * eps) * (a * c - b * b)
     rho = jnp.sqrt(jnp.clip(rho2, 0.0, 1.0))
-    return jnp.where(radii.reshape(-1) > 0, rho, 1.0)
+    return jnp.where(radii > 0, rho, 1.0)
 
 
 def transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
@@ -187,10 +187,6 @@ def _project(
         float(clip_thresh),
         output_dims=n,
     )
-    depths = depths.reshape(n, 1)
-    radii = radii.reshape(n, 1)
-    num_tiles_hit = num_tiles_hit.reshape(n, 1).astype(jnp.uint32)
-    cum_tiles_hit = cum_tiles_hit.reshape(n, 1).astype(jnp.uint32)
     return xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit
 
 
@@ -247,7 +243,6 @@ def _project_bwd(
     """Backward pass of _project, the custom_vjp of project."""
     m, s, q, vm, tf, ids, radii, conics = residuals
     v_xys, v_depths, _v_radii, v_conics, _v_nth, _v_cum = cotangents
-    r = radii.reshape(n).astype(jnp.int32)
     k = tf.shape[-3]
     dims = {"v_mean3d": n, "v_scale": n, "v_quat": n}
     dims["v_viewmat"] = (4, 4)
@@ -257,10 +252,10 @@ def _project_bwd(
         s,
         q,
         vm,
-        r,
+        radii,
         conics,
         v_xys,
-        v_depths.reshape(-1),
+        v_depths,
         v_conics,
         tf,
         ids,

@@ -9,7 +9,6 @@ from __future__ import annotations
 from functools import partial
 
 import jax
-import jax.numpy as jnp
 
 from splax._rasterize._kernels import (
     rasterize_bwd_depth_ffi,
@@ -53,9 +52,9 @@ def rasterize(
         radii,
         conics,
         cum_tiles_hit,
-        int(n),
-        int(H),
-        int(W),
+        n,
+        H,
+        W,
     )
     return out_img
 
@@ -92,9 +91,9 @@ def rasterize_depth(
         radii,
         conics,
         cum_tiles_hit,
-        int(n),
-        int(H),
-        int(W),
+        n,
+        H,
+        W,
     )
     return out_img, out_depth
 
@@ -130,13 +129,13 @@ def _rasterize(
         map_opacities.reshape(n),
         background.reshape(1, 3),
         xys,
-        depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32),
+        depths,
+        radii,
         conics,
-        cum_tiles_hit.reshape(n).astype(jnp.int32),
-        int(n),
-        int(H),
-        int(W),
+        cum_tiles_hit,
+        n,
+        H,
+        W,
         output_dims=(H, W),
     )
     return out_img, final_Ts, final_idx
@@ -212,16 +211,16 @@ def _rasterize_bwd(
         map_opacities.reshape(n),
         background.reshape(1, 3),
         xys,
-        depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32),
+        depths,
+        radii,
         conics,
-        cum_tiles_hit.reshape(n).astype(jnp.int32),
+        cum_tiles_hit,
         final_Ts,
         final_idx,
         v_img,
-        int(n),
-        int(H),
-        int(W),
+        n,
+        H,
+        W,
         output_dims=n,
     )
     v_opacity = v_opacity.reshape(opacities.shape)
@@ -256,13 +255,13 @@ def _rasterize_depth(
         map_opacities.reshape(n),
         background.reshape(1, 3),
         xys,
-        depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32),
+        depths,
+        radii,
         conics,
-        cum_tiles_hit.reshape(n).astype(jnp.int32),
-        int(n),
-        int(H),
-        int(W),
+        cum_tiles_hit,
+        n,
+        H,
+        W,
         output_dims=(H, W),
     )
     return out_img, out_depth, final_Ts, final_idx
@@ -338,17 +337,17 @@ def _rasterize_depth_bwd(
         map_opacities.reshape(n),
         background.reshape(1, 3),
         xys,
-        depths.reshape(n),
-        radii.reshape(n).astype(jnp.int32),
+        depths,
+        radii,
         conics,
-        cum_tiles_hit.reshape(n).astype(jnp.int32),
+        cum_tiles_hit,
         final_Ts,
         final_idx,
         v_img,
         v_depth_img,
-        int(n),
-        int(H),
-        int(W),
+        n,
+        H,
+        W,
         output_dims=n,
     )
     v_opacity = v_opacity.reshape(opacities.shape)
