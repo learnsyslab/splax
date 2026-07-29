@@ -1,29 +1,20 @@
-"""Per-image affine exposure correction (``scripts/train_colmap.py``).
+"""Per-image affine exposure correction of ``scripts/train_colmap.py``.
 
-All tests here are **pure JAX on CPU**, they exercise only the affine helpers
-(``init_exposure`` / ``apply_exposure``), no renderer, no Warp kernels, no GPU.
-``JAX_PLATFORMS=cpu`` is pinned below so they never touch the device even if a GPU
-is present. (Importing ``train_colmap`` pulls in ``splax``/Warp at module scope,
-but Warp initializes lazily and nothing here launches a kernel.)
-
-The training step itself (``make_step`` with ``exp_opt``) needs the Warp renderer and
-so is *not* unit-tested here. It is covered by the coordinator's drone eval run. The
-invariants below are exactly the ones that matter for correctness and honesty:
-identity init, correct affine algebra, and off-path parity.
+``init_exposure`` hands the trainer one affine block per image and ``apply_exposure`` maps a render
+through such a block. Both are plain JAX, so the identity init, the affine algebra, and the
+untouched render an identity block leaves behind are checked directly. The training step that
+optimizes the blocks is covered in ``tests/integration/test_batched_training.py``.
 """
 
 from __future__ import annotations
-
-import os
-
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
 import pytest
 from train_colmap import apply_exposure, init_exposure
 
+pytestmark = pytest.mark.colmap
 
-@pytest.mark.unit
+
 def test_init_exposure_is_identity():
     ntr = 7
     exp = np.asarray(init_exposure(ntr))
@@ -34,9 +25,8 @@ def test_init_exposure_is_identity():
         assert np.allclose(exp[i, :, 3], 0.0)
 
 
-@pytest.mark.unit
 def test_apply_exposure_identity_is_noop():
-    """Identity transform must leave the render bit-identical (off-path parity)."""
+    """Leave the render bit-identical under an identity transform."""
     rng = np.random.default_rng(0)
     img = rng.random((5, 4, 3)).astype(np.float32)
     affine = np.asarray(init_exposure(1))[0]  # (3,4) identity
@@ -44,7 +34,6 @@ def test_apply_exposure_identity_is_noop():
     assert np.array_equal(out, img)
 
 
-@pytest.mark.unit
 def test_apply_exposure_affine_algebra():
     """Known transform M@rgb + b, applied per pixel, matches an explicit einsum."""
     rng = np.random.default_rng(1)
@@ -58,7 +47,6 @@ def test_apply_exposure_affine_algebra():
     assert np.allclose(out, ref, atol=1e-5)
 
 
-@pytest.mark.unit
 def test_apply_exposure_scalar_gain_and_offset():
     """A pure per-channel gain+bias (diagonal M) scales/shifts each channel."""
     img = np.ones((2, 2, 3), np.float32)

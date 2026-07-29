@@ -178,9 +178,8 @@ def _project_kernel(
     R_tf, moved, mean = _apply_transform(
         gaussian_transforms, bid, n_transforms, sel_transforms, tf_id, mean
     )
-    W, p_view, M = _project_geom(
-        mean, quats[q_idx], scales[s_idx], glob_scale, viewmat, vb, R_tf, moved
-    )
+    quat = wp.normalize(quats[q_idx])
+    W, p_view, M = _project_geom(mean, quat, scales[s_idx], glob_scale, viewmat, vb, R_tf, moved)
     if p_view[2] <= clip_thresh:
         return
     V3 = M * wp.transpose(M)
@@ -419,11 +418,10 @@ def _project_bwd_kernel(
         R_tf, moved, mean = _apply_transform(
             gaussian_transforms, image_id, n_transforms, sel_transforms, tf_id, mean_local
         )
-        W, p, M = _project_geom(
-            mean, quats[q_idx], scales[s_idx], glob_scale, viewmat, vb, R_tf, moved
-        )
+        quat = wp.normalize(quats[q_idx])
+        W, p, M = _project_geom(mean, quat, scales[s_idx], glob_scale, viewmat, vb, R_tf, moved)
         V = M * wp.transpose(M)
-        R = wp.quat_to_matrix(quats[q_idx])
+        R = wp.quat_to_matrix(quat)
         s = glob_scale * scales[s_idx]
         rz = 1.0 / p[2]
         rz2 = rz * rz
@@ -445,7 +443,7 @@ def _project_bwd_kernel(
         )
         v_mean3d[idx] = v_mean_out
         v_scale[idx] = _scale_vjp(R, v_M, glob_scale)
-        v_quat[idx] = _quat_vjp(quats[q_idx], s, v_M)
+        v_quat[idx] = _quat_vjp(quat, wp.length(quats[q_idx]), s, v_M)
         v_R, v_t = _view_vjp(J, mean, v_p, v_T)
     ob = image_id * 4
     # Viewmat gradient is a per-image accumulator that reduces in every block. Each block folds its
@@ -568,8 +566,13 @@ def _scale_vjp(R: wp.mat33, v_M: wp.mat33, glob_scale: wp.float32) -> wp.vec3:
 
 
 @wp.func
-def _quat_vjp(quat: wp.quat, s: wp.vec3, v_M: wp.mat33) -> wp.vec4:
-    """Gradient of the quaternion applied to the splats' covariance."""
+def _quat_vjp(quat: wp.quat, norm: wp.float32, s: wp.vec3, v_M: wp.mat33) -> wp.vec4:
+    """Gradient of the quaternion applied to the splats' covariance.
+
+    ``quat`` is the unit quaternion the rotation is built from and ``norm`` the length of the
+    quaternion the caller normalized, so the gradient is the tangential part of the unit-quaternion
+    gradient divided by that length.
+    """
     v_R = v_M * wp.diag(s)
     x = quat[0]
     y = quat[1]
@@ -596,7 +599,9 @@ def _quat_vjp(quat: wp.quat, s: wp.vec3, v_M: wp.mat33) -> wp.vec4:
         - 2.0 * z * (v_R[0, 0] + v_R[1, 1])
         + w * (v_R[1, 0] - v_R[0, 1])
     )
-    return wp.vec4(vq_x, vq_y, vq_z, vq_w)
+    vq = wp.vec4(vq_x, vq_y, vq_z, vq_w)
+    q = wp.vec4(x, y, z, w)
+    return (vq - wp.dot(vq, q) * q) / norm
 
 
 @wp.func

@@ -1,7 +1,11 @@
 """Pytest configuration.
 
-If gsplat is not installed, we skip the tests that compare splax's output to the reference
-implementation.
+Every test carries the marker of the directory it lives in, ``unit`` or ``integration``, so a test
+only spells out what its path does not already say. Two further markers name an optional
+dependency. ``gsplat`` marks the parity tests against the reference implementation, which are
+skipped when gsplat is not installed, and ``colmap`` marks the tests of the COLMAP training toolkit
+under ``scripts/``, which need pycolmap. Either group deselects with ``-m``, for example
+``pytest -m "not colmap"``.
 
 The tests need the pretrained lego splat, the lego test-set camera metadata with three of its
 views, and the drone COLMAP sparse model. The fixtures download them through ``splax.io.fetch``.
@@ -36,32 +40,26 @@ BASE = os.environ.get(
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]):
-    """Skip the gsplat parity tests when gsplat is not installed."""
-    if importlib.util.find_spec("gsplat") is not None:
-        return
+    """Mark every test by its suite directory and skip the parity tests without gsplat."""
     skip = pytest.mark.skip(reason="gsplat not installed")
+    have_gsplat = importlib.util.find_spec("gsplat") is not None
     for item in items:
-        if "gsplat" in item.keywords:
+        item.add_marker(item.path.parent.name)
+        if not have_gsplat and "gsplat" in item.keywords:
             item.add_marker(skip)
 
 
 @pytest.fixture
 def gsplat_shim() -> ModuleType:
     """Return the gsplat wrapper used by the parity tests."""
-    import _gsplat
+    import _gsplat  # imported here so collection succeeds without gsplat installed
 
     return _gsplat
 
 
 @pytest.fixture
 def faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch):
-    """Pin the 64-bit sort key for the bit-exact batch-native assertions.
-
-    Batch-native == stack-of-unbatched is bit-exact only for the 64-bit key, whose per-image
-    (tile, depth) order is independent of B. The default packed 32-bit key sizes its depth field
-    as 31 - image_bits - tile_bits, which shrinks as B grows, so a batched render quantizes depth
-    slightly coarser than the B=1 reference and matches only up to a perceptual bound.
-    """
+    """Pin the 64-bit sort key for the bit-exact batch-native assertions."""
     monkeypatch.setattr(_sort, "_use_32bit_keys", lambda depth_bits: False)
 
 

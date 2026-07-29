@@ -47,9 +47,10 @@ pythonpath = ["scripts", "tests"]
 # unit/ and integration/ hold same-named modules, which collide under the default prepend mode
 addopts = "--import-mode=importlib"
 markers = [
+    "unit: test of a single function. Applied automatically to everything under tests/unit",
+    "integration: test of several components. Applied automatically to tests/integration",
     "gsplat: test needs the gsplat CUDA reference",
-    "unit: Unit tests for single functions",
-    "integration: Integration tests for multiple functions or larger components",
+    "colmap: test needs pycolmap and the COLMAP training toolkit under scripts/",
 ]
 
 [tool.pixi.workspace]

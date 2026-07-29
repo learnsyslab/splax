@@ -1,23 +1,17 @@
-"""Lego render-quality regression gate (pure splax, no external reference).
+"""Render-quality regression gate on the pretrained lego scene.
 
-Renders the pretrained lego splat (``data/scenes/lego.ply``, ~313k gaussians,
-SH degree 0) at three held-out test poses and asserts the PSNR against the
-ground-truth images stays at or above the established floor. This is the
-correctness gate for the pretrained lego scene, reproduced here
-without any CUDA reference. splax renders the scene itself.
+The gate renders the pretrained lego splat of ~313k gaussians at three held-out test poses and
+bounds the PSNR against the ground-truth images from below. It needs no external reference, splax
+renders the scene itself. The splat, the poses, and the ground-truth views come from the
+``lego_ply``, ``lego_meta`` and ``lego_view`` fixtures.
 
-Protocol:
-  - poses/intrinsics from ``data/nerf_synthetic/lego/transforms_test.json``,
-    frames 0 / 25 / 50,
-  - NeRF c2w (OpenGL, -z forward) to w2c viewmat (OpenCV, +z forward) via the
-    diag(1, -1, -1, 1) flip then inverse,
-  - focal length from ``camera_angle_x``, principal point at the image center,
-    ``glob_scale=1.0``, ``clip_thresh=0.01``,
-  - white background, ground truth alpha-composited onto white.
+The poses arrive as NeRF camera-to-world matrices in the OpenGL convention with -z forward, which
+``splax.utils.nerf_camera`` turns into the world-to-camera viewmat splax renders from. The focal
+length follows from ``camera_angle_x``, the principal point sits at the image center, and the
+ground truth is alpha-composited onto the white background the render uses.
 
-The floors are the established reference values (30.89 / 31.43 / 32.08 dB) minus a
-0.05 dB slack for float32 blend-order jitter. splax currently reproduces them to
-better than 0.01 dB. The scene and the pretrained ply are downloaded from huggingface.
+The floors are the reference values of 30.89, 31.43 and 32.08 dB less a 0.05 dB slack for float32
+blend-order jitter, which splax reproduces to better than 0.01 dB.
 """
 
 from __future__ import annotations
@@ -34,12 +28,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-# frame index to the established PSNR floor (dB) at that held-out test pose.
+# Frame index to the reference PSNR in dB at that held-out test pose.
 KNOWN_PSNR = {0: 30.89, 25: 31.43, 50: 32.08}
 SLACK = 0.05
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("frame_idx", [0, 25, 50])
 def test_lego_render_psnr_regression(
     frame_idx: int, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path

@@ -215,7 +215,7 @@ async function save() {
       method: "POST", body: JSON.stringify({ tiles, path: filePath }),
     });
     if (!resp.ok) throw new Error(await resp.text());
-    setStatus(`${tiles.length} tiles · saved`);
+    setStatus(`${tiles.length} tiles saved`);
   } catch (err) {
     setStatus(`SAVE FAILED: ${err.message}`);
   }
@@ -432,10 +432,10 @@ function buildBar() {
   status.id = "status";
   const hint = document.createElement("span");
   hint.id = "hint";
-  hint.textContent = "left click: place · right click: delete · drag: select · " +
-    "shift+click: toggle · drag selection: move · arrows: move selection · " +
-    "del: delete selection · esc: deselect · ctrl+c/x/v: copy/cut/paste at " +
-    "cursor · middle drag: pan · wheel: zoom · f: fit · 1-7: shape · q-o: color";
+  hint.textContent = "left click: place | right click: delete | drag: select | " +
+    "shift+click: toggle | drag selection: move | arrows: move selection | " +
+    "del: delete selection | esc: deselect | ctrl+c/x/v: copy/cut/paste at " +
+    "cursor | middle drag: pan | wheel: zoom | f: fit | 1-7: shape | q-o: color";
   bar.append(file, status, hint);
   refreshBar();
   setFileLabel();

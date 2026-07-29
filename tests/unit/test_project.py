@@ -16,8 +16,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-from utils import VIEWMAT, VIEWS, camera, poses, scene
+from utils import VIEWMAT, VIEWS, assert_finite_difference, camera, poses, scene
 
 import splax
 
@@ -70,7 +69,6 @@ def _loss(
 # region regular invocation
 
 
-@pytest.mark.unit
 def test_project():
     """Project a scene and check the outputs against the pinhole model they encode."""
     n, H, W = 3000, 128, 128
@@ -105,7 +103,6 @@ def test_project():
     np.testing.assert_array_equal(np.asarray(cum_tiles_hit).astype(np.int64), np.cumsum(nth))
 
 
-@pytest.mark.unit
 def test_project_principal_point_default():
     """Leaving the principal point out puts it at the image center.
 
@@ -127,9 +124,12 @@ def test_project_principal_point_default():
     np.testing.assert_allclose(np.asarray(xys)[live], xys_ref[live], atol=1e-3)
 
 
-@pytest.mark.unit
 def test_opacity_compensation():
-    """ρ from the conic matches the direct det-ratio, bounded to [0,1], culled gaussians give 1."""
+    """Rebuild the compensation factor from the conic and bound it to [0, 1].
+
+    The factor is the square root of the determinant ratio of the undilated and the dilated 2D
+    covariance, and a culled gaussian carries no dilation to compensate, so it reads exactly 1.
+    """
     n, H, W = 3000, 128, 128
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=1)
     _xys, _depths, radii, conics, _nth, _cum = splax.project(
@@ -139,8 +139,8 @@ def test_opacity_compensation():
     conics = np.asarray(conics)
     radii = np.asarray(radii)
     eps = 0.3
-    # Reference: rebuild the dilated Σ₂D from the conic (= its inverse), strip the
-    # ε dilation, take the det ratio directly.
+    # Reference: rebuild the dilated 2D covariance from the conic, which is its inverse, strip the
+    # eps dilation, take the det ratio directly.
     a, b, c = conics[:, 0], conics[:, 1], conics[:, 2]
     live = radii > 0
     det_conic = a * c - b * b
@@ -149,18 +149,16 @@ def test_opacity_compensation():
     det_o = (cxx - eps) * (cyy - eps) - cxy * cxy
     ref = np.sqrt(np.clip(np.where(live, det_o / det_d, 1.0), 0.0, 1.0))
     assert np.allclose(rho[live], ref[live], atol=1e-5), (
-        f"max |ρ - ref| = {np.abs(rho[live] - ref[live]).max():.2e}"
+        f"max deviation {np.abs(rho[live] - ref[live]).max():.2e}"
     )
-    assert np.all(rho >= 0.0) and np.all(rho <= 1.0), "ρ must lie in [0, 1]"
-    assert np.allclose(rho[~live], 1.0), "culled gaussians must get ρ = 1"
-    # real gaussians actually get compensated (ρ meaningfully below 1 somewhere)
-    assert rho[live].min() < 0.98, "expected some thin gaussians with ρ < 1"
+    assert np.all(rho >= 0.0) and np.all(rho <= 1.0), "the compensation leaves [0, 1]"
+    assert np.allclose(rho[~live], 1.0), "culled gaussians must not be compensated"
+    assert rho[live].min() < 0.98, "no thin gaussian is compensated at all"
 
 
 # region batching
 
 
-@pytest.mark.unit
 def test_project_vmap_matches_loop():
     """Match a vmap over a batch of scenes and cameras against the loop over its single calls.
 
@@ -186,7 +184,6 @@ def test_project_vmap_matches_loop():
     np.testing.assert_array_equal(cum, np.cumsum(nth))
 
 
-@pytest.mark.unit
 def test_project_broadcast():
     """Mixed batched and shared operands match the loop that spells the batch out by hand."""
     n, H, W = 4000, 128, 128
@@ -221,15 +218,11 @@ def test_project_broadcast():
 # region gradient
 
 
-@pytest.mark.unit
 def test_project_grad():
-    """Directional finite differences validate the gradient of every differentiable operand.
+    """Validate the gradient of every differentiable operand with directional finite differences.
 
     Stepping along the gradient of one operand at a time maximizes the directional-derivative
-    signal against float32 noise and attributes a mismatch to that operand. The projection takes
-    unit quaternions, so its quaternion gradient is meaningful in the tangent space at q. The
-    radial component is dropped from the step, which keeps the perturbed quaternions on the unit
-    sphere.
+    signal against float32 noise and attributes a mismatch to that operand.
     """
     n, H, W = 400, 96, 96
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=5)
@@ -243,23 +236,35 @@ def test_project_grad():
         assert np.linalg.norm(np.asarray(g)) > 0, f"{name} gradient is all zero"
     assert np.allclose(np.asarray(grads[3])[3], 0.0), "the viewmat bottom row is constant"
 
-    directions = list(grads)
-    directions[2] = grads[2] - jnp.sum(grads[2] * quats, axis=-1, keepdims=True) * quats
-    directions = [d / jnp.linalg.norm(d) for d in directions]
-    eps = 1e-3
     for i, name in enumerate(names):
-        d = directions[i]
-        plus = float(loss(*[a + eps * d if j == i else a for j, a in enumerate(args)]))
-        minus = float(loss(*[a - eps * d if j == i else a for j, a in enumerate(args)]))
-        numeric = (plus - minus) / (2 * eps)
-        analytic = float(jnp.vdot(grads[i], d))
-        rel = abs(analytic - numeric) / abs(numeric)
-        assert rel < 5e-3, (
-            f"{name} FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} ({rel:.2e})"
+
+        def perturbed(operand: jax.Array, i: int = i) -> jax.Array:
+            return loss(*args[:i], operand, *args[i + 1 :])
+
+        assert_finite_difference(
+            perturbed, (args[i],), (grads[i],), eps=1e-3, rtol=5e-3, name=f"{name} "
         )
 
 
-@pytest.mark.unit
+def test_project_quat_scale():
+    """Scaling the quaternions leaves the projection unchanged and rescales its gradient.
+
+    The rotation is built from the normalized quaternion, so the outputs depend on the quaternion
+    direction alone while the gradient carries the ``1 / |q|`` factor of that normalization. A
+    power-of-two scale keeps both relations bit-exact in float32.
+    """
+    n, H, W = 400, 96, 96
+    means, scales, quats, _colors, opacities, _bg = scene(n, seed=15)
+    loss = partial(_loss, opacities=opacities, weights=_weights(n, seed=16), img_shape=(H, W))
+    grad = jax.grad(loss, argnums=2)
+
+    assert float(loss(means, scales, 2.0 * quats, VIEWMAT)) == float(
+        loss(means, scales, quats, VIEWMAT)
+    )
+    scaled = np.asarray(grad(means, scales, 2.0 * quats, VIEWMAT))
+    np.testing.assert_array_equal(2.0 * scaled, np.asarray(grad(means, scales, quats, VIEWMAT)))
+
+
 def test_project_grad_vmap_matches_loop():
     """Match vmap(grad) over a batch of scenes and cameras against the loop over single gradients.
 
@@ -283,7 +288,6 @@ def test_project_grad_vmap_matches_loop():
     np.testing.assert_allclose(np.asarray(batched[3]), ref_viewmat, rtol=1e-4, atol=1e-6)
 
 
-@pytest.mark.unit
 def test_project_grad_broadcast():
     """The gradient of a shared operand is the sum over the batch axis of the per-image gradients.
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pytest
 from utils import scene
 
 import splax
@@ -19,7 +18,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-@pytest.mark.unit
 def test_write_ply_is_load_ply_inverse(tmp_path: Path):
     """Random splats through write_ply then load_ply reproduce the render-space inputs."""
     means, scales, quats, colors, opac, _bg = scene(5000)

@@ -44,12 +44,12 @@ def render(
     render_depth: bool = False,
     gaussian_transforms: jax.Array | None = None,
     gaussian_slices: Sequence[tuple[int, int]] | None = None,
-) -> tuple[jax.Array, jax.Array | None]:
+) -> tuple[jax.Array, jax.Array]:
     """Render a splat.
 
     The render is differentiable and aware of the arguments with respect to which gradients are
-    requested, so only the necessary backward kernels launch. Depth rendering additionally returns
-    the differentiable alpha-blended expected depth map for sparse-point depth regularization.
+    requested, so only the necessary backward kernels launch. Depth rendering additionally packs the
+    differentiable expected depth map into the image for sparse-point depth regularization.
 
     Slices of the gaussians can follow rigid transforms for composed dynamic scenes. The gaussians
     in slice k move by ``gaussian_transforms[k]``, while all others stay static.  Transforms are
@@ -59,7 +59,7 @@ def render(
     Args:
         means3d: Gaussian centers, shape ``(N, 3)``.
         scales: Per-axis scales, shape ``(N, 3)``.
-        quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
+        quats: Rotations as wxyz quaternions, not necessarily normalized, shape ``(N, 4)``.
         colors: Gaussian colors, shape ``(N, 3)``.
         opacities: Gaussian opacities, shape ``(N,)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
@@ -70,13 +70,16 @@ def render(
         glob_scale: Global factor applied to all scales.
         clip_thresh: Near-plane clipping threshold.
         antialiased: Enable the Mip-Splatting opacity compensation.
-        render_depth: Additionally render the expected depth map.
+        render_depth: Additionally render the expected depth map in camera-space z.
         gaussian_transforms: Rigid world-space transforms, shape ``(K, 4, 4)``.
         gaussian_slices: K matching, non-overlapping ``(start, stop)`` gaussian index ranges.
 
     Returns:
-        Tuple of the rendered image and the depth map, where the depth map is None unless
-        ``render_depth`` is True.
+        Tuple of the rendered image and the ``(H, W)`` accumulated alpha, the coverage the gaussians
+        contribute, which is 0 on pixels no gaussian covers. The image is ``(H, W, 3)`` RGB, or
+        ``(H, W, 4)`` with the expected depth in the fourth channel if ``render_depth`` is True.
+        Depth is the expected camera-space z along the optical axis, not a Euclidean range, and
+        reads 0 on pixels no gaussian covers.
     """
     if (gaussian_transforms is None) != (gaussian_slices is None):
         raise ValueError("gaussian_transforms and gaussian_slices must be passed together")
@@ -109,9 +112,8 @@ def render(
         map_opacities = opacities  # the tile intersection stays on the raw opacity
 
     inputs = (colors, blend_opacities, background, xys, depths, radii, conics, cum_tiles_hit)
-    if render_depth:
-        return rasterize_depth(*inputs, img_shape=img_shape, map_opacities=map_opacities)
-    return rasterize(*inputs, img_shape=img_shape, map_opacities=map_opacities), None
+    blend = rasterize_depth if render_depth else rasterize
+    return blend(*inputs, img_shape=img_shape, map_opacities=map_opacities)
 
 
 def render_log(
@@ -130,7 +132,7 @@ def render_log(
     clip_thresh: float = 0.01,
     antialiased: bool = False,
     render_depth: bool = False,
-) -> tuple[jax.Array, jax.Array | None]:
+) -> tuple[jax.Array, jax.Array]:
     """Render from the unconstrained log/logit parameterization used for training.
 
     Maps the log/logit arrays to the constrained splat arrays (``exp`` on the log scales, normalized
@@ -151,14 +153,16 @@ def render_log(
         glob_scale: Global factor applied to all scales.
         clip_thresh: Near-plane clipping threshold.
         antialiased: Enable the Mip-Splatting opacity compensation.
-        render_depth: Additionally render the expected depth map.
+        render_depth: Additionally render the expected depth map in camera-space z.
 
     Returns:
-        Tuple of the rendered image and the depth map, where the depth map is None unless
-        ``render_depth`` is True.
+        Tuple of the rendered image and the ``(H, W)`` accumulated alpha, the coverage the gaussians
+        contribute, which is 0 on pixels no gaussian covers. The image is ``(H, W, 3)`` RGB, or
+        ``(H, W, 4)`` with the expected depth in the fourth channel if ``render_depth`` is True.
+        Depth is the expected camera-space z along the optical axis, not a Euclidean range, and
+        reads 0 on pixels no gaussian covers.
     """
     scales = jnp.exp(log_scales)
-    quats = quats / (jnp.linalg.norm(quats, axis=-1, keepdims=True) + 1e-8)
     colors = jax.nn.sigmoid(logit_colors)
     opacities = jax.nn.sigmoid(logit_opacities)
     camera: dict = {"viewmat": viewmat, "background": background, "img_shape": img_shape}

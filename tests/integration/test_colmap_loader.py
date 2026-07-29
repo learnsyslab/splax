@@ -1,7 +1,7 @@
 """COLMAP loader invariants for the ``colmap`` training-toolkit module.
 
 Checks the pycolmap loader and the point-cloud init produce self-consistent, static shapes with the
-right conventions (no GPU and no render needed).
+right conventions.
 """
 
 from __future__ import annotations
@@ -16,8 +16,9 @@ from scipy.spatial.transform import Rotation
 if TYPE_CHECKING:
     from pathlib import Path
 
+pytestmark = pytest.mark.colmap
 
-@pytest.mark.integration
+
 def test_parsers_and_conventions(drone_sparse: Path):
     cams, imgs, (xyz, rgb, ids, _) = read_reconstruction(drone_sparse)
 
@@ -39,7 +40,6 @@ def test_parsers_and_conventions(drone_sparse: Path):
     assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-5)
 
 
-@pytest.mark.integration
 def test_point_init_static_shapes(drone_sparse: Path):
     _, _, (xyz, rgb, _, _) = read_reconstruction(drone_sparse)
     n = 8000

@@ -184,9 +184,9 @@ def make_step(
         splats = tuple(p[k] for k in SPLAT_KEYS)
         if depth_loss:
             args = {"viewmat": vm, "background": bg, "render_depth": True, **camera}
-            img, depth = render_log(*splats, **args)
-            assert depth is not None
-            dpred = _bilinear_sample(depth, pts_uv)
+            colors, _ = render_log(*splats, **args)
+            img = colors[..., :3]
+            dpred = _bilinear_sample(colors[..., 3], pts_uv)
             npts = jnp.sum(pts_mask) + 1e-8
             # per-view scale normalization: divide the L1 residual by the mean target
             # depth so the term is dimensionless / scale-invariant.

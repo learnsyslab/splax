@@ -1,8 +1,9 @@
-"""N-aware init-scale correction for the ``colmap`` training-toolkit module.
+"""Init-scale correction of ``colmap.init_from_points``.
 
-CPU-only, data-independent (synthetic point cloud): checks the density-ratio
-scale correction is applied iff the fixed-N init pads the sparse cloud (n>m),
-and with exactly the (1/3)ln(n/m) log-space magnitude. See ``init_from_points``.
+The init draws a fixed number of gaussians from a sparse cloud, so it pads the cloud whenever more
+are asked for than it holds. Padding raises the local density, which the knn log-scales are
+corrected for by exactly ``(1/3)ln(n/m)``. The checks run on a synthetic cloud, so they depend on no
+reconstruction.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from colmap import init_from_points, knn_scales
+
+pytestmark = pytest.mark.colmap
 
 
 def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
@@ -19,7 +22,6 @@ def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     return xyz, rgb
 
 
-@pytest.mark.unit
 def test_padding_applies_density_ratio_correction():
     """When n>m, every original knn log-scale is lowered by exactly (1/3)ln(n/m)."""
     m, n = 500, 4000
@@ -36,7 +38,6 @@ def test_padding_applies_density_ratio_correction():
     assert np.allclose(ls[:, 0], ls[:, 1]) and np.allclose(ls[:, 0], ls[:, 2])
 
 
-@pytest.mark.unit
 def test_correction_scales_with_padding_ratio():
     """Offset tracks the padding ratio: n=8m is 3x lower than n=m in log space."""
     m = 500
@@ -52,7 +53,6 @@ def test_correction_scales_with_padding_ratio():
     assert np.isclose(off_large, np.log(8) / 3.0, atol=1e-5)
 
 
-@pytest.mark.unit
 def test_subsample_branch_has_no_correction():
     """Check that subsampling skips density correction when n is not padded."""
     m, n = 4000, 500

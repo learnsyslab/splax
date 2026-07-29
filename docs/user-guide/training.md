@@ -3,8 +3,8 @@
 `splax.render` composes the `jax.custom_vjp` projection and rasterization
 primitives, so `jax.grad` and `jax.value_and_grad` flow through it with respect
 to means, scales, quats, colors, and opacities. The viewmat, background, and
-rigid transforms are constants by default. The call always returns an
-`(image, depths)` pair. The depth slot is `None` unless `render_depth=True`.
+rigid transforms are constants by default. The call returns a `(colors, alpha)`
+pair and both outputs are differentiable.
 
 ```python
 def loss(means, scales, quats, colors, opacities):
@@ -44,12 +44,31 @@ pose_grad = jax.grad(loss)(viewmat)  # runs the camera-pose accumulator only
 
 ## Depth channel
 
-`render_depth=True` fills the depth slot of the returned `(image, depths)` pair
-with an alpha-blended expected-depth map `D = Σ wᵢ dᵢ`. The depth channel is
-differentiable and routes a cotangent through the gaussian geometry and camera
-pose. It uses a separate Warp kernel, so the plain render (`render_depth=False`,
-whose depth slot is `None`) never pays for it. This feeds COLMAP sparse-point
-depth regularization.
+`render_depth=True` widens the returned colors to `(H, W, 4)`, so `colors[..., :3]`
+is the RGB image and `colors[..., 3]` the coverage-normalized expected depth
+`D = sum_i w_i d_i / sum_i w_i`. The depth is a camera-space z along the optical axis rather
+than a Euclidean range, and it reads `0` on pixels that no gaussian covers. It is
+differentiable and routes a cotangent through the gaussian geometry and camera pose.
+It uses a separate Warp kernel, so a three-channel render never pays for it. This
+feeds COLMAP sparse-point depth regularization.
+
+```python
+rgbd, alpha = splax.render(
+    means, scales, quats, colors, opacities,
+    viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W),
+    f=(fx, fy), render_depth=True,
+)
+img, depth = rgbd[..., :3], rgbd[..., 3]
+confident_depth = depth * (alpha > 0.5)
+```
+
+## Coverage mask
+
+`alpha` is the accumulated alpha `sum_i w_i` of shape `(H, W)`, returned by every entry
+point and differentiable. Normalizing the expected depth by coverage means a pixel
+grazed by a single faint gaussian still reports a full-magnitude depth, so `alpha` is
+what separates a confident depth reading from a barely covered one. Threshold on it
+before supervising on depth or exporting a point cloud.
 
 ## Antialiased mode
 

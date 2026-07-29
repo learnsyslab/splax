@@ -41,14 +41,12 @@ KW = {"background": jnp.zeros(3), **camera(128, 128)}
 # region single render
 
 
-@pytest.mark.integration
 def test_render():
     """Render a random scene and check the image against the invariants of the blend."""
     means, scales, quats, colors, opacities, background = scene(20_000, seed=1, dense=True)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(128, 128)}
-    image, depth = splax.render(means, scales, quats, colors, opacities, **kw)
-    assert image.shape == (128, 128, 3)
-    assert depth is None
+    image, alpha = splax.render(means, scales, quats, colors, opacities, **kw)
+    assert image.shape == (128, 128, 3) and alpha.shape == (128, 128)
     image = np.asarray(image)
     assert np.isfinite(image).all()
     # the blend is convex over the colors and the background, all of which are drawn in [0, 1]
@@ -61,7 +59,6 @@ def test_render():
     )
 
 
-@pytest.mark.integration
 def test_render_log():
     """Match render_log against the render of the explicitly mapped splat."""
     means, log_scales, quats, logit_colors, logit_opacities, background = scene(4_000, seed=4)
@@ -70,7 +67,7 @@ def test_render_log():
     reference, _ = splax.render(
         means,
         jnp.exp(log_scales),
-        quats / (jnp.linalg.norm(quats, axis=-1, keepdims=True) + 1e-8),
+        quats,
         jax.nn.sigmoid(logit_colors),
         jax.nn.sigmoid(logit_opacities),
         **kw,
@@ -78,23 +75,32 @@ def test_render_log():
     np.testing.assert_array_equal(np.asarray(image), np.asarray(reference))
 
 
-@pytest.mark.integration
 def test_render_depth():
-    """Render the expected depth map alongside the image."""
+    """Render the expected depth map in the fourth image channel.
+
+    The splat sits around the world origin five units in front of the camera, so the covered pixels
+    must report camera depths on that order. The depth is a metric camera distance and leaves the
+    [0, 1] range a coverage would live in, which is what separates it from the accumulated alpha.
+    """
     means, scales, quats, colors, opacities, background = scene(N, seed=5, dense=True)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(128, 128)}
-    image, depth = splax.render(means, scales, quats, colors, opacities, render_depth=True, **kw)
-    assert depth.shape == (128, 128)
-    depth = np.asarray(depth)
+    image, alpha = splax.render(means, scales, quats, colors, opacities, render_depth=True, **kw)
+    assert image.shape == (128, 128, 4)
+    depth = np.asarray(image)[..., 3]
+    covered = np.asarray(alpha) > 0.0
     assert np.isfinite(depth).all()
     assert (depth >= 0.0).all(), "the expected depth is a positive weighted mean of camera depths"
-    assert depth.max() > 0.0
+    np.testing.assert_array_equal(depth > 0.0, covered)
+    # VIEWMAT places the camera five units from the scene, so the depths land in metric camera units
+    # well outside the [0, 1] a coverage is bounded to
+    assert depth[covered].max() > 1.0, "the depth is bounded like a coverage"
+    assert 4.0 < depth[covered].mean() < 6.0, "the depth is not on the order of the scene distance"
     # the depth accumulator is a separate kernel and must not perturb the color blend
-    plain, _ = splax.render(means, scales, quats, colors, opacities, **kw)
-    np.testing.assert_array_equal(np.asarray(image), np.asarray(plain))
+    plain, plain_alpha = splax.render(means, scales, quats, colors, opacities, **kw)
+    np.testing.assert_array_equal(np.asarray(image)[..., :3], np.asarray(plain))
+    np.testing.assert_array_equal(np.asarray(alpha), np.asarray(plain_alpha))
 
 
-@pytest.mark.integration
 def test_render_antialiased_changes_output():
     """Check that the Mip-Splatting opacity compensation moves the rendered image."""
     means, scales, quats, colors, opacities, background = scene(2_500, seed=3)
@@ -106,7 +112,6 @@ def test_render_antialiased_changes_output():
     assert np.abs(aa - plain).max() > 1e-3, "antialiased render must differ from plain"
 
 
-@pytest.mark.integration
 def test_render_jit_matches_eager():
     """Match splax.render under jit against the eager render byte for byte."""
     splats = scene(50_000, seed=99, dense=True)[:5]
@@ -119,23 +124,22 @@ def test_render_jit_matches_eager():
 # region batched render
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_vmap_matches_loop():
-    """Match vmap over batched splats and viewmats against the unbatched loop, image and depth."""
+    """Match vmap over batched splats and viewmats against the unbatched loop, image and alpha."""
     scenes = [scene(N, seed=s, dense=True)[:5] for s in (6, 7, 8)]
     batched = [jnp.stack([sc[i] for sc in scenes]) for i in range(5)]
     ref = [splax.render(*scenes[i], viewmat=VIEWS[i], render_depth=True, **KW) for i in range(3)]
     out = jax.vmap(
         lambda m, s, q, c, o, vm: splax.render(m, s, q, c, o, viewmat=vm, render_depth=True, **KW)
     )(*batched, VIEWS)
-    for k in range(2):  # 0 = image, 1 = depth
+    assert out[0].shape == (3, 128, 128, 4) and out[1].shape == (3, 128, 128)
+    for k in range(2):  # 0 = the RGB and depth image, 1 = the accumulated alpha
         stacked = jnp.stack([r[k] for r in ref])
         assert out[k].shape == stacked.shape
         np.testing.assert_array_equal(np.asarray(out[k]), np.asarray(stacked))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_vmap_jit_matches_loop():
     """Match jit(vmap(render)) over B=3 viewmats against the unbatched loop."""
@@ -145,7 +149,6 @@ def test_render_vmap_jit_matches_loop():
     np.testing.assert_array_equal(np.asarray(fn(VIEWS)), np.asarray(ref))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_vmap_batch1_matches_unbatched():
     """Match a B=1 vmap against the plain unbatched render."""
@@ -157,7 +160,6 @@ def test_render_vmap_batch1_matches_unbatched():
     np.testing.assert_array_equal(np.asarray(b1[0]), np.asarray(unbatched))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_vmap_larger_batch():
     """Render B=8 at a larger resolution, where the image-id/tile-id key packing is stressed."""
@@ -169,7 +171,6 @@ def test_render_vmap_larger_batch():
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_log_vmap_matches_loop():
     """Match vmap(render_log) over B=3 viewmats against the unbatched loop."""
@@ -189,7 +190,6 @@ def test_render_log_vmap_matches_loop():
 # region broadcast render
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_broadcast():
     """Match vmap over B=3 viewmats with a shared splat against the unbatched loop."""
@@ -200,7 +200,6 @@ def test_render_broadcast():
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_broadcast_splats():
     """Match vmap over batched splats with a shared viewmat against the unbatched loop."""
@@ -212,7 +211,6 @@ def test_render_broadcast_splats():
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_vmap_nested_grid():
     """Nested vmap over an A splats x B viewmats grid == the A x B double loop."""
@@ -235,7 +233,6 @@ def test_render_vmap_nested_grid():
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-@pytest.mark.integration
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_render_broadcast_nested_transforms():
     """Nested vmap with a shared splat, viewmats on both axes, and transforms on the outer axis."""
@@ -273,7 +270,6 @@ def test_render_broadcast_nested_transforms():
 # faithful_64bit_keys fixture.
 
 
-@pytest.mark.integration
 def test_render_vmap_packed_matches_loop():
     """Match the packed batched render against the unbatched loop to a perceptual bound."""
     m, s, q, c, o, _bg = scene(12_000, seed=11, dense=True)
@@ -299,7 +295,6 @@ def test_render_vmap_packed_matches_loop():
 # region gsplat parity
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 @pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
 def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
@@ -314,7 +309,7 @@ def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     splats = (means, scales, quats, colors, opacities)
     a = np.asarray(splax.render(*splats, **kw)[0])
-    b = gsplat_shim.render(*splats, **kw)
+    b, _b_alpha = gsplat_shim.render(*splats, **kw)
     assert a.shape == b.shape
     mse = float(np.mean((a - b) ** 2))
     psnr = -10 * np.log10(mse) if mse > 0 else float("inf")
@@ -323,7 +318,6 @@ def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
     assert np.abs(a - b).max() < 0.03, f"max abs diff {np.abs(a - b).max():.3f}"
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 def test_render_vs_gsplat_lego(
     gsplat_shim: ModuleType, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
@@ -347,7 +341,7 @@ def test_render_vs_gsplat_lego(
         "c": (W // 2, H // 2),
     }
     a = np.asarray(splax.render(*splats, **kw)[0])
-    b = gsplat_shim.render(*splats, **kw)
+    b, _b_alpha = gsplat_shim.render(*splats, **kw)
     mse = float(np.mean((a - b) ** 2))
     psnr = -10 * np.log10(mse) if mse > 0 else float("inf")
     # Measured ~82 dB on this pose, bounded well below with margin for scene detail.

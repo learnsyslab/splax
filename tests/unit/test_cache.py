@@ -24,7 +24,6 @@ from splax._rasterize._sort._kernels import map_intersects_64bit
 # region scratch invariants
 
 
-@pytest.mark.unit
 def test_scratch_reuse_across_sizes():
     """Persistent grow-only scratch must not leak state between renders.
 
@@ -37,16 +36,15 @@ def test_scratch_reuse_across_sizes():
     for n, H, W in configs:
         args = projected(n, H, W, seed=n)
         # render while scratch is warm from previous (differently sized) iterations
-        warm = np.asarray(splax.rasterize(*args, img_shape=(H, W)))
+        warm = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
         # clean reference: drop all cached scratch, render the identical scene again
         splax.clear_cache()
-        cold = np.asarray(splax.rasterize(*args, img_shape=(H, W)))
+        cold = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
         assert np.array_equal(warm, cold), (
             f"scratch reuse changed output at n={n} {H}x{W}: max|d|={np.abs(warm - cold).max():.2e}"
         )
 
 
-@pytest.mark.unit
 def test_scratch_released_on_signature_change():
     """Test that switching to a smaller workload releases a bigger sort scratch."""
     dev = wp.get_device()
@@ -61,7 +59,6 @@ def test_scratch_released_on_signature_change():
 # region packed 32-bit sort key
 
 
-@pytest.mark.unit
 def test_packed_key_matches_64bit():
     """The packed 32-bit key agrees with the 64-bit key to a high perceptual bound.
 
@@ -78,7 +75,6 @@ def test_packed_key_matches_64bit():
     assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
 
 
-@pytest.mark.unit
 def test_packed_key_falls_back_when_bits_dont_fit():
     """When image+tile bits leave <16 for depth, the 64-bit key is used (fallback).
 
@@ -115,7 +111,6 @@ def test_packed_key_falls_back_when_bits_dont_fit():
 # emit must agree exactly or the per-gaussian sort buffer offsets corrupt.
 
 
-@pytest.mark.unit
 @pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
 def test_tile_emission_matches_count(n: int, H: int, W: int):
     """The AccuTile key-emission writes EXACTLY n_tiles_hit keys per gaussian.

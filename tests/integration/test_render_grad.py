@@ -21,15 +21,12 @@ Tolerances. Float32 central differences land within 8e-2 relative of the analyti
 derivative, the residual being intrinsic to splatting's hard 1/255 cull and early-termination
 discontinuities, which an FD step crosses. The vmap and the sequential path differ only by float32
 atomic-add ordering across the launch geometry, which stays well under 1e-3 relative. Against
-gsplat the well-behaved parameters agree to ~1e-4 relative Frobenius, so a 2e-3 bound holds with
-margin. The quaternion gradient is the one convention difference. gsplat normalizes quaternions
-internally, so its gradient lives in the unit-sphere tangent space at q, while splax treats
-quaternions as already unit and keeps the radial component too. The quaternion gradients are
-compared after projecting splax's onto that tangent space.
+gsplat every parameter agrees to ~1e-4 relative Frobenius, so a 2e-3 bound holds with margin.
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import jax
@@ -37,7 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.spatial.transform import RigidTransform
-from utils import VIEWMAT, camera, poses, scene
+from utils import VIEWMAT, assert_finite_difference, camera, poses, scene
 
 import splax
 
@@ -66,7 +63,6 @@ def _assert_grads_close(name: str, batched: jax.Array, sequential: jax.Array):
 # region gradient
 
 
-@pytest.mark.integration
 def test_render_grad():
     """Produce finite, nonzero gradients for the five splat parameters and the viewmat."""
     n, H, W = 2000, 96, 96
@@ -89,7 +85,6 @@ def test_render_grad():
         assert np.linalg.norm(grad) > 0.0, f"{name}: zero grad"
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("antialiased", [False, True])
 def test_render_grad_finite_difference(antialiased: bool):
     """Match the analytic directional derivative against central finite differences.
@@ -111,26 +106,9 @@ def test_render_grad_finite_difference(antialiased: bool):
 
     args = (means, scales, quats, colors, opacities)
     grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
-
-    # Perturb ALONG the gradient (per-array unit direction). This maximizes the directional
-    # derivative signal relative to float32 render noise, the standard well-conditioned gradient
-    # check. The residual ~3% is intrinsic to splatting's hard 1/255-cull / early-termination
-    # discontinuities, which FD steps cross, hence the loose bound.
-    dirs = [g / (jnp.linalg.norm(g) + 1e-12) for g in grads]
-    analytic = sum(float(jnp.vdot(g, d)) for g, d in zip(grads, dirs))
-
-    eps = 2e-3
-    plus = [a + eps * d for a, d in zip(args, dirs)]
-    minus = [a - eps * d for a, d in zip(args, dirs)]
-    numeric = (float(loss(*plus)) - float(loss(*minus))) / (2 * eps)
-
-    rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, (
-        f"FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
-    )
+    assert_finite_difference(loss, args, grads)
 
 
-@pytest.mark.integration
 def test_render_grad_jit_matches_eager():
     """Match the jitted gradients against the eager gradients."""
     n, H, W = 2000, 128, 128
@@ -149,7 +127,6 @@ def test_render_grad_jit_matches_eager():
         assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.integration
 def test_render_grad_viewmat():
     """Check the camera-pose gradient with directional finite differences."""
     n, H, W = 4000, 120, 120
@@ -161,24 +138,14 @@ def test_render_grad_viewmat():
         img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
         return jnp.mean(weights * img)
 
-    grad = np.asarray(jax.grad(loss)(VIEWMAT))
-    assert np.all(np.isfinite(grad)), "viewmat grad has non-finite entries"
-    assert np.allclose(grad[3], 0.0), "last viewmat row must have zero grad (constant)"
-    # Unit direction on the 12 differentiable entries only.
-    direction = np.zeros((4, 4), np.float32)
-    direction[:3] = grad[:3] / (np.linalg.norm(grad[:3]) + 1e-12)
-    analytic = float(np.vdot(grad, direction))
-    eps = 1e-3
-    plus = float(loss(VIEWMAT + jnp.asarray(direction * eps)))
-    minus = float(loss(VIEWMAT - jnp.asarray(direction * eps)))
-    numeric = (plus - minus) / (2 * eps)
-    rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, (
-        f"viewmat FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
-    )
+    grad = jax.grad(loss)(VIEWMAT)
+    assert np.all(np.isfinite(np.asarray(grad))), "viewmat grad has non-finite entries"
+    assert np.allclose(np.asarray(grad)[3], 0.0), "the viewmat bottom row is constant"
+    # The bottom row is constant, so the step stays on the 12 differentiable entries.
+    differentiable = grad.at[3].set(0.0)
+    assert_finite_difference(loss, (VIEWMAT,), (differentiable,), eps=1e-3, name="viewmat ")
 
 
-@pytest.mark.integration
 def test_render_grad_viewmat_pose_chain_rule():
     """Check the gradient through an se3 pose parameterization with finite differences."""
     n, H, W = 4000, 120, 120
@@ -200,21 +167,11 @@ def test_render_grad_viewmat_pose_chain_rule():
         img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
         return jnp.mean(weights * img)
 
-    grad = np.asarray(jax.grad(loss)(xi0))
-    assert np.all(np.isfinite(grad)) and np.linalg.norm(grad) > 0
-    direction = grad / (np.linalg.norm(grad) + 1e-12)
-    eps = 1e-3
-    plus = float(loss(xi0 + jnp.asarray(direction * eps)))
-    minus = float(loss(xi0 - jnp.asarray(direction * eps)))
-    numeric = (plus - minus) / (2 * eps)
-    analytic = float(np.dot(grad, direction))
-    rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, (
-        f"pose chain-rule FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
-    )
+    grad = jax.grad(loss)(xi0)
+    assert np.all(np.isfinite(np.asarray(grad))) and np.linalg.norm(np.asarray(grad)) > 0
+    assert_finite_difference(loss, (xi0,), (grad,), eps=1e-3, name="pose chain-rule ")
 
 
-@pytest.mark.integration
 def test_render_grad_selection_consistency():
     """Match the joint-kernel gradients against the single-path kernel gradients."""
     n, H, W = 3000, 110, 110
@@ -239,7 +196,6 @@ def test_render_grad_selection_consistency():
 # region broadcasted gradient
 
 
-@pytest.mark.integration
 def test_render_grad_vmap_matches_loop():
     """Match the vmapped gaussian gradients against the sequential gradients."""
     n, H, W = 500, 96, 96
@@ -258,7 +214,6 @@ def test_render_grad_vmap_matches_loop():
     assert np.allclose(batched, sequential, rtol=2e-3, atol=1e-4)
 
 
-@pytest.mark.integration
 def test_render_grad_vmap_matches_loop_multiview():
     """Match per-image gaussian gradients under batched poses against the sequential stack."""
     n, H, W = 800, 96, 96
@@ -277,7 +232,6 @@ def test_render_grad_vmap_matches_loop_multiview():
     _assert_grads_close("batched means", batched, sequential)
 
 
-@pytest.mark.integration
 def test_render_grad_viewmat_vmap_matches_loop():
     """Match the vmapped per-pose camera gradients against the sequential gradients."""
     n, H, W = 800, 96, 96
@@ -296,7 +250,6 @@ def test_render_grad_viewmat_vmap_matches_loop():
     assert np.allclose(np.asarray(batched)[:, 3, :], 0.0), "viewmat bottom row must be constant"
 
 
-@pytest.mark.integration
 def test_render_grad_viewmat_vmap_finite_difference():
     """Check one batched camera gradient with directional finite differences.
 
@@ -313,22 +266,15 @@ def test_render_grad_viewmat_vmap_finite_difference():
         img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
         return jnp.mean(weights[i] * img)
 
-    grad = np.asarray(jax.vmap(jax.grad(loss))(viewmats, jnp.arange(B)))[0]
-    assert np.all(np.isfinite(grad))
-    direction = np.zeros((4, 4), np.float32)
-    direction[:3] = grad[:3] / (np.linalg.norm(grad[:3]) + 1e-12)
-    analytic = float(np.vdot(grad, direction))
-    eps = 1e-3
-    plus = float(loss(viewmats[0] + jnp.asarray(direction * eps), 0))
-    minus = float(loss(viewmats[0] - jnp.asarray(direction * eps), 0))
-    numeric = (plus - minus) / (2 * eps)
-    rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < 8e-2, (
-        f"batched viewmat FD mismatch: {analytic:.3e} vs {numeric:.3e} (rel {rel:.2e})"
+    grad = jax.vmap(jax.grad(loss))(viewmats, jnp.arange(B))[0]
+    assert np.all(np.isfinite(np.asarray(grad)))
+    # The bottom row is constant, so the step stays on the 12 differentiable entries.
+    differentiable = grad.at[3].set(0.0)
+    assert_finite_difference(
+        partial(loss, i=0), (viewmats[0],), (differentiable,), eps=1e-3, name="batched viewmat "
     )
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("param", PARAMS)
 def test_render_grad_broadcast_summed(param: str):
     """Match the summed per-image gradient of a broadcast parameter against the total-loss one.
@@ -356,7 +302,6 @@ def test_render_grad_broadcast_summed(param: str):
     _assert_grads_close(f"{param} broadcast", jnp.sum(per_image, axis=0), total)
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("param", ["means", "colors", "opacities"])
 def test_render_grad_broadcast_geometry(param: str):
     """Match the vmapped gradients of a render shared across the batch against the loop.
@@ -384,7 +329,6 @@ def test_render_grad_broadcast_geometry(param: str):
 # region gsplat equivalence
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 @pytest.mark.parametrize("n,H,W", [(3000, 128, 128), (8000, 160, 160)])
 @pytest.mark.parametrize("which", ["sum", "wmse"])
@@ -403,24 +347,14 @@ def test_render_grad_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: 
     weight = None if which == "sum" else np.asarray(weights)
     reference = gsplat_shim.grad(*splat, **kw, weight=weight)
 
-    unit_quats = np.asarray(quats)
     for name, grad, ref in zip(PARAMS, grads, reference):
         grad, ref = np.asarray(grad), np.asarray(ref)
-        if name == "quats":
-            # gsplat differentiates through its internal quat normalization, so its grad lives in
-            # the tangent space at q (orthogonal to q). Project splax's onto the same space (drop
-            # the radial component) before comparing.
-            grad = grad - np.sum(grad * unit_quats, axis=-1, keepdims=True) * unit_quats
-            tol = 5e-3
-        else:
-            tol = 2e-3
         # Relative Frobenius is the meaningful metric across the two kernels. The whole gradient
-        # field agrees to ~1e-4 relative (quats tangential ~2e-5).
+        # field agrees to ~1e-4 relative.
         rel = np.linalg.norm(grad - ref) / (np.linalg.norm(ref) + 1e-12)
-        assert rel < tol, f"{which}/{name} relative grad error {rel:.2e}"
+        assert rel < 2e-3, f"{which}/{name} relative grad error {rel:.2e}"
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 def test_render_grad_vs_gsplat_lego_viewmat(
     gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path
@@ -446,7 +380,7 @@ def test_render_grad_vs_gsplat_lego_viewmat(
 
     # Render the target in the same framework to reduce noise from framework differences.
     target = splax.render(means, scales, quats, colors, opacities, viewmat=target_viewmat, **kw)[0]
-    gsplat_target = gsplat_shim.render(
+    gsplat_target, _gsplat_alpha = gsplat_shim.render(
         means, scales, quats, colors, opacities, viewmat=target_viewmat, **kw
     )
 

@@ -22,7 +22,6 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.mark.unit
 def test_viewer_roundtrip():
     """Add (jax and numpy inputs), update, and remove splats on a live server."""
     rng = np.random.default_rng(0)

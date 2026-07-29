@@ -21,7 +21,6 @@ from utils import VIEWMAT, camera, manual_move, scene
 import splax
 
 
-@pytest.mark.unit
 def test_projection_matches_manual_transform():
     """Kernel transform vs pre-transformed inputs, same projection outputs.
 
@@ -55,7 +54,6 @@ def test_projection_matches_manual_transform():
     np.testing.assert_allclose(np.asarray(a[3])[live], np.asarray(b[3])[live], atol=1e-3)
 
 
-@pytest.mark.unit
 def test_invalid_transform_inputs_raise():
     means, scales, quats, colors, opac, bg = scene(1000, seed=6)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(64, 64)}

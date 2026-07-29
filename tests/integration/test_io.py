@@ -1,7 +1,6 @@
-"""PLY export round-trip on a real scene, and asset fetching.
+"""Test I/O operations.
 
-A real scene (lego.ply) written to a copy then reloaded must render to the same image, fit-free,
-just the load/write/load/render loop.
+A real scene written to a copy then reloaded must render to the same image.
 
 ``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral port: download, cache
 hit, force re-download, ETag-based invalidation, and the ``SPLAX_CACHE`` environment fallback.
@@ -34,9 +33,8 @@ def lookat_viewmats(center: np.ndarray, radius: float, n_views: int) -> jax.Arra
     return jnp.asarray(splax.utils.look_at(eyes, center))
 
 
-@pytest.mark.integration
 def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
-    """Fit-free: load lego.ply, write copy, reload, identical render."""
+    """Render a real scene the same after a write and reload of its ``.ply``."""
     splats = load_ply(lego_ply)
     copy = tmp_path / "lego_copy.ply"
     splax.io.write_ply(copy, *splats)
@@ -49,10 +47,11 @@ def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
     kw = {"viewmat": viewmat, "background": jnp.ones(3), **camera(200, 200)}
     img1 = np.asarray(splax.render(*splats, **kw)[0])
     img2 = np.asarray(splax.render(*splats2, **kw)[0])
-    # Activation round-trip (log/exp, logit/sigmoid) is ULP-level, the render is
-    # essentially identical. Splatting's hard 1/255 cull can flip a handful of
-    # pixels, so bound by max abs diff rather than requiring bit-exactness.
-    assert np.max(np.abs(img1 - img2)) < 1e-3
+    # The activation round-trip through log/exp and logit/sigmoid moves the parameters by a few ulp,
+    # which the hard 1/255 cull can turn into a handful of flipped pixels, so the renders are bound
+    # by their max abs difference rather than by bit-exactness.
+    deviation = np.max(np.abs(img1 - img2))
+    assert deviation < 1e-3, f"PLY roundtrip render deviates by {deviation:.2e}"
 
 
 @pytest.fixture
@@ -88,7 +87,6 @@ def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
     server.server_close()
 
 
-@pytest.mark.integration
 def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """First fetch downloads the file into the cache dir with matching bytes."""
     srv_dir, url, _ = file_server
@@ -102,7 +100,6 @@ def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Pat
     assert path.read_bytes() == b"splat bytes"
 
 
-@pytest.mark.integration
 def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """Second fetch returns the same path without touching the network."""
     srv_dir, url, requests = file_server
@@ -117,7 +114,6 @@ def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Pat
     assert len(requests) == 1  # No new request on the cache hit.
 
 
-@pytest.mark.integration
 def test_fetch_unchecked_serves_cache(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """allow_unchecked serves the cache without contacting the remote, even once that is gone."""
     srv_dir, url, requests = file_server
@@ -133,7 +129,6 @@ def test_fetch_unchecked_serves_cache(file_server: tuple[Path, str, list[str]], 
     assert len(requests) == 1
 
 
-@pytest.mark.integration
 def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """force=True re-downloads and overwrites the cached copy."""
     srv_dir, url, _ = file_server
@@ -150,7 +145,6 @@ def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_p
     assert forced.read_bytes() == b"new bytes"
 
 
-@pytest.mark.integration
 def test_fetch_etag_invalidates_cache(tmp_path: Path):
     """A cache hit is reused while the remote ETag is unchanged, and refetched when it changes."""
     state = {"body": b"v1 bytes", "etag": '"aaa"', "gets": 0}
@@ -191,7 +185,6 @@ def test_fetch_etag_invalidates_cache(tmp_path: Path):
         server.server_close()
 
 
-@pytest.mark.integration
 def test_fetch_without_etag(tmp_path: Path):
     """A remote that sends no ETag still downloads, re-fetching on every call."""
     state = {"body": b"no etag bytes", "gets": 0}
@@ -227,7 +220,6 @@ def test_fetch_without_etag(tmp_path: Path):
         server.server_close()
 
 
-@pytest.mark.integration
 def test_fetch_env_cache(
     file_server: tuple[Path, str, list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

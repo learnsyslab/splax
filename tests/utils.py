@@ -1,10 +1,13 @@
-"""Scene and camera builders shared across the splax test suite.
+"""Scene builders and shared assertions of the splax test suite.
 
-``scene`` draws a random splat, in either of the two regimes the suite needs. ``camera`` builds the
-matching intrinsics for a square-focal pinhole.
+``scene`` draws a random splat, in either of the two regimes the suite needs, and ``camera`` builds
+the matching intrinsics for a square-focal pinhole. ``assert_finite_difference`` is the numeric
+check every gradient test runs against.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +17,9 @@ from scipy.spatial.transform import Rotation as R
 
 import splax
 import splax._rasterize._sort._sort as _sort
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 VIEWMAT = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
 # Three views panning along x, the B=3 batch the vmap tests compare against their unbatched loop.
@@ -88,16 +94,53 @@ def manual_move(
     return m2, q2
 
 
+def assert_finite_difference(
+    loss: Callable[..., jax.Array],
+    args: tuple[jax.Array, ...],
+    grads: tuple[jax.Array, ...],
+    *,
+    eps: float = 2e-3,
+    rtol: float = 8e-2,
+    name: str = "",
+):
+    """Match the analytic directional derivative of a loss against central finite differences.
+
+    Every argument steps along its own unit gradient direction at once, which maximizes the
+    directional-derivative signal against the float32 render noise.
+
+    Args:
+        loss: Scalar loss of ``args``.
+        args: The arguments the loss is differentiated with respect to.
+        grads: The analytic gradients of the loss at ``args``, in the order of ``args``.
+        eps: Central-difference step along each direction.
+        rtol: Relative bound on the mismatch between the analytic and the numeric derivative.
+        name: Prefix identifying the check in the assertion message.
+    """
+    directions = [g / (jnp.linalg.norm(g) + 1e-12) for g in grads]
+    analytic = sum(float(jnp.vdot(g, d)) for g, d in zip(grads, directions))
+    plus = float(loss(*(a + eps * d for a, d in zip(args, directions))))
+    minus = float(loss(*(a - eps * d for a, d in zip(args, directions))))
+    numeric = (plus - minus) / (2 * eps)
+    rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
+    assert rel < rtol, (
+        f"{name}FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
+    )
+
+
 def rasterize_both_keymodes(args: tuple[jax.Array, ...], H: int, W: int) -> tuple[np.ndarray, ...]:
-    """Rasterize the same inputs with the packed 32-bit key and the 64-bit key."""
+    """Rasterize the same inputs with the packed 32-bit key and the 64-bit key.
+
+    Returns:
+        The two blended ``(H, W, 3)`` images.
+    """
     orig = _sort._use_32bit_keys
     try:
         splax.clear_cache()
         _sort._use_32bit_keys = lambda depth_bits: depth_bits >= 16  # ty: ignore[invalid-assignment]
-        packed = np.asarray(splax.rasterize(*args, img_shape=(H, W)))
+        packed = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
         splax.clear_cache()
         _sort._use_32bit_keys = lambda depth_bits: False  # ty: ignore[invalid-assignment]
-        wide = np.asarray(splax.rasterize(*args, img_shape=(H, W)))
+        wide = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
     finally:
         _sort._use_32bit_keys = orig
         splax.clear_cache()

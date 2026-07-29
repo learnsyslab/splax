@@ -26,7 +26,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 from utils import VIEWMAT, camera, manual_move, scene
@@ -34,7 +33,6 @@ from utils import VIEWMAT, camera, manual_move, scene
 import splax
 
 
-@pytest.mark.integration
 def test_identity_transforms_byte_identical():
     n = 4000
     means, scales, quats, colors, opac, bg = scene(n, seed=1)
@@ -56,7 +54,6 @@ def test_identity_transforms_byte_identical():
     assert np.array_equal(plain, ident)
 
 
-@pytest.mark.integration
 def test_render_matches_manual_transform():
     """Match transformed render against manual reference."""
     n = 4000
@@ -86,7 +83,6 @@ def test_render_matches_manual_transform():
     assert np.abs(moved - plain).max() > 1e-2
 
 
-@pytest.mark.integration
 def test_vmap_over_transforms_matches_sequential():
     """Match vmap transform output against sequential output."""
     n, B = 4000, 3
@@ -116,7 +112,6 @@ def test_vmap_over_transforms_matches_sequential():
     assert np.abs(out[0] - out[B - 1]).max() > 1e-2
 
 
-@pytest.mark.integration
 def test_two_objects_move_independently():
     """Move two slices independently and match the manual reference."""
     n = 4000
@@ -222,7 +217,6 @@ def _setup(seed: int) -> tuple:
     return means, scales, quats, (colors, opac, kw, target)
 
 
-@pytest.mark.integration
 def test_identity_transforms_match_plain_grads():
     means, scales, quats, extras = _setup(seed=2)
     eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (K, 4, 4))
@@ -238,7 +232,6 @@ def test_identity_transforms_match_plain_grads():
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-8, err_msg=name)
 
 
-@pytest.mark.integration
 def test_gaussian_grads_match_jax_reference():
     means, scales, quats, extras = _setup(seed=3)
     tfs = _tfs(ROTVECS, TRANS)
@@ -255,7 +248,6 @@ def test_gaussian_grads_match_jax_reference():
     np.testing.assert_allclose(tang(np.asarray(gk[2])), tang(np.asarray(gr[2])), atol=2e-6)
 
 
-@pytest.mark.integration
 def test_pose_grads_match_jax_reference():
     """Transform gradients, contracted to rotvec + translation pose coordinates."""
     means, scales, quats, extras = _setup(seed=4)
@@ -273,7 +265,6 @@ def test_pose_grads_match_jax_reference():
     assert np.abs(np.asarray(gk[0])).max() > 0 and np.abs(np.asarray(gk[1])).max() > 0
 
 
-@pytest.mark.integration
 def test_transform_grad_bottom_row_zero():
     means, scales, quats, extras = _setup(seed=5)
     tfs = _tfs(ROTVECS, TRANS)
@@ -281,7 +272,6 @@ def test_transform_grad_bottom_row_zero():
     assert np.abs(np.asarray(g_tf)[:, 3, :]).max() == 0.0
 
 
-@pytest.mark.integration
 def test_vmap_grad_over_transform_stack():
     means, scales, quats, extras = _setup(seed=6)
     stack = jnp.stack([_tfs(ROTVECS, TRANS), _tfs(-ROTVECS, -TRANS)])
@@ -291,7 +281,6 @@ def test_vmap_grad_over_transform_stack():
     np.testing.assert_allclose(np.asarray(gb), np.stack(seq), rtol=1e-5, atol=1e-8)
 
 
-@pytest.mark.integration
 def test_vmap_grad_over_viewmats_with_transforms():
     means, scales, quats, extras = _setup(seed=7)
     colors, opac, kw, target = extras

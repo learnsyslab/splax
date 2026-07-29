@@ -56,7 +56,6 @@ def _assert_parity(
     np.testing.assert_allclose(conics_s[mask], conics_g[mask], atol=2e-3, rtol=1e-3)
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 def test_project_vs_gsplat(gsplat_shim: ModuleType):
     means, scales, quats, *_ = scene(10_000, seed=1, dense=True)
@@ -66,7 +65,6 @@ def test_project_vs_gsplat(gsplat_shim: ModuleType):
     _assert_parity(splax_out, gsplat_shim.project(means, scales, quats, VIEWMAT, **kw))
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 def test_project_vs_gsplat_jit(gsplat_shim: ModuleType):
     means, scales, quats, *_ = scene(10_000, seed=2, dense=True)
@@ -77,7 +75,6 @@ def test_project_vs_gsplat_jit(gsplat_shim: ModuleType):
     _assert_parity(splax_out, gsplat_shim.project(means, scales, quats, VIEWMAT, **kw))
 
 
-@pytest.mark.integration
 @pytest.mark.gsplat
 def test_project_vs_gsplat_lego(gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path):
     means, scales, quats, _colors, _opacities = splax.io.load_ply(lego_ply)

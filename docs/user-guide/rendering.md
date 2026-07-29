@@ -1,7 +1,8 @@
 # Rendering
 
-`splax.render` is the rendering entry point. The call returns an `(image, depths)` pair
-whose depth slot is `None` unless `render_depth=True`; gradients are covered under [Training](training.md).
+`splax.render` is the rendering entry point. The call returns a `(colors, alpha)` pair,
+where `colors` is the `(H, W, 3)` image and `alpha` the `(H, W)` accumulated coverage.
+Gradients are covered under [Training](training.md).
 
 ```python
 img, _ = splax.render(
@@ -95,7 +96,8 @@ The transforms are differentiable, see
 public.
 
 - `splax.project` maps gaussians to screen-space `(xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit)`.
-- `splax.rasterize` blends the projected gaussians into the `(H, W, 3)` image.
+- `splax.rasterize` blends the projected gaussians into a `(H, W, 3)` image and its `(H, W)` alpha.
+- `splax.rasterize_depth` blends into a `(H, W, 4)` image whose fourth channel is the expected depth, plus the same `(H, W)` alpha.
 
 The Warp backend caches grow-only sort and bin scratch across renders.
 `splax.clear_cache` releases it, for example before switching to a very

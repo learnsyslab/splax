@@ -48,7 +48,7 @@ def project(
     Args:
         mean3ds: Gaussian centers, shape ``(N, 3)``.
         scales: Per-axis scales, shape ``(N, 3)``.
-        quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
+        quats: Rotations as wxyz quaternions, not necessarily normalized, shape ``(N, 4)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
         opacities: Gaussian opacities, shape ``(N,)``.
         img_shape: Image size as ``(height, width)`` in pixels.

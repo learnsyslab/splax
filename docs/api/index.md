@@ -6,7 +6,7 @@ distillation module are not included.
 
 | Module | Description |
 |---|---|
-| `splax` | `render` / `render_log` and the low-level `project` / `rasterize` primitives |
+| `splax` | `render` / `render_log` and the low-level `project` / `rasterize` / `rasterize_depth` primitives |
 | `splax.mcmc` | Fixed-budget MCMC training utilities |
 | `splax.io` | 3DGS `.ply` load and write |
 

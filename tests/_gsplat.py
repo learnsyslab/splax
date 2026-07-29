@@ -11,6 +11,11 @@ Convention differences:
   - Intrinsics: gsplat takes a 3x3 K matrix rather than separate f and c values.
   - glob_scale: gsplat is missing a global scale.
   - Camera z clipping: gsplat uses `near_plane` instead of `clip_thresh`.
+  - Alpha: gsplat returns the accumulated alpha with a trailing singleton channel, splax as (H, W).
+  - Depth: gsplat appends the depth as an extra image channel selected by `render_mode`, where
+    `"ED"` renders the expected depth `sum_i w_i z_i / sum_i w_i` as splax does. gsplat clamps the
+    denominator at 1e-10, which lands on splax's depth 0 for pixels no gaussian covers and never
+    binds elsewhere, because a contributing gaussian carries at least the 1/255 alpha cull.
 """
 
 from __future__ import annotations
@@ -85,8 +90,13 @@ def render(
     c: tuple[float, float],
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
-) -> np.ndarray:
-    """Gsplat ``rasterization`` in splax.render's terms. Returns numpy (H, W, 3)."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Gsplat ``rasterization`` in splax.render's terms.
+
+    Returns:
+        The numpy image ``(H, W, 3)`` on the requested background and the accumulated alpha
+        ``(H, W)``.
+    """
     H, W = img_shape
     out, alpha, _ = gsplat.rasterization(
         cuda_tensor(means),
@@ -103,9 +113,54 @@ def render(
         render_mode="RGB",
     )
     # gsplat returns colors composited over black plus the accumulated alpha. Put it on the
-    # requested background exactly as splax.render does.
+    # requested background exactly as splax.render does. gsplat carries a trailing singleton on the
+    # alpha, splax leaves it out.
     img = out[0] + (1.0 - alpha[0]) * cuda_tensor(background).reshape(3)
-    return img.detach().cpu().numpy()
+    return img.detach().cpu().numpy(), alpha[0, ..., 0].detach().cpu().numpy()
+
+
+def render_depth(
+    means: jax.Array | np.ndarray,
+    scales: jax.Array | np.ndarray,
+    quats: jax.Array | np.ndarray,
+    colors: jax.Array | np.ndarray,
+    opacities: jax.Array | np.ndarray,
+    *,
+    viewmat: jax.Array | np.ndarray,
+    background: jax.Array | np.ndarray,
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+    glob_scale: float = 1.0,
+    clip_thresh: float = 0.01,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Gsplat ``rasterization`` in splax.rasterize_depth's terms.
+
+    Returns:
+        The numpy image ``(H, W, 4)`` on the requested background, RGB in the first three channels
+        and the expected depth in camera units in the fourth, and the accumulated alpha ``(H, W)``.
+    """
+    H, W = img_shape
+    out, alpha, _ = gsplat.rasterization(
+        cuda_tensor(means),
+        cuda_tensor(quats),
+        cuda_tensor(scales) * float(glob_scale),
+        cuda_tensor(opacities),
+        cuda_tensor(colors),
+        cuda_tensor(viewmat)[None],
+        cuda_tensor(intrinsics(f, c))[None],
+        W,
+        H,
+        near_plane=float(clip_thresh),
+        eps2d=0.3,
+        render_mode="RGB+ED",
+    )
+    # gsplat returns colors composited over black plus the accumulated alpha. Put it on the
+    # requested background exactly as splax.render does. The depth rides in the last channel and
+    # carries no background, it is a coverage-normalized camera depth rather than a colour.
+    rgb = out[0, ..., :3] + (1.0 - alpha[0]) * cuda_tensor(background).reshape(3)
+    img = torch.cat([rgb, out[0, ..., 3:]], dim=-1)
+    return img.detach().cpu().numpy(), alpha[0, ..., 0].detach().cpu().numpy()
 
 
 def viewmat_grad(

@@ -1,7 +1,8 @@
 """Differentiable rasterization stage.
 
-``rasterize`` and ``rasterize_depth`` blend the projected gaussians into an image. The depth variant
-additionally renders an expected depth map.
+``rasterize`` and ``rasterize_depth`` blend the projected gaussians into an image and the
+accumulated alpha map. The depth variant packs an expected depth map in camera-space z into the
+fourth image channel.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from functools import partial
 
 import jax
+import jax.numpy as jnp
 
 from splax._rasterize._kernels import (
     rasterize_bwd_depth_ffi,
@@ -32,17 +34,21 @@ def rasterize(
     *,
     img_shape: tuple[int, int],
     map_opacities: jax.Array | None = None,
-) -> jax.Array:
-    """Blend projected gaussians into an (H, W, 3) image.
+) -> tuple[jax.Array, jax.Array]:
+    """Blend projected gaussians into an image and an accumulated alpha map.
 
     Differentiable with respect to colors, opacities, xys, and conics. background, depths, radii,
     and cum_tiles_hit are non-differentiable.
+
+    Returns:
+        The ``(H, W, 3)`` image and the ``(H, W)`` accumulated alpha, the coverage the gaussians
+        coming out of the blend contribute, which is 0 on pixels no gaussian covers.
     """
     n = colors.shape[0]
     H, W = img_shape
     if map_opacities is None:
         map_opacities = opacities
-    out_img, _, _ = _rasterize(
+    out_img, final_Ts, _ = _rasterize(
         colors,
         opacities,
         map_opacities,
@@ -56,7 +62,7 @@ def rasterize(
         H,
         W,
     )
-    return out_img
+    return out_img, 1.0 - final_Ts
 
 
 def rasterize_depth(
@@ -72,16 +78,21 @@ def rasterize_depth(
     img_shape: tuple[int, int],
     map_opacities: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Blend gaussians into an image (H, W, 3) and expected depth map (H, W, 1).
+    """Blend gaussians into an RGB and depth image (H, W, 4) and an alpha map (H, W).
 
-    Identical to rasterize but additionally renders the alpha-blended expected depth map with the
-    same visibility weights as the color blend.
+    The depth channel is the expected depth, the visibility-weighted mean of the gaussians'
+    camera-space z normalized by the accumulated alpha. It is measured along the optical axis rather
+    than as a Euclidean range, and pixels that no gaussian covers read 0.
+
+    Returns:
+        The ``(H, W, 4)`` image, RGB in the first three channels and the expected depth in the
+        fourth, and the ``(H, W)`` accumulated alpha, which is 0 on pixels no gaussian covers.
     """
     n = colors.shape[0]
     H, W = img_shape
     if map_opacities is None:
         map_opacities = opacities
-    out_img, out_depth, _, _ = _rasterize_depth(
+    out_img, out_depth, final_Ts, _ = _rasterize_depth(
         colors,
         opacities,
         map_opacities,
@@ -95,7 +106,12 @@ def rasterize_depth(
         H,
         W,
     )
-    return out_img, out_depth
+    # The accumulated alpha vanishes exactly on uncovered pixels, so the quotient is masked to 0
+    # there. Dividing by the masked denominator keeps the gradient of those pixels finite as well.
+    covered = final_Ts < 1.0
+    accum_alpha = jnp.where(covered, 1.0 - final_Ts, 1.0)
+    depth = jnp.where(covered, out_depth / accum_alpha, 0.0)
+    return jnp.concatenate([out_img, depth[..., None]], axis=-1), 1.0 - final_Ts
 
 
 # region custom vjp
@@ -118,10 +134,10 @@ def _rasterize(
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Custom vjp for the blend, returning (out_img, final_Ts, final_idx).
 
-    final_Ts and final_idx are the backward residuals, the per-pixel final transmittance and last
-    contributing gaussian. The public rasterize discards them, the fwd rule keeps them. JAX requires
-    a rigid array signature for custom_vjps, so the None default of map_opacities is resolved in the
-    public rasterize before this is called.
+    final_Ts is the per-pixel final transmittance the public rasterize turns into the alpha map, and
+    final_idx is the last contributing gaussian, a backward residual the public rasterize discards.
+    JAX requires a rigid array signature for custom_vjps, so the None default of map_opacities is
+    resolved in the public rasterize before this is called.
     """
     final_Ts, final_idx, out_img = rasterize_ffi(
         colors,
@@ -204,7 +220,8 @@ def _rasterize_bwd(
         final_Ts,
         final_idx,
     ) = residuals
-    v_img, _, _ = cotangents  # only the image cotangent is nonzero
+    # The accumulated alpha is 1 - final_Ts, so final_Ts carries a cotangent alongside the image
+    v_img, v_final_Ts, _ = cotangents
     v_colors, v_opacity, v_xy, v_conic = rasterize_bwd_ffi(
         colors,
         opacities,
@@ -218,6 +235,7 @@ def _rasterize_bwd(
         final_Ts,
         final_idx,
         v_img,
+        v_final_Ts,
         n,
         H,
         W,
@@ -329,7 +347,8 @@ def _rasterize_depth_bwd(
         final_Ts,
         final_idx,
     ) = residuals
-    v_img, v_depth_img, _, _ = cotangents
+    # final_Ts feeds the alpha map and the expected depth normalization, so it carries a cotangent
+    v_img, v_depth_img, v_final_Ts, _ = cotangents
     v_colors, v_opacity, v_xy, v_conic, v_depths = rasterize_bwd_depth_ffi(
         colors,
         opacities,
@@ -344,6 +363,7 @@ def _rasterize_depth_bwd(
         final_idx,
         v_img,
         v_depth_img,
+        v_final_Ts,
         n,
         H,
         W,

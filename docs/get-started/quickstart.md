@@ -8,8 +8,8 @@ share the same five gaussian arrays: `means` `(N, 3)`, `scales` `(N, 3)`, `quats
 ## Render a scene
 
 `splax.io.load_ply` reads a 3DGS `.ply` into the five render-space arrays.
-`splax.render` returns an `(image, depths)` pair whose depth slot is `None`
-unless `render_depth=True`.
+`splax.render` returns a `(colors, alpha)` pair, the `(H, W, 3)` image and its
+`(H, W)` accumulated coverage.
 
 ```python
 import jax.numpy as jnp
