@@ -18,7 +18,7 @@ def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     return xyz, rgb
 
 
-def test_padding_applies_density_ratio_correction() -> None:
+def test_padding_applies_density_ratio_correction():
     """When n>m, every original knn log-scale is lowered by exactly (1/3)ln(n/m)."""
     m, n = 500, 4000
     xyz, rgb = _cloud(m)
@@ -34,7 +34,7 @@ def test_padding_applies_density_ratio_correction() -> None:
     assert np.allclose(ls[:, 0], ls[:, 1]) and np.allclose(ls[:, 0], ls[:, 2])
 
 
-def test_correction_scales_with_padding_ratio() -> None:
+def test_correction_scales_with_padding_ratio():
     """Offset tracks the padding ratio: n=8m is 3x lower than n=m in log space."""
     m = 500
     xyz, rgb = _cloud(m)
@@ -49,7 +49,7 @@ def test_correction_scales_with_padding_ratio() -> None:
     assert np.isclose(off_large, np.log(8) / 3.0, atol=1e-5)
 
 
-def test_subsample_branch_has_no_correction() -> None:
+def test_subsample_branch_has_no_correction():
     """Check that subsampling skips density correction when n is not padded."""
     m, n = 4000, 500
     xyz, rgb = _cloud(m)

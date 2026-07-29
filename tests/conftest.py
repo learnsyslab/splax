@@ -1,4 +1,7 @@
-"""Provide the scene assets the tests read.
+"""Pytest configuration.
+
+If gsplat is not installed, we skip the tests that compare splax's output to the reference
+implementation.
 
 The tests need the pretrained lego splat, the lego test-set camera metadata with three of its
 views, and the drone COLMAP sparse model. The fixtures download them through ``splax.io.fetch``.
@@ -7,6 +10,7 @@ Point ``$SPLAX_TEST_DATA`` at another dataset root to override where they come f
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from typing import TYPE_CHECKING
@@ -19,12 +23,36 @@ from splax.io import fetch
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from types import ModuleType
 
     import numpy as np
 
 BASE = os.environ.get(
     "SPLAX_TEST_DATA", "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main"
 )
+
+# region pytest hooks
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]):
+    """Skip the gsplat parity tests when gsplat is not installed."""
+    if importlib.util.find_spec("gsplat") is not None:
+        return
+    skip = pytest.mark.skip(reason="gsplat not installed")
+    for item in items:
+        if "gsplat" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture
+def gsplat_shim() -> ModuleType:
+    """Return the gsplat wrapper used by the parity tests."""
+    import _gsplat
+
+    return _gsplat
+
+
+# region splat data
 
 
 def _read_lego_view(file_path: str) -> np.ndarray:

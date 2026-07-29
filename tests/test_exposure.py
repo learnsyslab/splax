@@ -22,7 +22,7 @@ import numpy as np
 from train_colmap import apply_exposure, init_exposure
 
 
-def test_init_exposure_is_identity() -> None:
+def test_init_exposure_is_identity():
     ntr = 7
     exp = np.asarray(init_exposure(ntr))
     assert exp.shape == (ntr, 3, 4)
@@ -32,7 +32,7 @@ def test_init_exposure_is_identity() -> None:
         assert np.allclose(exp[i, :, 3], 0.0)
 
 
-def test_apply_exposure_identity_is_noop() -> None:
+def test_apply_exposure_identity_is_noop():
     """Identity transform must leave the render bit-identical (off-path parity)."""
     rng = np.random.default_rng(0)
     img = rng.random((5, 4, 3)).astype(np.float32)
@@ -41,7 +41,7 @@ def test_apply_exposure_identity_is_noop() -> None:
     assert np.array_equal(out, img)
 
 
-def test_apply_exposure_affine_algebra() -> None:
+def test_apply_exposure_affine_algebra():
     """Known transform M@rgb + b, applied per pixel, matches an explicit einsum."""
     rng = np.random.default_rng(1)
     img = rng.random((6, 3, 3)).astype(np.float32)
@@ -54,7 +54,7 @@ def test_apply_exposure_affine_algebra() -> None:
     assert np.allclose(out, ref, atol=1e-5)
 
 
-def test_apply_exposure_scalar_gain_and_offset() -> None:
+def test_apply_exposure_scalar_gain_and_offset():
     """A pure per-channel gain+bias (diagonal M) scales/shifts each channel."""
     img = np.ones((2, 2, 3), np.float32)
     gain = np.array([0.5, 2.0, 1.0], np.float32)

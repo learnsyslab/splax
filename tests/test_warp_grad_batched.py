@@ -108,7 +108,7 @@ def _rel(a: jax.Array | np.ndarray, b: jax.Array | np.ndarray) -> float:
     return np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-12)
 
 
-def _assert_close(name: str, gv: jax.Array | np.ndarray, gs: jax.Array | np.ndarray) -> None:
+def _assert_close(name: str, gv: jax.Array | np.ndarray, gs: jax.Array | np.ndarray):
     gv, gs = np.asarray(gv), np.asarray(gs)
     assert gv.shape == gs.shape, f"{name}: shape {gv.shape} vs {gs.shape}"
     assert np.all(np.isfinite(gv)), f"{name}: non-finite vmap grad"
@@ -122,7 +122,7 @@ def _assert_close(name: str, gv: jax.Array | np.ndarray, gs: jax.Array | np.ndar
 # differentiated parameter is either mapped (per-image grad) or broadcast (summed).
 
 
-def test_batched_gaussians_per_image() -> None:
+def test_batched_gaussians_per_image():
     """Per-image gaussian input (means batched): vmap(grad) == sequential stack."""
     n, H, W = 800, 96, 96
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
@@ -139,7 +139,7 @@ def test_batched_gaussians_per_image() -> None:
 
 
 @pytest.mark.parametrize("param", ["means", "scales", "quats", "colors", "opac"])
-def test_broadcast_param_summed(param: str) -> None:
+def test_broadcast_param_summed(param: str):
     """Match summed broadcast parameter grads against total loss grads."""
     n, H, W = 800, 96, 96
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=5)
@@ -167,7 +167,7 @@ def test_broadcast_param_summed(param: str) -> None:
     _assert_close(f"{param}(broadcast summed)", gsummed, jax.grad(total)(base[param]))
 
 
-def test_batched_viewmat_per_pose() -> None:
+def test_batched_viewmat_per_pose():
     """Match per pose viewmat vmap grads against sequential grads."""
     n, H, W = 800, 96, 96
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=11)
@@ -187,7 +187,7 @@ def test_batched_viewmat_per_pose() -> None:
 
 
 @pytest.mark.parametrize("param", ["means", "colors", "opac"])
-def test_broadcast_geometry_shared_render(param: str) -> None:
+def test_broadcast_geometry_shared_render(param: str):
     """Match shared render broadcast geometry grads against sequential grads."""
     n, H, W = 600, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=17)
@@ -212,7 +212,7 @@ def test_broadcast_geometry_shared_render(param: str) -> None:
 # --- Finite-difference spot check of a batched viewmat gradient ---------------
 
 
-def test_batched_viewmat_finite_difference() -> None:
+def test_batched_viewmat_finite_difference():
     """Check one batched viewmat gradient with finite differences."""
     n, H, W = 3000, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=21)

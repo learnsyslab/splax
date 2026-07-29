@@ -9,18 +9,17 @@ Two kinds of test live here:
     the full splax render must be image-close to gsplat under a documented
     tolerance. gsplat cannot be matched bit-for-bit (different sort, blend, and
     tiling), so we bound the difference perceptually (max abs diff + PSNR) rather
-    than element-wise-exactly the way a faithful port would. These are guarded by
-    the ``gsplat_ref`` fixture, which fails loudly when gsplat is unavailable.
+    than element-wise-exactly the way a faithful port would. These are marked
+    ``gsplat`` and skipped when gsplat is not installed.
 
 Convention conversions for the gsplat reference are documented in
-tests/_gsplat_ref.py.
+tests/_gsplat.py.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypedDict
 
-import _gsplat_ref as gref
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -79,13 +78,6 @@ class _RenderKWNoView(TypedDict):
     c: tuple[float, float]
     glob_scale: float
     clip_thresh: float
-
-
-@pytest.fixture
-def gsplat_ref() -> ModuleType:
-    """Fail the test with a clear reason when gsplat cannot run."""
-    gref.require_working()
-    return gref
 
 
 def _random_scene(n: int, H: int, W: int, seed: int = 0) -> _Scene:
@@ -166,8 +158,9 @@ def _render_scene(
     return (means, scales, quats, colors, opac), kw
 
 
+@pytest.mark.gsplat
 @pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
-def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: ModuleType) -> None:
+def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
     """splax.render vs gsplat.rasterization on the same scene.
 
     Different kernels (sort order, blend, opacity-aware tiling), so we bound the
@@ -178,7 +171,7 @@ def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: ModuleType) -> Non
     """
     (splats, kw) = _render_scene(n, H, W, seed=n)
     a = np.asarray(splax.render(*splats, **kw)[0])
-    b = gsplat_ref.render(*splats, **kw)
+    b = gsplat_shim.render(*splats, **kw)
     assert a.shape == b.shape
     mse = float(np.mean((a - b) ** 2))
     psnr = -10 * np.log10(mse) if mse > 0 else float("inf")
@@ -187,7 +180,7 @@ def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_ref: ModuleType) -> Non
     assert np.abs(a - b).max() < 0.03, f"max abs diff {np.abs(a - b).max():.3f}"
 
 
-def test_render_under_jit_matches_eager() -> None:
+def test_render_under_jit_matches_eager():
     """splax.render under jit is byte-identical to eager (splax-only, no gsplat)."""
     (splats, kw) = _render_scene(50_000, 256, 256, seed=99)
     eager = np.asarray(splax.render(*splats, **kw)[0])
@@ -195,7 +188,7 @@ def test_render_under_jit_matches_eager() -> None:
     assert np.array_equal(eager, jitted)
 
 
-def test_principal_point_defaults_to_center() -> None:
+def test_principal_point_defaults_to_center():
     """Omitting c is byte-identical to passing the image center explicitly."""
     (splats, kw) = _render_scene(10_000, 256, 256, seed=42)
     explicit = np.asarray(splax.render(*splats, **kw)[0])
@@ -208,7 +201,7 @@ def test_principal_point_defaults_to_center() -> None:
 # --- splax-internal scratch invariants (no external reference) ----------------
 
 
-def test_scratch_reuse_across_sizes() -> None:
+def test_scratch_reuse_across_sizes():
     """Persistent grow-only scratch must not leak state between renders.
 
     Render several scenes of *different* intersection counts back to back (shrinking
@@ -229,7 +222,7 @@ def test_scratch_reuse_across_sizes() -> None:
         )
 
 
-def test_scratch_dropped_on_signature_change() -> None:
+def test_scratch_dropped_on_signature_change():
     """Test that switching to a smaller workload releases a bigger sort scratch."""
     dev = wp.get_device()
     splax.clear_cache()
@@ -261,7 +254,7 @@ def _rasterize_both_keymodes(
     return packed, wide
 
 
-def test_packed_vs_64bit_random() -> None:
+def test_packed_vs_64bit_random():
     """The packed 32-bit key agrees with the 64-bit key to a high perceptual bound.
 
     Depth is linearly quantized into depth_bits (>=16) buckets over the per-frame
@@ -289,7 +282,7 @@ def test_packed_vs_64bit_random() -> None:
     assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
 
 
-def test_packed_vs_64bit_lego(lego_ply: Path) -> None:
+def test_packed_vs_64bit_lego(lego_ply: Path):
     """Packed vs 64-bit on the real lego scene (tight key emission)."""
     means, scales, quats, colors, opac = splax.io.load_ply(lego_ply)
     H, W = 720, 1280
@@ -318,7 +311,7 @@ def test_packed_vs_64bit_lego(lego_ply: Path) -> None:
     assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
 
 
-def test_packed_fallback_triggers_when_bits_dont_fit() -> None:
+def test_packed_fallback_triggers_when_bits_dont_fit():
     """When image+tile bits leave <16 for depth, the 64-bit key is used (fallback).
 
     Observed via the scratch key buffer dtype: packed gives int32, fallback gives int64.
@@ -367,9 +360,10 @@ def _id_viewmat(dz: float = 5.0) -> jax.Array:
     return jnp.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, dz], [0, 0, 0, 1]], jnp.float32)
 
 
+@pytest.mark.gsplat
 def test_render_lego_vs_gsplat(
-    gsplat_ref: ModuleType, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
-) -> None:
+    gsplat_shim: ModuleType, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
+):
     """Splax vs gsplat full render on the real lego scene, from a dataset pose.
 
     A realistic-scene perceptual check to complement the random-scene parity and
@@ -391,7 +385,7 @@ def test_render_lego_vs_gsplat(
         "clip_thresh": 0.01,
     }
     a = np.asarray(splax.render(means, scales, quats, colors, opac, **kw)[0])
-    b = gsplat_ref.render(means, scales, quats, colors, opac, **kw)
+    b = gsplat_shim.render(means, scales, quats, colors, opac, **kw)
     mse = float(np.mean((a - b) ** 2))
     psnr = -10 * np.log10(mse) if mse > 0 else float("inf")
     # Measured ~82 dB on this pose, bounded well below with margin for scene detail.
@@ -408,7 +402,7 @@ def _project_tight(
 ) -> tuple[
     jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple[int, int]
 ]:
-    """splax.project WITH opacities gives SNUGBOX radii + AccuTile num_tiles_hit."""
+    """splax.project WITH opacities gives SNUGBOX radii + AccuTile n_tiles_hit."""
     key = jax.random.key(seed)
     k = jax.random.split(key, 5)
     means = jax.random.normal(k[0], (n, 3))
@@ -431,8 +425,8 @@ def _project_tight(
 
 
 @pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
-def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
-    """The AccuTile key-emission writes EXACTLY num_tiles_hit keys per gaussian.
+def test_snugbox_emit_matches_count(n: int, H: int, W: int):
+    """The AccuTile key-emission writes EXACTLY n_tiles_hit keys per gaussian.
 
     Launch the emission kernel into a sentinel-filled buffer and verify that every
     slot in [cum[i-1], cum[i]) is written by gaussian i and no slot is left stale or
@@ -445,14 +439,14 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     cum_np = np.asarray(cum).ravel().astype(np.int64)
     total = int(cum_np[-1])
     assert total > 0
-    # structural: cum is the inclusive scan of num_tiles_hit
+    # structural: cum is the inclusive scan of n_tiles_hit
     np.testing.assert_array_equal(cum_np, np.cumsum(nth_np))
 
     bw = 16
     tbx = (W + bw - 1) // bw
     tby = (H + bw - 1) // bw
-    num_tiles = tbx * tby
-    tile_n_bits = (num_tiles - 1).bit_length()  # bits to index [0, num_tiles), see sort_and_bin
+    n_tiles = tbx * tby
+    tile_n_bits = (n_tiles - 1).bit_length()  # bits to index [0, n_tiles), see sort_and_bin
 
     dev = "cuda:0"
     xys_w = wp.array(np.asarray(xys), dtype=wp.vec2, device=dev)
@@ -480,7 +474,7 @@ def test_snugbox_emit_matches_count(n: int, H: int, W: int) -> None:
     # no stale slot: every key slot was written (count == emit, no gaps/overflow)
     assert not (isect_np == SENT).any(), f"{(isect_np == SENT).sum()} unwritten slots"
     assert (gids_np >= 0).all()
-    # each gaussian owns exactly num_tiles_hit[i] contiguous slots at cum[i-1]
+    # each gaussian owns exactly n_tiles_hit[i] contiguous slots at cum[i-1]
     starts = np.concatenate([[0], cum_np[:-1]])
     for i in np.nonzero(nth_np > 0)[0][:2000]:
         s, e = int(starts[i]), int(cum_np[i])

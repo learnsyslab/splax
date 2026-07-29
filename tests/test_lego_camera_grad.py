@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import _gsplat_ref as gref
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -25,13 +24,6 @@ HEIGHT = WIDTH = 800
 TARGET_OFFSET = jnp.array([0.01, -0.01, 0.01, 0.01, -0.01, 0.01])
 
 
-@pytest.fixture
-def gsplat_ref() -> types.ModuleType:
-    """Fail the test with a clear reason when gsplat cannot run."""
-    gref.require_working()
-    return gref
-
-
 def _lego_scene(lego_meta: dict, lego_ply: Path) -> tuple[tuple[jax.Array, ...], np.ndarray, float]:
     """Load the pretrained lego splat and the frame-0 test pose (viewmat, focal)."""
     gaussians = splax.io.load_ply(lego_ply)
@@ -40,9 +32,10 @@ def _lego_scene(lego_meta: dict, lego_ply: Path) -> tuple[tuple[jax.Array, ...],
     return gaussians, viewmat, focal
 
 
+@pytest.mark.gsplat
 def test_lego_viewmat_grad_gsplat_parity(
-    gsplat_ref: types.ModuleType, lego_meta: dict, lego_ply: Path
-) -> None:
+    gsplat_shim: types.ModuleType, lego_meta: dict, lego_ply: Path
+):
     """Single-view and vmap-batched viewmat gradients must match gsplat's autograd."""
     (means, scales, quats, colors, opacities), viewmat, focal = _lego_scene(lego_meta, lego_ply)
     camera_kwargs = {
@@ -66,7 +59,7 @@ def test_lego_viewmat_grad_gsplat_parity(
 
     # render the target in the same framework to reduce noise from framework differences
     splax_target = splax_image(target_viewmat)
-    gsplat_target = gsplat_ref.render(
+    gsplat_target = gsplat_shim.render(
         means, scales, quats, colors, opacities, viewmat=target_viewmat, **camera_kwargs
     )
 
@@ -74,7 +67,7 @@ def test_lego_viewmat_grad_gsplat_parity(
         return jnp.mean((splax_image(viewmat_in) - splax_target) ** 2)
 
     splax_single_grad = np.asarray(jax.grad(loss)(viewmats[1]))
-    gsplat_single_grad = gsplat_ref.viewmat_grad(
+    gsplat_single_grad = gsplat_shim.viewmat_grad(
         means,
         scales,
         quats,
@@ -90,7 +83,7 @@ def test_lego_viewmat_grad_gsplat_parity(
     splax_batch_grads = np.asarray(jax.vmap(jax.grad(loss))(viewmats))
     gsplat_batched_grads = np.asarray(
         [
-            gsplat_ref.viewmat_grad(
+            gsplat_shim.viewmat_grad(
                 means,
                 scales,
                 quats,

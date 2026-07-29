@@ -171,7 +171,7 @@ def ellipse_column_tile_range(u: wp.int32, s: Ellipse, I_min: wp.vec2) -> wp.vec
 
 @wp.func
 def ellipse_tile_count(s: Ellipse) -> wp.int32:
-    # Total tiles the ellipse touches, written to num_tiles_hit by projection.
+    # Total tiles the ellipse touches, written to n_tiles_hit by projection.
     if not s.valid:
         return wp.int32(0)
     I_min = ellipse_init_span(s)

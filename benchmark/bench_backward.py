@@ -76,7 +76,7 @@ def make_gsplat_step(sc: Scene, batch: int) -> Callable[[], object]:
     views_t = torch.as_tensor(sc.viewmats[:batch], device="cuda")
     target_t = torch.as_tensor(random_image_batch(sc, batch), device="cuda")
 
-    def run() -> None:
+    def run():
         for p in params:
             p.grad = None
         out, alpha, _ = gsplat.rasterization(*params, views_t, ks_t, res, res)
@@ -141,7 +141,7 @@ def run_scene(name: str, framework: str) -> dict:
     }
 
 
-def main() -> None:
+def main():
     """Run every scene in an isolated process and merge the JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenes", nargs="+", default=list(BUILDERS), help="subset of scenes")

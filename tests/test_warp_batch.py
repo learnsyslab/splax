@@ -43,7 +43,7 @@ class _ProjKW(TypedDict):
 
 
 @pytest.fixture(autouse=True)
-def _faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+def _faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch):
     """Pin the 64-bit sort key for the bit-exact batch-native assertions.
 
     Batch-native == stack-of-unbatched is bit-exact only for the 64-bit key, whose
@@ -99,14 +99,14 @@ def _render(
     return splax.render(m, s, q, c, o, viewmat=vm, **KW)[0]
 
 
-def test_project_vmap_over_viewmats() -> None:
+def test_project_vmap_over_viewmats():
     """vmap(project) over B viewmats: per-image outputs are bit-exact vs unbatched.
 
     All outputs except cum_tiles_hit are per-gaussian and batch-invariant, so they
     match the stacked unbatched projections exactly. cum_tiles_hit is intentionally a
     *global* inclusive prefix sum across the whole batch (gsplat's single-sort
     layout: every image's intersections are laid out contiguously), so it equals the
-    global cumsum of the flattened num_tiles_hit rather than the per-image cumsum.
+    global cumsum of the flattened n_tiles_hit rather than the per-image cumsum.
     """
     m, s, q, _c, o = _rand_scene(N, seed=1)
 
@@ -115,18 +115,18 @@ def test_project_vmap_over_viewmats() -> None:
 
     B = VIEWS.shape[0]
     batched = jax.vmap(f)(VIEWS)
-    # outputs 0..4 = xys, depths, radii, conics, num_tiles_hit, bit-exact per image
+    # outputs 0..4 = xys, depths, radii, conics, n_tiles_hit, bit-exact per image
     for i in range(B):
         ref = f(VIEWS[i])
         for k in range(5):
             np.testing.assert_array_equal(np.asarray(batched[k][i]), np.asarray(ref[k]))
-    # cum_tiles_hit (output 5) is the global inclusive scan of flattened num_tiles_hit
+    # cum_tiles_hit (output 5) is the global inclusive scan of flattened n_tiles_hit
     nth = np.asarray(batched[4]).reshape(-1).astype(np.int64)
     cum = np.asarray(batched[5]).reshape(-1).astype(np.int64)
     np.testing.assert_array_equal(cum, np.cumsum(nth))
 
 
-def test_render_vmap_over_viewmats() -> None:
+def test_render_vmap_over_viewmats():
     """vmap(render) over B=3 viewmats == jnp.stack of 3 unbatched renders."""
     m, s, q, c, o = _rand_scene(N, seed=2)
     ref = jnp.stack([_render(m, s, q, c, o, VIEWS[i]) for i in range(3)])
@@ -135,7 +135,7 @@ def test_render_vmap_over_viewmats() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def test_render_vmap_over_splats() -> None:
+def test_render_vmap_over_splats():
     """Vmap over batched splat params (shared viewmat) == stacked unbatched."""
     scenes = [_rand_scene(N, seed=s) for s in (3, 4, 5)]
     mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
@@ -145,7 +145,7 @@ def test_render_vmap_over_splats() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def test_render_vmap_mixed_both_batched() -> None:
+def test_render_vmap_mixed_both_batched():
     """Vmap over both splat params AND viewmats (mixed dims in one call)."""
     scenes = [_rand_scene(N, seed=s) for s in (6, 7, 8)]
     mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
@@ -154,7 +154,7 @@ def test_render_vmap_mixed_both_batched() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def test_render_nested_vmap_grid() -> None:
+def test_render_nested_vmap_grid():
     """Nested vmap over an A splats x B viewmats grid == the A x B double loop."""
     scenes = [_rand_scene(N, seed=s) for s in (3, 4, 5)]
     mb, sb, qb, cb, ob = (jnp.stack([sc[i] for sc in scenes]) for i in range(5))
@@ -168,7 +168,7 @@ def test_render_nested_vmap_grid() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def test_render_nested_shared_splat_transforms() -> None:
+def test_render_nested_shared_splat_transforms():
     """Nested vmap, shared splat, viewmat on both axes, transforms on the outer axis only."""
     m, s, q, c, o = _rand_scene(N, seed=6)
     slices = ((0, N // 2), (N // 2, N))
@@ -195,7 +195,7 @@ def test_render_nested_shared_splat_transforms() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def test_render_nested_vmap_grad() -> None:
+def test_render_nested_vmap_grad():
     """Nested vmap over jax.grad of the differentiable render == the double loop of gradients."""
     m, s, q, c, o = _rand_scene(N, seed=12)
     means = jnp.stack([m, m * 1.01])
@@ -215,7 +215,7 @@ def test_render_nested_vmap_grad() -> None:
     np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-4, atol=1e-2)
 
 
-def test_render_jit_vmap() -> None:
+def test_render_jit_vmap():
     """jit(vmap(render)) matches unbatched."""
     m, s, q, c, o = _rand_scene(N, seed=9)
     ref = jnp.stack([_render(m, s, q, c, o, VIEWS[i]) for i in range(3)])
@@ -223,7 +223,7 @@ def test_render_jit_vmap() -> None:
     np.testing.assert_array_equal(np.asarray(fn(VIEWS)), np.asarray(ref))
 
 
-def test_render_vmap_b1_equals_unbatched() -> None:
+def test_render_vmap_b1_equals_unbatched():
     """B=1 vmap is identical to the plain unbatched render."""
     m, s, q, c, o = _rand_scene(N, seed=10)
     vm = _viewmat(0.15)
@@ -233,7 +233,7 @@ def test_render_vmap_b1_equals_unbatched() -> None:
     np.testing.assert_array_equal(np.asarray(b1[0]), np.asarray(unb))
 
 
-def test_render_vmap_larger_batch_and_res() -> None:
+def test_render_vmap_larger_batch_and_res():
     """B=8 at a larger resolution: image-id/tile-id key packing stays correct."""
     m, s, q, c, o = _rand_scene(12_000, seed=11)
     B, hh, ww = 8, 512, 512
@@ -244,7 +244,7 @@ def test_render_vmap_larger_batch_and_res() -> None:
     np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
 
 
-def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_render_vmap_packed_matches_stack(monkeypatch: pytest.MonkeyPatch):
     """Match packed batched render output against stacked unbatched output."""
     monkeypatch.setattr(_sort, "_use_32bit_keys", lambda depth_bits: depth_bits >= 16)
     m, s, q, c, o = _rand_scene(12_000, seed=11)

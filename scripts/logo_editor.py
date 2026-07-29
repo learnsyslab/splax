@@ -525,7 +525,7 @@ class Handler(BaseHTTPRequestHandler):
 
     tile_file: Path
 
-    def _reply(self, code: int, body: bytes, ctype: str) -> None:
+    def _reply(self, code: int, body: bytes, ctype: str):
         """Send an HTTP response with explicit content metadata."""
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -540,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
         p = Path(path).expanduser()
         return p if p.is_absolute() else ROOT / p
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self):  # noqa: N802
         """Serve editor HTML or tile JSON."""
         url = urllib.parse.urlparse(self.path)
         if url.path == "/":
@@ -562,7 +562,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._reply(404, b"not found", "text/plain")
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self):  # noqa: N802
         """Persist updated tile JSON from the editor."""
         if self.path != "/tiles":
             self._reply(404, b"not found", "text/plain")
@@ -578,7 +578,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._reply(200, b'{"ok": true}', "application/json")
 
-    def log_message(self, format: str, *args: object) -> None:
+    def log_message(self, format: str, *args: object):
         """Silence default HTTP request logging."""
         pass
 
@@ -599,7 +599,7 @@ def _validate(data: dict) -> list[dict]:
     return tiles
 
 
-def main() -> None:
+def main():
     """Run the local logo tile editor server."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", type=Path, default=ROOT / "docs/assets/logo_tiles.json")

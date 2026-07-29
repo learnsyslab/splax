@@ -37,7 +37,7 @@ def depth_minmax(
     depths: wp.array[wp.float32],
     radii: wp.array[wp.int32],
     total: wp.int32,
-    num_gaussians: wp.int32,
+    n_gaussians: wp.int32,
     # output, per-image [min, max] pairs of length 2*B, pre-seeded by seed_minmax
     out_mm: wp.array[wp.float32],
 ):
@@ -50,7 +50,7 @@ def depth_minmax(
         idx = base + k
         if idx < total:
             if radii[idx] > 0:  # culled gaussians emit no keys, exclude from range
-                im = idx // num_gaussians
+                im = idx // n_gaussians
                 if im != img_cur:  # If the image changed, flush accumulators
                     if img_cur >= 0:
                         wp.atomic_min(out_mm, 2 * img_cur, lo)
@@ -75,7 +75,7 @@ def map_intersects_32bit(
     map_opacities: wp.array[wp.float32],
     cum_tiles_hit: wp.array[wp.int32],
     depth_mm: wp.array[wp.float32],
-    num_gaussians: wp.int32,
+    n_gaussians: wp.int32,
     opac_mod: wp.int32,
     tile_n_bits: wp.int32,
     depth_bits: wp.int32,
@@ -91,7 +91,7 @@ def map_intersects_32bit(
     idx = wp.tid()
     if radii[idx] <= 0:
         return
-    n = num_gaussians
+    n = n_gaussians
     bid = idx // n
     center = xys[idx]
 
@@ -112,7 +112,7 @@ def map_intersects_32bit(
             wp.int32(f * maxq), wp.int32(0), (wp.int32(1) << depth_bits) - wp.int32(1)
         )
 
-    # We reuse the ellipse criterion from the projection stage, so num_tiles_hit matches exactly.
+    # We reuse the ellipse criterion from the projection stage, so n_tiles_hit matches exactly.
     opac = map_opacities[idx % opac_mod]  # Raw opacity projection to ensure matching tile counts.
     t = wp.min(GAUSSIAN_EXTEND_SQ, 2.0 * wp.log(opac / ALPHA_THRESHOLD))
     conic = conics[idx]
@@ -146,7 +146,7 @@ def map_intersects_64bit(
     conics: wp.array[wp.vec3],
     map_opacities: wp.array[wp.float32],
     cum_tiles_hit: wp.array[wp.int32],
-    num_gaussians: wp.int32,
+    n_gaussians: wp.int32,
     opac_mod: wp.int32,
     tile_n_bits: wp.int32,
     tile_bounds_x: wp.int32,
@@ -162,7 +162,7 @@ def map_intersects_64bit(
     idx = wp.tid()
     if radii[idx] <= 0:
         return
-    n = num_gaussians
+    n = n_gaussians
     bid = idx // n
     center = xys[idx]
 
@@ -199,28 +199,28 @@ def map_intersects_64bit(
 
 @wp.kernel
 def tile_bin_edges_32bit(
-    num_intersects: wp.int32,
+    n_intersects: wp.int32,
     isect_ids_sorted: wp.array[wp.int32],
-    num_tiles: wp.int32,
+    n_tiles: wp.int32,
     tile_n_bits: wp.int32,
     depth_bits: wp.int32,
     # output
     tile_bins: wp.array[wp.vec2i],
 ):
-    # Compute the bin edges for each tile. The flat index is image_id*num_tiles + tile_id
+    # Compute the bin edges for each tile. The flat index is image_id*n_tiles + tile_id
     idx = wp.tid()
-    if idx >= num_intersects:
+    if idx >= n_intersects:
         return
     mask = (wp.int32(1) << tile_n_bits) - wp.int32(1)
     key = isect_ids_sorted[idx] >> depth_bits
-    cur_bin = (key >> tile_n_bits) * num_tiles + (key & mask)
+    cur_bin = (key >> tile_n_bits) * n_tiles + (key & mask)
     if idx == 0:
         tile_bins[cur_bin][0] = 0
         return
-    if idx == num_intersects - 1:
-        tile_bins[cur_bin][1] = num_intersects
+    if idx == n_intersects - 1:
+        tile_bins[cur_bin][1] = n_intersects
     keyp = isect_ids_sorted[idx - 1] >> depth_bits
-    prev_bin = (keyp >> tile_n_bits) * num_tiles + (keyp & mask)
+    prev_bin = (keyp >> tile_n_bits) * n_tiles + (keyp & mask)
     if prev_bin != cur_bin:
         tile_bins[prev_bin][1] = idx
         tile_bins[cur_bin][0] = idx
@@ -228,27 +228,27 @@ def tile_bin_edges_32bit(
 
 @wp.kernel
 def tile_bin_edges_64bit(
-    num_intersects: wp.int32,
+    n_intersects: wp.int32,
     isect_ids_sorted: wp.array[wp.int64],
-    num_tiles: wp.int32,
+    n_tiles: wp.int32,
     tile_n_bits: wp.int32,
     # output
     tile_bins: wp.array[wp.vec2i],
 ):
     # 64 bit twin of tile_bin_edges_32bit. The (iid | tile) field sits above bit 32.
     idx = wp.tid()
-    if idx >= num_intersects:
+    if idx >= n_intersects:
         return
     mask = (wp.int64(1) << wp.int64(tile_n_bits)) - wp.int64(1)
     key = isect_ids_sorted[idx] >> wp.int64(32)
-    cur_bin = wp.int32(key >> wp.int64(tile_n_bits)) * num_tiles + wp.int32(key & mask)
+    cur_bin = wp.int32(key >> wp.int64(tile_n_bits)) * n_tiles + wp.int32(key & mask)
     if idx == 0:
         tile_bins[cur_bin][0] = 0
         return
-    if idx == num_intersects - 1:
-        tile_bins[cur_bin][1] = num_intersects
+    if idx == n_intersects - 1:
+        tile_bins[cur_bin][1] = n_intersects
     keyp = isect_ids_sorted[idx - 1] >> wp.int64(32)
-    prev_bin = wp.int32(keyp >> wp.int64(tile_n_bits)) * num_tiles + wp.int32(keyp & mask)
+    prev_bin = wp.int32(keyp >> wp.int64(tile_n_bits)) * n_tiles + wp.int32(keyp & mask)
     if prev_bin != cur_bin:
         tile_bins[prev_bin][1] = idx
         tile_bins[cur_bin][0] = idx

@@ -72,7 +72,7 @@ def _scene(
     return means, scales, quats, colors, opac, bg, vm
 
 
-def test_depth_render_single_gaussian() -> None:
+def test_depth_render_single_gaussian():
     """Match single gaussian expected depth against accumulated alpha."""
     H = W = 64
     means = jnp.array([[0.1, -0.05, 0.0]])
@@ -107,7 +107,7 @@ def test_depth_render_single_gaussian() -> None:
     assert depth.max() > 0.5 * pvz  # gaussian actually contributes
 
 
-def test_offpath_image_byte_identical() -> None:
+def test_offpath_image_byte_identical():
     """The depth path's image is bit-for-bit the plain rasterize image."""
     n, H, W = 4000, 128, 128
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=1)
@@ -118,7 +118,7 @@ def test_offpath_image_byte_identical() -> None:
 
 
 @pytest.mark.parametrize("mode", ["depth_only", "mixed"])
-def test_depth_grad_finite_difference(mode: str) -> None:
+def test_depth_grad_finite_difference(mode: str):
     """Check depth gradient chain with central finite differences."""
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)
@@ -152,7 +152,7 @@ def test_depth_grad_finite_difference(mode: str) -> None:
     assert rel < 8e-2, f"{mode} FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
 
 
-def test_depth_grad_under_jit() -> None:
+def test_depth_grad_under_jit():
     n, H, W = 2000, 96, 96
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=3)
     wd = jax.random.uniform(jax.random.key(4), (H, W))
@@ -171,7 +171,7 @@ def test_depth_grad_under_jit() -> None:
         assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
 
-def test_depth_grad_under_vmap_matches_sequential() -> None:
+def test_depth_grad_under_vmap_matches_sequential():
     """Match vmap depth grads against sequential depth grads."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)

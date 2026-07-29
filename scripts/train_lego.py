@@ -75,7 +75,7 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
     return -10 * np.log10(mse) if mse > 0 else float("inf")
 
 
-def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
+def save_ply(path: str | Path, params: dict[str, jax.Array]):
     """Write the fitted Gaussians to a PLY file."""
     scales = jnp.exp(params["log_scales"])
     quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
@@ -371,7 +371,7 @@ def train(args: argparse.Namespace) -> dict:
     return out
 
 
-def _plot_curve(curve: list[dict], ft_start: int | None, wall: float, final_psnr: float) -> None:
+def _plot_curve(curve: list[dict], ft_start: int | None, wall: float, final_psnr: float):
     """Plot the evaluation PSNR curve."""
     steps = [point["step"] for point in curve]
     psnrs = [point["eval_psnr"] for point in curve]
@@ -390,7 +390,7 @@ def _plot_curve(curve: list[dict], ft_start: int | None, wall: float, final_psnr
     logger.info("wrote results/train_lego_curve.png")
 
 
-def main() -> None:
+def main():
     """Parse CLI arguments and train the lego scene."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=100_000)

@@ -39,7 +39,7 @@ def _cuda_relocation_reference(
     return new_opac, new_scales
 
 
-def test_compute_relocation_matches_cuda_kernel() -> None:
+def test_compute_relocation_matches_cuda_kernel():
     rng = np.random.default_rng(0)
     n = 200
     opac = rng.uniform(0.01, 0.99, n)
@@ -59,7 +59,7 @@ def test_compute_relocation_matches_cuda_kernel() -> None:
     np.testing.assert_allclose(np.asarray(got_s), ref_s, rtol=2e-3, atol=1e-5)
 
 
-def test_compute_relocation_ratio_one_is_identity() -> None:
+def test_compute_relocation_ratio_one_is_identity():
     """Ratio == 1 must pass opacity/scale through unchanged (untouched gaussians)."""
     opac = jnp.array([0.1, 0.5, 0.9], jnp.float32)
     scales = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.4, 0.4], [0.05, 0.1, 0.2]], jnp.float32)
@@ -69,7 +69,7 @@ def test_compute_relocation_ratio_one_is_identity() -> None:
     np.testing.assert_allclose(np.asarray(s), np.asarray(scales), rtol=1e-5)
 
 
-def test_relocate_teleports_dead_onto_alive() -> None:
+def test_relocate_teleports_dead_onto_alive():
     n = 500
     k = jax.random.split(jax.random.key(1), 4)
     means = jax.random.uniform(k[0], (n, 3), minval=-1, maxval=1)
@@ -99,7 +99,7 @@ def test_relocate_teleports_dead_onto_alive() -> None:
         assert d < 1e-4
 
 
-def test_inject_noise_respects_opacity() -> None:
+def test_inject_noise_respects_opacity():
     n = 400
     k = jax.random.split(jax.random.key(2), 2)
     means = jnp.zeros((n, 3))

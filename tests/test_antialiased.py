@@ -1,24 +1,4 @@
-"""Test anti aliased opacity compensation.
-
-Tests for the anti-aliased opacity compensation (Mip-Splatting / gsplat
-``rasterize_mode="antialiased"``).
-
-The compensation multiplies a per-gaussian factor ρ = √(det Σ₂D / det(Σ₂D+εI))
-into the opacity before the blend, cancelling the area inflation the ε=0.3 screen
-dilation grants thin gaussians. ρ is computed in JAX from the projection's own
-``conics`` output (``splax.opacity_compensation``). Its gradient chains to
-scales/quats/means through project's existing conic-to-covariance vjp.
-
-Checks:
-  1. Closed form: ρ from the conic equals the direct det ratio, ρ∈[0,1], and culled
-     gaussians give 1.
-  2. Off == plain: ``antialiased=False`` is byte-identical (forward + grad) to the
-     plain grad-free path. The ``map_opacities`` split is a no-op when equal.
-  3. On changes the render (ρ<1 for real gaussians).
-  4. Finite-difference directional-derivative self-consistency of the antialiased
-     grads over all five splat params (same style and bound as the finite-difference
-     gradient tests).
-"""
+"""Test anti aliased opacity compensation."""
 
 from __future__ import annotations
 
@@ -68,7 +48,7 @@ def _pk(H: int, W: int) -> _PK:
     }
 
 
-def test_compensation_closed_form() -> None:
+def test_compensation_closed_form():
     """ρ from the conic matches the direct det-ratio, bounded to [0,1], culled gaussians give 1."""
     n, H, W = 3000, 128, 128
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=1)
@@ -97,7 +77,7 @@ def test_compensation_closed_form() -> None:
     assert rho[live].min() < 0.98, "expected some thin gaussians with ρ < 1"
 
 
-def test_antialiased_off_matches_plain() -> None:
+def test_antialiased_off_matches_plain():
     """Match the plain render when anti aliasing is off."""
     n, H, W = 2500, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
@@ -143,7 +123,7 @@ def test_antialiased_off_matches_plain() -> None:
     )
 
 
-def test_antialiased_changes_output() -> None:
+def test_antialiased_changes_output():
     n, H, W = 2500, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=3)
     pk = _pk(H, W)
@@ -160,7 +140,7 @@ def test_antialiased_changes_output() -> None:
     assert np.abs(on - off).max() > 1e-3, "antialiased render must differ from plain"
 
 
-def test_antialiased_finite_difference() -> None:
+def test_antialiased_finite_difference():
     """Check anti aliased gradients with finite differences."""
     n, H, W = 400, 80, 80
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=7)

@@ -39,7 +39,7 @@ STROKE = "#dce0df"
 SW = 1.0
 
 
-def main() -> None:
+def main():
     """Generate docs/assets/logo.svg from the tile list."""
     tiles = json.loads((ASSET_DIR / "logo_tiles.json").read_text())["tiles"]
     polys = []

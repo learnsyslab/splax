@@ -31,9 +31,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def lookat_viewmats(center: np.ndarray, radius: float, num_views: int) -> jax.Array:
+def lookat_viewmats(center: np.ndarray, radius: float, n_views: int) -> jax.Array:
     """World-to-camera matrices orbiting ``center`` (OpenCV convention, +z forward)."""
-    az = 2 * np.pi * np.arange(num_views)[:, None] / num_views
+    az = 2 * np.pi * np.arange(n_views)[:, None] / n_views
     eyes = center + radius * np.concatenate([np.sin(az), np.full_like(az, 0.3), np.cos(az)], axis=1)
     return jnp.asarray(splax.utils.look_at(eyes, center))
 
@@ -72,7 +72,7 @@ def _random_splats(
     return means, scales, quats, colors, opac
 
 
-def test_write_ply_is_load_ply_inverse(tmp_path: Path) -> None:
+def test_write_ply_is_load_ply_inverse(tmp_path: Path):
     """Random splats through write_ply then load_ply reproduce the render-space inputs."""
     means, scales, quats, colors, opac = _random_splats(seed=0, n=5000)
     out = tmp_path / "rand.ply"
@@ -89,7 +89,7 @@ def test_write_ply_is_load_ply_inverse(tmp_path: Path) -> None:
     np.testing.assert_allclose(lo, opac, rtol=1e-4, atol=1e-4)
 
 
-def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path) -> None:
+def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
     """Fit-free: load lego.ply, write copy, reload, identical render."""
     splats = load_ply(lego_ply)
     copy = tmp_path / "lego_copy.ply"
@@ -123,15 +123,15 @@ def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
         def __init__(self, *args: object, **kwargs: object):
             super().__init__(*args, directory=str(srv_dir), **kwargs)
 
-        def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
             requests.append(self.path)
             super().do_GET()
 
-        def end_headers(self) -> None:
+        def end_headers(self):
             self.send_header("ETag", '"fixed"')  # Constant: content changes are picked up by force.
             super().end_headers()
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, format: str, *args: object):
             pass  # Keep pytest output clean.
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -142,7 +142,7 @@ def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
     server.server_close()
 
 
-def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """First fetch downloads the file into the cache dir with matching bytes."""
     srv_dir, url, _ = file_server
     (srv_dir / "scene.ply").write_bytes(b"splat bytes")
@@ -155,7 +155,7 @@ def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Pat
     assert path.read_bytes() == b"splat bytes"
 
 
-def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """Second fetch returns the same path without touching the network."""
     srv_dir, url, requests = file_server
     (srv_dir / "scene.ply").write_bytes(b"splat bytes")
@@ -169,9 +169,7 @@ def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Pat
     assert len(requests) == 1  # No new request on the cache hit.
 
 
-def test_fetch_unchecked_serves_cache(
-    file_server: tuple[Path, str, list[str]], tmp_path: Path
-) -> None:
+def test_fetch_unchecked_serves_cache(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """allow_unchecked serves the cache without contacting the remote, even once that is gone."""
     srv_dir, url, requests = file_server
     (srv_dir / "scene.ply").write_bytes(b"splat bytes")
@@ -186,7 +184,7 @@ def test_fetch_unchecked_serves_cache(
     assert len(requests) == 1
 
 
-def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path) -> None:
+def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """force=True re-downloads and overwrites the cached copy."""
     srv_dir, url, _ = file_server
     (srv_dir / "scene.ply").write_bytes(b"old bytes")
@@ -202,26 +200,26 @@ def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_p
     assert forced.read_bytes() == b"new bytes"
 
 
-def test_fetch_etag_invalidates_cache(tmp_path: Path) -> None:
+def test_fetch_etag_invalidates_cache(tmp_path: Path):
     """A cache hit is reused while the remote ETag is unchanged, and refetched when it changes."""
     state = {"body": b"v1 bytes", "etag": '"aaa"', "gets": 0}
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def _headers(self) -> None:
+        def _headers(self):
             self.send_response(200)
             self.send_header("Content-Length", str(len(state["body"])))
             self.send_header("ETag", state["etag"])
             self.end_headers()
 
-        def do_HEAD(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        def do_HEAD(self):  # noqa: N802 (BaseHTTPRequestHandler API)
             self._headers()
 
-        def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
             state["gets"] += 1
             self._headers()
             self.wfile.write(state["body"])
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, format: str, *args: object):
             pass  # Keep pytest output clean.
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -242,25 +240,25 @@ def test_fetch_etag_invalidates_cache(tmp_path: Path) -> None:
         server.server_close()
 
 
-def test_fetch_without_etag(tmp_path: Path) -> None:
+def test_fetch_without_etag(tmp_path: Path):
     """A remote that sends no ETag still downloads, re-fetching on every call."""
     state = {"body": b"no etag bytes", "gets": 0}
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def _headers(self) -> None:
+        def _headers(self):
             self.send_response(200)
             self.send_header("Content-Length", str(len(state["body"])))
             self.end_headers()
 
-        def do_HEAD(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        def do_HEAD(self):  # noqa: N802 (BaseHTTPRequestHandler API)
             self._headers()
 
-        def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
             state["gets"] += 1
             self._headers()
             self.wfile.write(state["body"])
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, format: str, *args: object):
             pass  # Keep pytest output clean.
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -279,7 +277,7 @@ def test_fetch_without_etag(tmp_path: Path) -> None:
 
 def test_fetch_env_cache(
     file_server: tuple[Path, str, list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+):
     """Without an explicit cache the file lands in $SPLAX_CACHE."""
     srv_dir, url, _ = file_server
     (srv_dir / "scene.ply").write_bytes(b"splat bytes")

@@ -165,8 +165,8 @@ def _project(
     # sentinels when has_transforms is False. The kernel skips the transform block in that case, so
     # the dummies never enter the math.
     H, W = img_shape
-    num_transforms = gaussian_transforms.shape[-3]
-    xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit = project_ffi(
+    n_transforms = gaussian_transforms.shape[-3]
+    xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit = project_ffi(
         mean3ds,
         scales,
         quats,
@@ -175,7 +175,7 @@ def _project(
         gaussian_transforms,
         transform_ids,
         int(n),
-        int(num_transforms),
+        int(n_transforms),
         bool(has_transforms),
         int(H),
         int(W),
@@ -187,7 +187,7 @@ def _project(
         float(clip_thresh),
         output_dims=n,
     )
-    return xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit
+    return xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit
 
 
 def _project_fwd(

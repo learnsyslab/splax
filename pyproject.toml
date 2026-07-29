@@ -45,6 +45,7 @@ version = {attr = "splax.__version__"}
 [tool.pytest.ini_options]
 # The training-toolkit tests import make_step and the exposure helpers from scripts/train_colmap.py
 pythonpath = ["scripts"]
+markers = ["gsplat: test needs the gsplat CUDA reference"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]

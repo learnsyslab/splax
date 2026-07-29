@@ -48,30 +48,30 @@ def _rasterize_warp(
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
     cum_tiles_hit: wp.array[wp.int32],
-    num_gaussians: int,
+    n_gaussians: int,
     img_h: int,
     img_w: int,
     # outputs
     final_Ts: wp.array2d[wp.float32],
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
-) -> None:
-    n = num_gaussians
+):
+    n = n_gaussians
     B = out_img.shape[0] // img_h  # out_img collapses to (B*H, W) with batching, so we recover B
     sel_bg = background.shape[0] > 1
 
     # sorting must use the same map_opacities as the forward blend to reproduce the order and index
-    gaussian_ids, tile_bins, _, tile_bounds_x, num_tiles = sort_and_bin(
+    gaussian_ids, tile_bins, _, tile_bounds_x, n_tiles = sort_and_bin(
         xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
     cached_launch(
         _rasterize_kernel,
-        B * num_tiles,
+        B * n_tiles,
         [
             img_h,
             img_w,
             tile_bounds_x,
-            num_tiles,
+            n_tiles,
             colors.shape[0],
             opacities.shape[0],
             sel_bg,
@@ -108,7 +108,7 @@ def _rasterize_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
-    num_tiles: wp.int32,
+    n_tiles: wp.int32,
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
@@ -126,8 +126,8 @@ def _rasterize_kernel(
 ):
     """Rasterization kernel with cooperative shared-memory blend."""
     tile_g, tr = wp.tid()  # launch_tiled: block index and thread rank
-    image_id = tile_g // num_tiles
-    tile_local = tile_g % num_tiles
+    image_id = tile_g // n_tiles
+    tile_local = tile_g % n_tiles
 
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
@@ -147,7 +147,7 @@ def _rasterize_kernel(
     tile_range = tile_bins[tile_g]
     range_start = tile_range[0]
     range_end = tile_range[1]
-    num_batches = (range_end - range_start + BLOCK_SIZE - 1) // BLOCK_SIZE
+    n_batches = (range_end - range_start + BLOCK_SIZE - 1) // BLOCK_SIZE
 
     T = wp.float32(1.0)
     cur_idx = wp.int32(0)
@@ -160,7 +160,7 @@ def _rasterize_kernel(
     counted = wp.bool(False)
 
     # We chunk up all Gaussians in this tile into BLOCK_SIZE batches
-    for b in range(num_batches):
+    for b in range(n_batches):
         # If every thread in the block is done, we break early and skip the rest of the Gaussians.
         # Double-acts as a sync barrier to ensure previous reads are complete before the next batch
         wp.tile_scatter_add(done_tile, 0, 1, done and not counted)
@@ -219,7 +219,7 @@ def _rasterize_depth_warp(
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
     cum_tiles_hit: wp.array[wp.int32],
-    num_gaussians: int,
+    n_gaussians: int,
     img_h: int,
     img_w: int,
     # outputs
@@ -227,24 +227,24 @@ def _rasterize_depth_warp(
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
     out_depth: wp.array2d[wp.float32],
-) -> None:
+):
     # Depth-augmented version of _rasterize_warp
-    n = num_gaussians
+    n = n_gaussians
     B = out_img.shape[0] // img_h
     sel_bg = background.shape[0] > 1
 
-    gaussian_ids, tile_bins, _, tile_bounds_x, num_tiles = sort_and_bin(
+    gaussian_ids, tile_bins, _, tile_bounds_x, n_tiles = sort_and_bin(
         xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
     )
 
     cached_launch(
         _rasterize_depth_kernel,
-        B * num_tiles,
+        B * n_tiles,
         [
             img_h,
             img_w,
             tile_bounds_x,
-            num_tiles,
+            n_tiles,
             colors.shape[0],
             opacities.shape[0],
             sel_bg,
@@ -283,7 +283,7 @@ def _rasterize_depth_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
-    num_tiles: wp.int32,
+    n_tiles: wp.int32,
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
@@ -306,8 +306,8 @@ def _rasterize_depth_kernel(
     Additional memory loads are expensive, so we avoid paying them in the default rasterizer.
     """
     tile_g, tr = wp.tid()
-    image_id = tile_g // num_tiles
-    tile_local = tile_g % num_tiles
+    image_id = tile_g // n_tiles
+    tile_local = tile_g % n_tiles
 
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
@@ -325,7 +325,7 @@ def _rasterize_depth_kernel(
     tile_range = tile_bins[tile_g]
     range_start = tile_range[0]
     range_end = tile_range[1]
-    num_batches = (range_end - range_start + BLOCK_SIZE - 1) // BLOCK_SIZE
+    n_batches = (range_end - range_start + BLOCK_SIZE - 1) // BLOCK_SIZE
 
     T = wp.float32(1.0)
     cur_idx = wp.int32(0)
@@ -337,7 +337,7 @@ def _rasterize_depth_kernel(
     done_tile = wp.tile_zeros(shape=1, dtype=wp.int32, storage="shared")
     counted = wp.bool(False)
 
-    for b in range(num_batches):
+    for b in range(n_batches):
         wp.tile_scatter_add(done_tile, 0, 1, done and not counted)
         counted = done
         if done_tile[0] >= BLOCK_SIZE:
@@ -400,7 +400,7 @@ def _rasterize_bwd_warp(
     final_Ts: wp.array2d[wp.float32],
     final_idx: wp.array2d[wp.int32],
     v_out_img: wp.array2d[wp.vec3],
-    num_gaussians: int,
+    n_gaussians: int,
     img_h: int,
     img_w: int,
     # outputs
@@ -408,15 +408,15 @@ def _rasterize_bwd_warp(
     v_opacity: wp.array[wp.float32],
     v_xy: wp.array[wp.vec2],
     v_conic: wp.array[wp.vec3],
-) -> None:
-    n = num_gaussians
+):
+    n = n_gaussians
     B_out = v_xy.shape[0] // n  # Number of output gradients. >B_geom if multiple targets per view
     B_geom = cum_tiles_hit.shape[0] // n  # Number of distinct renders/views
     sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
     vout_rows = v_out_img.shape[0]
 
-    gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = sort_and_bin(
+    gaussian_ids, tile_bins, n_intersects, tile_bounds_x, n_tiles = sort_and_bin(
         xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
@@ -425,14 +425,14 @@ def _rasterize_bwd_warp(
     v_opacity.zero_()
     v_xy.zero_()
     v_conic.zero_()
-    if num_intersects == 0:
+    if n_intersects == 0:
         return
 
     args = [
         img_h,
         img_w,
         tile_bounds_x,
-        num_tiles,
+        n_tiles,
         n,
         sel_geom,
         colors.shape[0],
@@ -456,11 +456,11 @@ def _rasterize_bwd_warp(
     ]
     # Depending on the tile range, the aggregated kernel is faster than the staged one. We choose an
     # empirical threshold and decide which kernel to launch.
-    if num_intersects < B_geom * num_tiles * BLOCK_SIZE:
-        dim = B_out * num_tiles * _SUBTILES
+    if n_intersects < B_geom * n_tiles * BLOCK_SIZE:
+        dim = B_out * n_tiles * _SUBTILES
         cached_launch(_rasterize_bwd_agg_kernel, dim, args, colors.device, block_dim=32)
         return
-    dim = B_out * num_tiles
+    dim = B_out * n_tiles
     cached_launch(_rasterize_bwd_kernel, dim, args, colors.device, block_dim=BLOCK_SIZE)
 
 
@@ -481,8 +481,8 @@ def _rasterize_bwd_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
-    num_tiles: wp.int32,
-    num_gaussians: wp.int32,
+    n_tiles: wp.int32,
+    n_gaussians: wp.int32,
     sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
@@ -506,10 +506,10 @@ def _rasterize_bwd_kernel(
 ):
     """Rasterization backward kernel with cooperative shared-memory blend."""
     tile_g, tr = wp.tid()  # One block per (output image, tile)
-    image_id = tile_g // num_tiles
-    tile_local = tile_g % num_tiles
+    image_id = tile_g // n_tiles
+    tile_local = tile_g % n_tiles
     geom_image = wp.where(sel_geom, image_id, 0)  # Use the first geom if broadcasted, else image_id
-    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
+    og_base = wp.where(sel_geom, 0, image_id * n_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
     li = tr // BLOCK_WIDTH
@@ -523,7 +523,7 @@ def _rasterize_bwd_kernel(
         image_id,
         geom_image,
         tile_local,
-        num_tiles,
+        n_tiles,
         img_h,
         img_w,
         vout_rows,
@@ -545,14 +545,14 @@ def _rasterize_bwd_kernel(
     # Gaussians behind every pixel's last contributor never matter, so the walk starts at the block
     # maximum of final_idx instead of range_end.
     start_idx = wp.tile_max(wp.tile(bin_final))[0]
-    num_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
+    n_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
 
     geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
     color_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec3, storage="shared")
     id_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.int32, storage="shared")
     sync_tile = wp.tile_empty(shape=1, dtype=wp.int32, storage="shared")
 
-    for b in range(num_batches):
+    for b in range(n_batches):
         wp.tile_scatter_add(sync_tile, 0, 0, False)  # Sync barrier to ensure reads are complete
 
         # Gather gaussian records for this batch into shared memory. Order is from back to front
@@ -604,8 +604,8 @@ def _rasterize_bwd_agg_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
-    num_tiles: wp.int32,
-    num_gaussians: wp.int32,
+    n_tiles: wp.int32,
+    n_gaussians: wp.int32,
     sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
@@ -636,10 +636,10 @@ def _rasterize_bwd_agg_kernel(
     blk, tr = wp.tid()
     tile_g = blk // _SUBTILES
     sub = blk % _SUBTILES
-    image_id = tile_g // num_tiles
-    tile_local = tile_g % num_tiles
+    image_id = tile_g // n_tiles
+    tile_local = tile_g % n_tiles
     geom_image = wp.where(sel_geom, image_id, 0)
-    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
+    og_base = wp.where(sel_geom, 0, image_id * n_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
     li = sub * 2 + tr // BLOCK_WIDTH
@@ -653,7 +653,7 @@ def _rasterize_bwd_agg_kernel(
         image_id,
         geom_image,
         tile_local,
-        num_tiles,
+        n_tiles,
         img_h,
         img_w,
         vout_rows,
@@ -738,7 +738,7 @@ def _rasterize_bwd_depth_warp(
     final_idx: wp.array2d[wp.int32],
     v_out_img: wp.array2d[wp.vec3],
     v_out_depth: wp.array2d[wp.float32],
-    num_gaussians: int,
+    n_gaussians: int,
     img_h: int,
     img_w: int,
     # outputs
@@ -747,9 +747,9 @@ def _rasterize_bwd_depth_warp(
     v_xy: wp.array[wp.vec2],
     v_conic: wp.array[wp.vec3],
     v_depths: wp.array[wp.float32],
-) -> None:
+):
     """Depth-augmented backward rasterization."""
-    n = num_gaussians
+    n = n_gaussians
     B_out = v_xy.shape[0] // n
     B_geom = cum_tiles_hit.shape[0] // n
     sel_geom = B_geom > 1
@@ -757,7 +757,7 @@ def _rasterize_bwd_depth_warp(
     vout_rows = v_out_img.shape[0]
     vdepth_rows = v_out_depth.shape[0]
 
-    gaussian_ids, tile_bins, num_intersects, tile_bounds_x, num_tiles = sort_and_bin(
+    gaussian_ids, tile_bins, n_intersects, tile_bounds_x, n_tiles = sort_and_bin(
         xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
@@ -766,14 +766,14 @@ def _rasterize_bwd_depth_warp(
     v_xy.zero_()
     v_conic.zero_()
     v_depths.zero_()
-    if num_intersects == 0:
+    if n_intersects == 0:
         return
 
     args = [
         img_h,
         img_w,
         tile_bounds_x,
-        num_tiles,
+        n_tiles,
         n,
         sel_geom,
         colors.shape[0],
@@ -800,11 +800,11 @@ def _rasterize_bwd_depth_warp(
         v_depths,
     ]
     # Kernel choice by mean tile range, as in _rasterize_bwd_warp.
-    if num_intersects < B_geom * num_tiles * BLOCK_SIZE:
-        dim = B_out * num_tiles * _SUBTILES
+    if n_intersects < B_geom * n_tiles * BLOCK_SIZE:
+        dim = B_out * n_tiles * _SUBTILES
         cached_launch(_rasterize_bwd_depth_agg_kernel, dim, args, colors.device, block_dim=32)
         return
-    dim = B_out * num_tiles
+    dim = B_out * n_tiles
     cached_launch(_rasterize_bwd_depth_kernel, dim, args, colors.device, block_dim=BLOCK_SIZE)
 
 
@@ -825,8 +825,8 @@ def _rasterize_bwd_depth_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
-    num_tiles: wp.int32,
-    num_gaussians: wp.int32,
+    n_tiles: wp.int32,
+    n_gaussians: wp.int32,
     sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
@@ -853,10 +853,10 @@ def _rasterize_bwd_depth_kernel(
     v_depths: wp.array[wp.float32],
 ):
     tile_g, tr = wp.tid()
-    image_id = tile_g // num_tiles
-    tile_local = tile_g % num_tiles
+    image_id = tile_g // n_tiles
+    tile_local = tile_g % n_tiles
     geom_image = wp.where(sel_geom, image_id, 0)
-    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
+    og_base = wp.where(sel_geom, 0, image_id * n_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
     li = tr // BLOCK_WIDTH
@@ -870,7 +870,7 @@ def _rasterize_bwd_depth_kernel(
         image_id,
         geom_image,
         tile_local,
-        num_tiles,
+        n_tiles,
         img_h,
         img_w,
         vout_rows,
@@ -894,14 +894,14 @@ def _rasterize_bwd_depth_kernel(
     dbuffer = wp.float32(0.0)  # Depth is treated like a color channel
 
     start_idx = wp.tile_max(wp.tile(bin_final))[0]
-    num_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
+    n_batches = (start_idx - range_start + BLOCK_SIZE) // BLOCK_SIZE
 
     geo_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=_vec6, storage="shared")
     cd_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.vec4, storage="shared")
     id_tile = wp.tile_empty(shape=BLOCK_SIZE, dtype=wp.int32, storage="shared")
     sync_tile = wp.tile_empty(shape=1, dtype=wp.int32, storage="shared")
 
-    for b in range(num_batches):
+    for b in range(n_batches):
         wp.tile_scatter_add(sync_tile, 0, 0, False)
 
         batch_end = start_idx - b * BLOCK_SIZE
@@ -971,8 +971,8 @@ def _rasterize_bwd_depth_agg_kernel(
     img_h: wp.int32,
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
-    num_tiles: wp.int32,
-    num_gaussians: wp.int32,
+    n_tiles: wp.int32,
+    n_gaussians: wp.int32,
     sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
@@ -1005,10 +1005,10 @@ def _rasterize_bwd_depth_agg_kernel(
     blk, tr = wp.tid()
     tile_g = blk // _SUBTILES
     sub = blk % _SUBTILES
-    image_id = tile_g // num_tiles
-    tile_local = tile_g % num_tiles
+    image_id = tile_g // n_tiles
+    tile_local = tile_g % n_tiles
     geom_image = wp.where(sel_geom, image_id, 0)
-    og_base = wp.where(sel_geom, 0, image_id * num_gaussians)
+    og_base = wp.where(sel_geom, 0, image_id * n_gaussians)
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
     li = sub * 2 + tr // BLOCK_WIDTH
@@ -1022,7 +1022,7 @@ def _rasterize_bwd_depth_agg_kernel(
         image_id,
         geom_image,
         tile_local,
-        num_tiles,
+        n_tiles,
         img_h,
         img_w,
         vout_rows,
@@ -1109,7 +1109,7 @@ def _load_bwd_pixel(
     image_id: wp.int32,
     geom_image: wp.int32,
     tile_local: wp.int32,
-    num_tiles: wp.int32,
+    n_tiles: wp.int32,
     img_h: wp.int32,
     img_w: wp.int32,
     vout_rows: wp.int32,
@@ -1125,7 +1125,7 @@ def _load_bwd_pixel(
     Returns the tile's sorted index range, whether the pixel is inside the image, and the per-pixel
     final contributor, final transmittance, image cotangent, and background.
     """
-    tile_range = tile_bins[geom_image * num_tiles + tile_local]
+    tile_range = tile_bins[geom_image * n_tiles + tile_local]
     range_start = tile_range[0]
     range_end = tile_range[1]
     inside = (i < img_h) and (j < img_w)

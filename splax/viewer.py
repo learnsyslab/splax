@@ -56,7 +56,7 @@ class Viewer:
         *,
         position: jax.Array | np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
         wxyz: jax.Array | np.ndarray | tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
-    ) -> None:
+    ):
         """Upload one rigid object's gaussians to the viewer under ``name``.
 
         Args:
@@ -85,7 +85,7 @@ class Viewer:
 
     def update_pose(
         self, name: str, position: jax.Array | np.ndarray, wxyz: jax.Array | np.ndarray
-    ) -> None:
+    ):
         """Set the world pose of the object ``name``.
 
         Args:
@@ -97,10 +97,10 @@ class Viewer:
         handle.position = np.asarray(position, np.float32)
         handle.wxyz = np.asarray(wxyz, np.float32)
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str):
         """Remove the object ``name`` from the viewer."""
         self._handles.pop(name).remove()
 
-    def close(self) -> None:
+    def close(self):
         """Stop the web server."""
         self.server.stop()

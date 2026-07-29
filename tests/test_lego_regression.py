@@ -42,7 +42,7 @@ SLACK = 0.05
 @pytest.mark.parametrize("frame_idx", [0, 25, 50])
 def test_lego_render_psnr_regression(
     frame_idx: int, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
-) -> None:
+):
     means, scales, quats, colors, opac = splax.io.load_ply(lego_ply)
 
     frame = lego_meta["frames"][frame_idx]

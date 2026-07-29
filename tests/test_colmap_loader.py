@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_parsers_and_conventions(drone_sparse: Path) -> None:
+def test_parsers_and_conventions(drone_sparse: Path):
     cams, imgs, (xyz, rgb, ids, _) = read_reconstruction(drone_sparse)
 
     assert len(cams) >= 1 and len(imgs) > 0 and xyz.shape[0] > 0
@@ -37,7 +37,7 @@ def test_parsers_and_conventions(drone_sparse: Path) -> None:
     assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-5)
 
 
-def test_point_init_static_shapes(drone_sparse: Path) -> None:
+def test_point_init_static_shapes(drone_sparse: Path):
     _, _, (xyz, rgb, _, _) = read_reconstruction(drone_sparse)
     n = 8000
     p = init_from_points(xyz[:3000].astype(np.float32), rgb[:3000], n, 0.1, seed=0)

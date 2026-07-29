@@ -274,7 +274,7 @@ def main() -> tuple[float, float]:
     return p_final, wall
 
 
-def write_progression(frames: dict[int, np.ndarray], bg: np.ndarray) -> None:
+def write_progression(frames: dict[int, np.ndarray], bg: np.ndarray):
     """Write a labeled progression strip image."""
     face = tuple(float(c) for c in bg)
     # relative luminance decides label color so titles stay readable on dark bg
@@ -292,7 +292,7 @@ def write_progression(frames: dict[int, np.ndarray], bg: np.ndarray) -> None:
     plt.close(fig)
 
 
-def write_gif(frames: dict[int, np.ndarray], gif_out: Path) -> None:
+def write_gif(frames: dict[int, np.ndarray], gif_out: Path):
     """Write the emergence gif with perceptual resampling."""
     kept = monotone_filter(candidate_steps(), frames)
     seq, labels, n_blend = perceptual_resample(kept, frames, GIF_N)

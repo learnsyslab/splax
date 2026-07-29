@@ -523,7 +523,7 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
     return -10 * np.log10(mse) if mse > 0 else float("inf")
 
 
-def save_ply(path: str | Path, params: dict[str, jax.Array]) -> None:
+def save_ply(path: str | Path, params: dict[str, jax.Array]):
     """Write current parameters to a 3DGS PLY file."""
     scales = jnp.exp(params["log_scales"])
     quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
@@ -796,7 +796,7 @@ def train(args: argparse.Namespace) -> dict:
     return result
 
 
-def _plot_curve(curve: list[dict], wall: float, final: float) -> None:
+def _plot_curve(curve: list[dict], wall: float, final: float):
     """Plot and save the held out PSNR curve."""
     steps = [c["step"] for c in curve]
     ps = [c["eval_psnr"] for c in curve]
@@ -813,7 +813,7 @@ def _plot_curve(curve: list[dict], wall: float, final: float) -> None:
     logger.info(f"wrote {dir / 'training.png'}")
 
 
-def main() -> None:
+def main():
     """Parse CLI args and run COLMAP training."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", help="COLMAP scene dir (has sparse/<i>, images/)")

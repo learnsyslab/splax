@@ -3,8 +3,9 @@
 Three things are checked. First, gradient parity vs the gsplat reference (torch
 autograd) for two scalar losses and all five splat params. gsplat is a different
 CUDA kernel, so this is a numeric cross-check, not a bit-for-bit port comparison.
-It fails when gsplat is unavailable. Second, finite-difference directional
-derivative self-consistency, which needs no reference and always runs. Third,
+It is marked ``gsplat`` and skipped without gsplat installed. Second,
+finite-difference directional derivative self-consistency, which needs no reference and
+always runs. Third,
 grad under jit and batch-native grad under vmap matching the per-sample
 sequential grads. Exhaustive batched coverage lives in test_warp_grad_batched.py.
 
@@ -26,21 +27,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-import _gsplat_ref as gref  # noqa: E402
-
-import splax  # noqa: E402
+import splax
 
 if TYPE_CHECKING:
     import types
     from collections.abc import Callable
 
-
-@pytest.fixture
-def gsplat_ref() -> types.ModuleType:
-    """Fail the test with a clear reason when gsplat cannot run."""
-    gref.require_working()
-    return gref
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _scene(
@@ -107,11 +100,10 @@ def _losses(
     return {"sum": sum_loss, "wmse": wmse_loss}
 
 
+@pytest.mark.gsplat
 @pytest.mark.parametrize("n,H,W", [(3000, 128, 128), (8000, 160, 160)])
 @pytest.mark.parametrize("which", ["sum", "wmse"])
-def test_grad_parity_vs_gsplat(
-    n: int, H: int, W: int, which: str, gsplat_ref: types.ModuleType
-) -> None:
+def test_grad_parity_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: types.ModuleType):
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=n)
     args = (means, scales, quats, colors, opac)
 
@@ -124,7 +116,7 @@ def test_grad_parity_vs_gsplat(
     weight = None if which == "sum" else np.asarray(w)
 
     g_sp = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
-    g_gs = gref.grad(*args, viewmat=vm, background=bg, **_pk(H, W), weight=weight)
+    g_gs = gsplat_shim.grad(*args, viewmat=vm, background=bg, **_pk(H, W), weight=weight)
 
     qn = np.asarray(quats)
     for name, a, b in zip(["means", "scales", "quats", "colors", "opac"], g_sp, g_gs):
@@ -144,7 +136,7 @@ def test_grad_parity_vs_gsplat(
         assert rel < tol, f"{which}/{name} relative grad error {rel:.2e}"
 
 
-def test_finite_difference() -> None:
+def test_finite_difference():
     """Directional-derivative FD check: grad . v ~= (L(x+eps v) - L(x-eps v))/2eps.
 
     Hundreds of random parameters are exercised at once via a random unit
@@ -184,7 +176,7 @@ def test_finite_difference() -> None:
     )
 
 
-def test_grad_under_jit() -> None:
+def test_grad_under_jit():
     n, H, W = 2000, 128, 128
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=3)
     args = (means, scales, quats, colors, opac)
@@ -199,7 +191,7 @@ def test_grad_under_jit() -> None:
         assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
 
-def test_grad_under_vmap_matches_sequential() -> None:
+def test_grad_under_vmap_matches_sequential():
     """Match vmap gaussian grads against sequential grads."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=2)
@@ -237,7 +229,7 @@ def _render(
     ]
 
 
-def test_viewmat_finite_difference() -> None:
+def test_viewmat_finite_difference():
     """Check viewmat gradients with directional finite differences."""
     n, H, W = 4000, 120, 120
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=11)
@@ -263,7 +255,7 @@ def test_viewmat_finite_difference() -> None:
     )
 
 
-def test_grad_selection_consistency() -> None:
+def test_grad_selection_consistency():
     """Match joint kernel grads against per path kernel grads."""
     n, H, W = 3000, 110, 110
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=5)
@@ -282,7 +274,7 @@ def test_grad_selection_consistency() -> None:
     assert np.allclose(gv_only, np.asarray(gv_both), rtol=1e-4, atol=1e-6)
 
 
-def test_pose_chain_rule_fd() -> None:
+def test_pose_chain_rule_fd():
     """Validate se3 chain rule gradients with finite differences."""
 
     def skew(v: jax.Array) -> jax.Array:
@@ -317,7 +309,7 @@ def test_pose_chain_rule_fd() -> None:
     )
 
 
-def test_viewmat_grad_under_vmap_matches_sequential() -> None:
+def test_viewmat_grad_under_vmap_matches_sequential():
     """Match vmap viewmat grads against sequential viewmat grads."""
     n, H, W, B = 500, 96, 96, 3
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=9)

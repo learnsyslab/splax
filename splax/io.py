@@ -105,7 +105,7 @@ def write_ply(
     quats: jax.Array | np.ndarray,
     colors: jax.Array | np.ndarray,
     opacities: jax.Array | np.ndarray,
-) -> None:
+):
     """Write render-space splats to a 3DGS ``.ply``.
 
     Args:

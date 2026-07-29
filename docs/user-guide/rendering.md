@@ -94,7 +94,7 @@ The transforms are differentiable, see
 `splax.render` composes two `jax.custom_vjp` primitives that are also
 public.
 
-- `splax.project` maps gaussians to screen-space `(xys, depths, radii, conics, num_tiles_hit, cum_tiles_hit)`.
+- `splax.project` maps gaussians to screen-space `(xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit)`.
 - `splax.rasterize` blends the projected gaussians into the `(H, W, 3)` image.
 
 The Warp backend caches grow-only sort and bin scratch across renders.

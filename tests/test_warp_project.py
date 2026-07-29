@@ -10,32 +10,29 @@ numeric tolerance:
   - depths: camera-space z, essentially identical.
   - conics: inverse projected-2D-covariance (a, b, c), close.
 
-Integer tile counts (radii / num_tiles_hit) are NOT compared. gsplat returns a
+Integer tile counts (radii / n_tiles_hit) are NOT compared. gsplat returns a
 per-axis pixel radius under a different visibility/tiling convention than splax's
 scalar 3-sigma radius, so only the visibility they induce is cross-checked (the
 gaussians each backend keeps agree on the overwhelming majority). See
-tests/_gsplat_ref.py for the full list of convention conversions.
+tests/_gsplat.py for the full list of convention conversions.
 
-Everything here needs the gsplat reference, so the module guard fails the
-whole file loudly when gsplat cannot run.
+Every test here is marked ``gsplat`` and skipped when gsplat is not installed.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypedDict
 
-import _gsplat_ref as gref
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import splax
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-# Every test here needs the gsplat reference, fail the whole module without it.
-gref.require_working(allow_module_level=True)
+    from types import ModuleType
 
 
 class _ProjArgs(TypedDict):
@@ -71,7 +68,7 @@ def _assert_parity(
     splax_out: tuple[jax.Array, ...],
     ref: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     atol: float = 2e-3,
-) -> None:
+):
     xys_s, depths_s, radii_s, conics_s = (np.asarray(x) for x in splax_out[:4])
     radii_g, xys_g, depths_g, conics_g = ref
 
@@ -90,25 +87,28 @@ def _assert_parity(
     np.testing.assert_allclose(conics_s[mask], conics_g[mask], atol=atol, rtol=1e-3)
 
 
-def test_parity_random_10k() -> None:
+@pytest.mark.gsplat
+def test_parity_random_10k(gsplat_shim: ModuleType):
     means, scales, quats, viewmat = _random_inputs(10_000, seed=1)
     opac = jnp.full((means.shape[0],), 0.99)
     a = splax.project(means, scales, quats, viewmat, opacities=opac, **PROJ_ARGS)
-    b = gref.project(means, scales, quats, viewmat, **REF_ARGS)
+    b = gsplat_shim.project(means, scales, quats, viewmat, **REF_ARGS)
     _assert_parity(a, b)
 
 
-def test_parity_under_jit() -> None:
+@pytest.mark.gsplat
+def test_parity_under_jit(gsplat_shim: ModuleType):
     means, scales, quats, viewmat = _random_inputs(10_000, seed=2)
     opac = jnp.full((means.shape[0],), 0.99)
     a = jax.jit(lambda m, s, q, v: splax.project(m, s, q, v, opacities=opac, **PROJ_ARGS))(
         means, scales, quats, viewmat
     )
-    b = gref.project(means, scales, quats, viewmat, **REF_ARGS)
+    b = gsplat_shim.project(means, scales, quats, viewmat, **REF_ARGS)
     _assert_parity(a, b)
 
 
-def test_parity_lego_slice(lego_meta: dict, lego_ply: Path) -> None:
+@pytest.mark.gsplat
+def test_parity_lego_slice(gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path):
     means, scales, quats, _colors, _opac = splax.io.load_ply(lego_ply)
     means, scales, quats = means[:50_000], scales[:50_000], quats[:50_000]
     frame = lego_meta["frames"][0]
@@ -123,5 +123,5 @@ def test_parity_lego_slice(lego_meta: dict, lego_ply: Path) -> None:
     }
     opac = jnp.full((means.shape[0],), 0.99)
     a = splax.project(means, scales, quats, viewmat, opacities=opac, **args)
-    b = gref.project(means, scales, quats, viewmat, **args)
+    b = gsplat_shim.project(means, scales, quats, viewmat, **args)
     _assert_parity(a, b)

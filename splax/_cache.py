@@ -45,7 +45,7 @@ class _ScratchEntry(TypedDict):
     isect_dtype: type
     isect_ids: wp.array | None  # radix sort key buffer
     gaussian_ids: wp.array | None  # radix sort value buffer, same length as isect_ids
-    tile_bins: wp.array  # per-image per-tile bin edges of length B*num_tiles
+    tile_bins: wp.array  # per-image per-tile bin edges of length B*n_tiles
     depth_mm: wp.array  # per-image [dmin, dmax] for the packed depth quantization
 
 
@@ -92,7 +92,7 @@ def cached_scratch(
 
 def cached_launch(
     kernel: wp.Kernel, dim: int, args: list, device: wp.Device | None, block_dim: int = 0
-) -> None:
+):
     """Launch a kernel through its recorded per-device launch object.
 
     Records the launch on first use and afterwards replays it, repacking only the arguments whose
@@ -154,7 +154,7 @@ def fetch_count_read(pending: tuple | int) -> int:
     return int(pending[1][0])
 
 
-def clear_cache() -> None:
+def clear_cache():
     """Release the persistent sort and bin scratch cache buffers on all devices.
 
     Also purges the recorded launch cache to prevent referencing freed buffers.

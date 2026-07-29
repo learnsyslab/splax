@@ -36,8 +36,8 @@ def _project_warp(
     opacities: wp.array[wp.float32],
     gaussian_transforms: wp.array3d[wp.float32],
     transform_ids: wp.array[wp.int32],
-    num_gaussians: int,
-    num_transforms: int,
+    n_gaussians: int,
+    n_transforms: int,
     has_transforms: bool,
     img_h: int,
     img_w: int,
@@ -52,9 +52,9 @@ def _project_warp(
     depths: wp.array[wp.float32],
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
-    num_tiles_hit: wp.array[wp.int32],
+    n_tiles_hit: wp.array[wp.int32],
     cum_tiles_hit: wp.array[wp.int32],
-) -> None:
+):
     """Launch the kernel behind the ffi, deriving the batch selectors from runtime shapes.
 
     Native batch handling in jax requires jax.vmap with vmap_method="expand_dims". Warp's FFI
@@ -65,14 +65,14 @@ def _project_warp(
     # from an output shape. Inputs arrive flattened, so batched inputs have shape  (B1 * ... * N).
     # We thus check if the input is batched by comparing its leading dim to N. If batched, the flat
     # idx is used to read the input, otherwise the gaussian idx is used.
-    n = num_gaussians
+    n = n_gaussians
     total = xys.shape[0]  # B1 * ... * N
     sel_means = means3d.shape[0] > n
     sel_scales = scales.shape[0] > n
     sel_quats = quats.shape[0] > n
     sel_view = viewmat.shape[0] > 4
     sel_opac = opacities.shape[0] > n
-    sel_transforms = gaussian_transforms.shape[0] > num_transforms
+    sel_transforms = gaussian_transforms.shape[0] > n_transforms
     inputs = [
         means3d,
         scales,
@@ -82,7 +82,7 @@ def _project_warp(
         gaussian_transforms,
         transform_ids,
         n,
-        num_transforms,
+        n_transforms,
         has_transforms,
         sel_means,
         sel_scales,
@@ -99,12 +99,12 @@ def _project_warp(
         glob_scale,
         clip_thresh,
     ]
-    outputs = [xys, depths, radii, conics, num_tiles_hit]
+    outputs = [xys, depths, radii, conics, n_tiles_hit]
     wp.launch(_project_kernel, dim=total, inputs=inputs, outputs=outputs)
     # One global inclusive prefix sum over the flattened tile counts, so all images' intersections
     # are laid out contiguously for a single global sort. array_scan requires host-side temp
     # management, so cannot be captured in the JAX graph.
-    wp.utils.array_scan(num_tiles_hit, cum_tiles_hit, inclusive=True)
+    wp.utils.array_scan(n_tiles_hit, cum_tiles_hit, inclusive=True)
 
 
 project_ffi = nested_vmap(
@@ -128,8 +128,8 @@ def _project_kernel(
     opacities: wp.array[wp.float32],
     gaussian_transforms: wp.array3d[wp.float32],
     transform_ids: wp.array[wp.int32],
-    num_gaussians: wp.int32,
-    num_transforms: wp.int32,
+    n_gaussians: wp.int32,
+    n_transforms: wp.int32,
     has_transforms: wp.bool,
     sel_means: wp.bool,
     sel_scales: wp.bool,
@@ -150,10 +150,10 @@ def _project_kernel(
     depths: wp.array[wp.float32],
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
-    num_tiles_hit: wp.array[wp.int32],
+    n_tiles_hit: wp.array[wp.int32],
 ):
     idx = wp.tid()
-    n = num_gaussians
+    n = n_gaussians
     bid = idx // n  # batch id used to select the viewmat and transform slice
     gid = idx % n  # gaussian id. Used as index when the input is broadcast
     m_idx = wp.where(sel_means, idx, gid)
@@ -166,7 +166,7 @@ def _project_kernel(
     depths[idx] = 0.0
     radii[idx] = 0
     conics[idx] = wp.vec3(0.0, 0.0, 0.0)
-    num_tiles_hit[idx] = 0
+    n_tiles_hit[idx] = 0
 
     mean = means3d[m_idx]
 
@@ -176,7 +176,7 @@ def _project_kernel(
     if has_transforms:
         tf_id = transform_ids[gid]
     R_tf, moved, mean = _apply_transform(
-        gaussian_transforms, bid, num_transforms, sel_transforms, tf_id, mean
+        gaussian_transforms, bid, n_transforms, sel_transforms, tf_id, mean
     )
     W, p_view, M = _project_geom(
         mean, quats[q_idx], scales[s_idx], glob_scale, viewmat, vb, R_tf, moved
@@ -241,7 +241,7 @@ def _project_kernel(
     count = ellipse_tile_count(setup)
     if count <= 0:
         return
-    num_tiles_hit[idx] = count
+    n_tiles_hit[idx] = count
     depths[idx] = p_view[2]
     radii[idx] = wp.int32(wp.max(radius_x, radius_y))
     xys[idx] = wp.vec2(center_x, center_y)
@@ -266,8 +266,8 @@ def _project_bwd_warp(
     v_conic: wp.array[wp.vec3],
     gaussian_transforms: wp.array3d[wp.float32],
     transform_ids: wp.array[wp.int32],
-    num_gaussians: int,
-    num_transforms: int,
+    n_gaussians: int,
+    n_transforms: int,
     has_transforms: bool,
     fx: float,
     fy: float,
@@ -277,9 +277,9 @@ def _project_bwd_warp(
     v_quat: wp.array[wp.vec4],
     v_viewmat: wp.array2d[wp.float32],
     v_transforms: wp.array3d[wp.float32],
-) -> None:
+):
     """Launch the single projection backward, deriving batch selectors from runtime shapes."""
-    n = num_gaussians
+    n = n_gaussians
     B = v_mean3d.shape[0] // n
     # Selection analogous to the forward kernel to detect broadcast vs batched inputs
     sel_means = means3d.shape[0] > n
@@ -291,7 +291,7 @@ def _project_bwd_warp(
     sel_vxy = v_xy.shape[0] > n
     sel_vdepth = v_depth.shape[0] > n
     sel_vconic = v_conic.shape[0] > n
-    sel_transforms = gaussian_transforms.shape[0] > num_transforms
+    sel_transforms = gaussian_transforms.shape[0] > n_transforms
     v_mean3d.zero_()
     v_scale.zero_()
     v_quat.zero_()
@@ -318,7 +318,7 @@ def _project_bwd_warp(
             gaussian_transforms,
             transform_ids,
             n,
-            num_transforms,
+            n_transforms,
             has_transforms,
             blocks_per_image,
             sel_means,
@@ -366,8 +366,8 @@ def _project_bwd_kernel(
     v_conic_in: wp.array[wp.vec3],
     gaussian_transforms: wp.array3d[wp.float32],
     transform_ids: wp.array[wp.int32],
-    num_gaussians: wp.int32,
-    num_transforms: wp.int32,
+    n_gaussians: wp.int32,
+    n_transforms: wp.int32,
     has_transforms: wp.bool,
     blocks_per_image: wp.int32,
     sel_means: wp.bool,
@@ -391,7 +391,7 @@ def _project_bwd_kernel(
     v_transforms: wp.array3d[wp.float32],
 ):
     blk, tr = wp.tid()
-    n = num_gaussians
+    n = n_gaussians
     image_id = blk // blocks_per_image
     local_block = blk % blocks_per_image
     gid = local_block * VIEW_BLOCK + tr
@@ -417,7 +417,7 @@ def _project_bwd_kernel(
         mean_local = means3d[m_idx]
         # Recompute the geometry
         R_tf, moved, mean = _apply_transform(
-            gaussian_transforms, image_id, num_transforms, sel_transforms, tf_id, mean_local
+            gaussian_transforms, image_id, n_transforms, sel_transforms, tf_id, mean_local
         )
         W, p, M = _project_geom(
             mean, quats[q_idx], scales[s_idx], glob_scale, viewmat, vb, R_tf, moved
@@ -467,7 +467,7 @@ def _project_bwd_kernel(
         tmin = wp.tile_extract(wp.tile_min(wp.tile(tf_id)), 0)
         tmax = wp.tile_extract(wp.tile_max(wp.tile(tf_id)), 0)
         if tmin == tmax and tmin >= 0:
-            ob_tf = image_id * num_transforms + tmin
+            ob_tf = image_id * n_transforms + tmin
             for i in range(3):
                 for j in range(3):
                     stf = wp.tile_sum(wp.tile(v_R_tf[i, j]))
@@ -477,7 +477,7 @@ def _project_bwd_kernel(
                 if tr == 0:
                     wp.atomic_add(v_transforms, ob_tf, i, 3, wp.tile_extract(sttf, 0))
         elif moved and tmin != tmax:
-            out_tf = image_id * num_transforms + tf_id
+            out_tf = image_id * n_transforms + tf_id
             for i in range(3):
                 for j in range(3):
                     wp.atomic_add(v_transforms, out_tf, i, j, v_R_tf[i, j])
@@ -628,7 +628,7 @@ def _load_affine(m: wp.array2d[wp.float32], r0: wp.int32) -> tuple[wp.mat33, wp.
 def _apply_transform(
     transforms: wp.array3d[wp.float32],
     image_id: wp.int32,
-    num_transforms: wp.int32,
+    n_transforms: wp.int32,
     sel_transforms: wp.bool,
     tf_id: wp.int32,
     mean: wp.vec3,
@@ -637,7 +637,7 @@ def _apply_transform(
     R_tf = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     moved = wp.bool(False)
     if tf_id >= 0:
-        tf_idx = wp.where(sel_transforms, image_id * num_transforms + tf_id, tf_id)
+        tf_idx = wp.where(sel_transforms, image_id * n_transforms + tf_id, tf_id)
         R_tf, t_tf = _load_affine(transforms[tf_idx], 0)
         mean = R_tf * mean + t_tf
         moved = wp.bool(True)

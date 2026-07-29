@@ -87,7 +87,7 @@ def _recover_grad(
     return {kk: np.asarray(params[kk] - new[kk]) for kk in params}
 
 
-def test_b1_matches_pre_t6_single_view() -> None:
+def test_b1_matches_pre_t6_single_view():
     """batch=1 grad == the reconstructed single-view grad (default path frozen)."""
     params = _params(seed=1)
     gt, vm = _view(3)
@@ -112,7 +112,7 @@ def test_b1_matches_pre_t6_single_view() -> None:
         )
 
 
-def test_b2_grad_equals_mean_of_b1_grads() -> None:
+def test_b2_grad_equals_mean_of_b1_grads():
     """A B=2 step's gradient == mean of the two B=1 gradients (loss averaged over batch)."""
     params = _params(seed=2)
     gt0, vm0 = _view(1)
@@ -129,7 +129,7 @@ def test_b2_grad_equals_mean_of_b1_grads() -> None:
         )
 
 
-def test_b2_duplicate_view_equals_b1() -> None:
+def test_b2_duplicate_view_equals_b1():
     """B=2 of the same view twice == B=1 of that view (mean of identical = identical)."""
     params = _params(seed=4)
     gt, vm = _view(5)
@@ -139,7 +139,7 @@ def test_b2_duplicate_view_equals_b1() -> None:
         assert np.allclose(g_b1[kk], g_b2[kk], rtol=2e-3, atol=1e-5), kk
 
 
-def test_batched_step_runs_under_jit_with_exposure_and_depth() -> None:
+def test_batched_step_runs_under_jit_with_exposure_and_depth():
     """The batched step traces + runs for B=3 with depth-loss and exposure-opt on."""
     params = _params(n=150, seed=6)
     B = 3

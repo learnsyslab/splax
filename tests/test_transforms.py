@@ -80,7 +80,7 @@ def _manual_move(
     return m2, q2
 
 
-def test_identity_transforms_byte_identical() -> None:
+def test_identity_transforms_byte_identical():
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=1)
     kw = _kw(128, 128)
@@ -101,7 +101,7 @@ def test_identity_transforms_byte_identical() -> None:
     assert np.array_equal(plain, ident)
 
 
-def test_projection_matches_manual_transform() -> None:
+def test_projection_matches_manual_transform():
     """Kernel transform vs pre-transformed inputs, same projection outputs.
 
     The kernel rotates the covariance factor while the reference rotates the
@@ -148,7 +148,7 @@ def test_projection_matches_manual_transform() -> None:
     np.testing.assert_allclose(np.asarray(a[3])[live], np.asarray(b[3])[live], atol=1e-3)
 
 
-def test_render_matches_manual_transform() -> None:
+def test_render_matches_manual_transform():
     """Match transformed render against manual reference."""
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=3)
@@ -177,7 +177,7 @@ def test_render_matches_manual_transform() -> None:
     assert np.abs(moved - plain).max() > 1e-2
 
 
-def test_vmap_over_transforms_matches_sequential() -> None:
+def test_vmap_over_transforms_matches_sequential():
     """Match vmap transform output against sequential output."""
     n, B = 4000, 3
     means, scales, quats, colors, opac = _scene(n, seed=4)
@@ -206,7 +206,7 @@ def test_vmap_over_transforms_matches_sequential() -> None:
     assert np.abs(out[0] - out[B - 1]).max() > 1e-2
 
 
-def test_two_objects_move_independently() -> None:
+def test_two_objects_move_independently():
     """Move two slices independently and match the manual reference."""
     n = 4000
     means, scales, quats, colors, opac = _scene(n, seed=5)
@@ -250,7 +250,7 @@ def test_two_objects_move_independently() -> None:
     assert np.abs(both - swapped).max() > 1e-2
 
 
-def test_invalid_transform_inputs_raise() -> None:
+def test_invalid_transform_inputs_raise():
     n = 1000
     means, scales, quats, colors, opac = _scene(n, seed=6)
     kw = _kw(64, 64)
@@ -354,7 +354,7 @@ def _setup(seed: int) -> tuple:
     return means, scales, quats, (colors, opac, kw, target)
 
 
-def test_identity_transforms_match_plain_grads() -> None:
+def test_identity_transforms_match_plain_grads():
     means, scales, quats, extras = _setup(seed=2)
     eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (K, 4, 4))
     g_id = jax.grad(_loss_kernel, argnums=(0, 1, 2))(means, scales, quats, eye, extras=extras)
@@ -369,7 +369,7 @@ def test_identity_transforms_match_plain_grads() -> None:
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-8, err_msg=name)
 
 
-def test_gaussian_grads_match_jax_reference() -> None:
+def test_gaussian_grads_match_jax_reference():
     means, scales, quats, extras = _setup(seed=3)
     tfs = _tfs(ROTVECS, TRANS)
     gk = jax.grad(_loss_kernel, argnums=(0, 1, 2))(means, scales, quats, tfs, extras=extras)
@@ -385,7 +385,7 @@ def test_gaussian_grads_match_jax_reference() -> None:
     np.testing.assert_allclose(tang(np.asarray(gk[2])), tang(np.asarray(gr[2])), atol=2e-6)
 
 
-def test_pose_grads_match_jax_reference() -> None:
+def test_pose_grads_match_jax_reference():
     """Transform gradients, contracted to rotvec + translation pose coordinates."""
     means, scales, quats, extras = _setup(seed=4)
 
@@ -402,14 +402,14 @@ def test_pose_grads_match_jax_reference() -> None:
     assert np.abs(np.asarray(gk[0])).max() > 0 and np.abs(np.asarray(gk[1])).max() > 0
 
 
-def test_transform_grad_bottom_row_zero() -> None:
+def test_transform_grad_bottom_row_zero():
     means, scales, quats, extras = _setup(seed=5)
     tfs = _tfs(ROTVECS, TRANS)
     g_tf = jax.grad(_loss_kernel, argnums=3)(means, scales, quats, tfs, extras=extras)
     assert np.abs(np.asarray(g_tf)[:, 3, :]).max() == 0.0
 
 
-def test_vmap_grad_over_transform_stack() -> None:
+def test_vmap_grad_over_transform_stack():
     means, scales, quats, extras = _setup(seed=6)
     stack = jnp.stack([_tfs(ROTVECS, TRANS), _tfs(-ROTVECS, -TRANS)])
     grad_tf = jax.grad(_loss_kernel, argnums=3)
@@ -418,7 +418,7 @@ def test_vmap_grad_over_transform_stack() -> None:
     np.testing.assert_allclose(np.asarray(gb), np.stack(seq), rtol=1e-5, atol=1e-8)
 
 
-def test_vmap_grad_over_viewmats_with_transforms() -> None:
+def test_vmap_grad_over_viewmats_with_transforms():
     means, scales, quats, extras = _setup(seed=7)
     colors, opac, kw, target = extras
     tfs = _tfs(ROTVECS, TRANS)

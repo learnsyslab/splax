@@ -158,7 +158,7 @@ def make_gsplat(sc: Scene, batch: int) -> Callable[[], object]:
     ks_t = torch.as_tensor(k, device="cuda")[None].repeat(batch, 1, 1)
     views_t = torch.as_tensor(sc.viewmats[:batch], device="cuda")
 
-    def run() -> None:
+    def run():
         out, alpha, _ = gsplat.rasterization(*params, views_t, ks_t, res, res)
         _ = out + (1.0 - alpha) * bg_t
         torch.cuda.synchronize()
@@ -236,7 +236,7 @@ def run_scene(name: str, framework: str) -> dict:
 BUILDERS = {"synthetic": build_synthetic, "lego": build_lego, "hf": build_hf}
 
 
-def main() -> None:
+def main():
     """Run every scene in an isolated process and merge the JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenes", nargs="+", default=list(BUILDERS), help="subset of scenes")

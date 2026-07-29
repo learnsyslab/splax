@@ -30,7 +30,7 @@ GSPLAT_COLOR = "#d95f02"
 OUT_DIR = Path(__file__).resolve().parents[1] / "reports"
 
 
-def cover_page(pdf: PdfPages, data: dict) -> None:
+def cover_page(pdf: PdfPages, data: dict):
     """Cover page with the run metadata and the scenes benchmarked."""
     meta = data["meta"]
     fig = plt.figure(figsize=(11, 8.5))
@@ -63,7 +63,7 @@ def cover_page(pdf: PdfPages, data: dict) -> None:
     plt.close(fig)
 
 
-def scene_page(pdf: PdfPages, base: Path, sc: dict) -> None:
+def scene_page(pdf: PdfPages, base: Path, sc: dict):
     """One page per scene: sample render plus time, throughput, and memory curves."""
     rows = sc["rows"]
     batches = np.array([r["batch"] for r in rows])
@@ -119,7 +119,7 @@ def scene_page(pdf: PdfPages, base: Path, sc: dict) -> None:
     plt.close(fig)
 
 
-def backward_page(pdf: PdfPages, sc: dict) -> None:
+def backward_page(pdf: PdfPages, sc: dict):
     """One page per scene for the training step: time, throughput, and memory curves."""
     rows = sc["rows"]
     batches = np.array([r["batch"] for r in rows])
@@ -172,14 +172,14 @@ def backward_page(pdf: PdfPages, sc: dict) -> None:
     plt.close(fig)
 
 
-def summary_page(pdf: PdfPages, data: dict, title: str) -> None:
+def summary_page(pdf: PdfPages, data: dict, title: str):
     """Table of gsplat/splax time speedup and splax/gsplat memory ratio per batch."""
     scenes = data["scenes"]
     batches = data["meta"]["batches"]
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 8.5))
     fig.suptitle(title, fontsize=14, fontweight="bold")
 
-    def table(ax: Axes, key: str, num: str, den: str, title: str) -> None:
+    def table(ax: Axes, key: str, num: str, den: str, title: str):
         ax.axis("off")
         ax.set_title(title, fontsize=11, pad=12)
         col_labels = ["scene"] + [f"b={b}" for b in batches]
@@ -204,7 +204,7 @@ def summary_page(pdf: PdfPages, data: dict, title: str) -> None:
     plt.close(fig)
 
 
-def build_report(data: dict, bwd: dict | None, out: Path) -> None:
+def build_report(data: dict, bwd: dict | None, out: Path):
     """Render the full PDF report from the loaded benchmark data."""
     out.parent.mkdir(parents=True, exist_ok=True)
     bwd_scenes = {sc["name"]: sc for sc in bwd["scenes"]} if bwd else {}
@@ -219,7 +219,7 @@ def build_report(data: dict, bwd: dict | None, out: Path) -> None:
             summary_page(pdf, bwd, "Summary, training step: splax relative to gsplat")
 
 
-def main() -> None:
+def main():
     """Build the PDF from an existing benchmark JSON."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser(description=__doc__)
