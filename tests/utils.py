@@ -120,9 +120,6 @@ def assert_finite_difference(
 ):
     """Match the analytic directional derivative of a loss against central finite differences.
 
-    Every argument steps along its own unit gradient direction at once, which maximizes the
-    directional-derivative signal against the float32 render noise.
-
     Args:
         loss: Scalar loss of ``args``.
         args: The arguments the loss is differentiated with respect to.
@@ -131,6 +128,7 @@ def assert_finite_difference(
         rtol: Relative bound on the mismatch between the analytic and the numeric derivative.
         name: Prefix identifying the check in the assertion message.
     """
+    # Step along the unit gradient direction of each argument to maximize accuracy.
     directions = [g / (jnp.linalg.norm(g) + 1e-12) for g in grads]
     analytic = sum(float(jnp.vdot(g, d)) for g, d in zip(grads, directions))
     plus = float(loss(*(a + eps * d for a, d in zip(args, directions))))

@@ -1,53 +1,38 @@
-"""Viewer construction and pose updates, headless and CPU-only.
-
-viser is a websocket server, so the viewer runs without a GPU or display. The
-tests check the covariance conversion against closed-form cases and that
-add/update/remove round-trip through the underlying viser handles.
-"""
+"""Viewer construction and pose updates, headless and CPU-only because viser is web-based."""
 
 from __future__ import annotations
 
 import socket
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
+from utils import scene_params
 
 from splax.viewer import Viewer
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def test_viewer_roundtrip():
     """Add (jax and numpy inputs), update, and remove splats on a live server."""
-    rng = np.random.default_rng(0)
-    n = 50
-    means = rng.normal(size=(n, 3)).astype(np.float32)
-    log_scales = np.log(rng.uniform(0.01, 0.1, (n, 3))).astype(np.float32)
-    quats = rng.normal(size=(n, 4)).astype(np.float32)
-    sh_colors = rng.uniform(-1.0, 1.0, (n, 3)).astype(np.float32)
-    logit_opacities = rng.normal(size=(n,)).astype(np.float32)
-    splats = (means, log_scales, quats, sh_colors, logit_opacities)
+    *splats, _ = scene_params(50)
 
-    viewer = Viewer(host="127.0.0.1", port=_free_port())
+    with socket.socket() as s:  # Get a free port
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    viewer = Viewer(host="127.0.0.1", port=port)
     try:
-        viewer.add_splats("scene", *splats)
-        viewer.add_splats("drone", *(jnp.asarray(x) for x in splats), position=(1.0, 2.0, 3.0))
+        viewer.add_splats("splat_numpy", *(np.asarray(s) for s in splats))
+        viewer.add_splats("splat_jax", *splats, position=(1.0, 2.0, 3.0))
 
         pos, wxyz = np.array([0.5, -0.5, 1.0]), np.array([0.0, 0.0, 0.0, 1.0])
-        viewer.update_pose("drone", pos, wxyz)
-        handle = viewer._handles["drone"]
+        viewer.update_pose("splat_jax", pos, wxyz)
+        handle = viewer._handles["splat_jax"]
         np.testing.assert_allclose(handle.position, pos)
         np.testing.assert_allclose(handle.wxyz, wxyz)
 
-        with pytest.raises(KeyError, match="gate"):
-            viewer.update_pose("gate", pos, wxyz)
+        with pytest.raises(KeyError, match="missing_splat"):
+            viewer.update_pose("missing_splat", pos, wxyz)
 
-        viewer.remove("drone")
-        assert "drone" not in viewer._handles
+        viewer.remove("splat_numpy")
+        assert "splat_numpy" not in viewer._handles
     finally:
         viewer.close()
