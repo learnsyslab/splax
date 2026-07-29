@@ -7492,7 +7492,7 @@ packages:
 - pypi: ./
   name: splax
   requires_dist:
-  - jax[cuda12]>=0.10
+  - jax[cuda]>=0.10
   - imageio
   - plyfile
   - warp-lang>=1.14.0

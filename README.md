@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo_emerges_dark.gif">
-    <img src="docs/assets/logo_emerges_light.gif" alt="splax" width="560">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/learnsyslab/splax/main/docs/assets/logo_emerges_dark.gif">
+    <img src="https://raw.githubusercontent.com/learnsyslab/splax/main/docs/assets/logo_emerges_light.gif" alt="splax" width="560">
   </picture>
 </div>
 
@@ -13,7 +13,7 @@
 
 **Differentiable 3D gaussian splatting for JAX, with rasterization kernels written in [NVIDIA Warp](https://github.com/NVIDIA/warp).**
 
-[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://github.com/learnsyslab/splax/actions/workflows/ruff.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/ruff.yml)
 [![Ty](https://github.com/learnsyslab/splax/actions/workflows/ty.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/ty.yml)
