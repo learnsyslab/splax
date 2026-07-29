@@ -34,7 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.spatial.transform import RigidTransform
-from utils import VIEWMAT, assert_finite_difference, camera, poses, scene
+from utils import VIEWMAT, assert_finite_difference, camera, poses, scene_params
 
 import splax
 
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 B = 3
-PARAMS = ("means", "scales", "quats", "colors", "opacities")
+PARAMS = ("means", "log_scales", "quats", "sh_colors", "logit_opacities")
 LEGO_HEIGHT = LEGO_WIDTH = 800
 LEGO_OFFSET = jnp.array([0.01, -0.01, 0.01, 0.01, -0.01, 0.01])
 
@@ -66,7 +66,7 @@ def _assert_grads_close(name: str, batched: jax.Array, sequential: jax.Array):
 def test_render_grad():
     """Produce finite, nonzero gradients for the five splat parameters and the viewmat."""
     n, H, W = 2000, 96, 96
-    means, scales, quats, colors, opacities, background = scene(n, seed=1)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=1)
     kw = {"background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(2), (H, W, 3))
 
@@ -76,7 +76,7 @@ def test_render_grad():
         img, _ = splax.render(m, s, q, c, o, viewmat=v, **kw)
         return jnp.mean(weights * img)
 
-    args = (means, scales, quats, colors, opacities, VIEWMAT)
+    args = (means, log_scales, quats, sh_colors, logit_opacities, VIEWMAT)
     grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4, 5))(*args)
     for name, grad, arg in zip((*PARAMS, "viewmat"), grads, args):
         grad = np.asarray(grad)
@@ -93,7 +93,7 @@ def test_render_grad_finite_difference(antialiased: bool):
     Central differences in float32 give ~1e-2 relative accuracy, so a loose relative bound is used.
     """
     n, H, W = 400, 80, 80
-    means, scales, quats, colors, opacities, background = scene(n, seed=7)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=7)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(5), (H, W, 3))
 
@@ -104,7 +104,7 @@ def test_render_grad_finite_difference(antialiased: bool):
         img, _ = splax.render(m, s, q, c, o, antialiased=antialiased, **kw)
         return jnp.mean(weights * img)
 
-    args = (means, scales, quats, colors, opacities)
+    args = (means, log_scales, quats, sh_colors, logit_opacities)
     grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
     assert_finite_difference(loss, args, grads)
 
@@ -112,7 +112,7 @@ def test_render_grad_finite_difference(antialiased: bool):
 def test_render_grad_jit_matches_eager():
     """Match the jitted gradients against the eager gradients."""
     n, H, W = 2000, 128, 128
-    means, scales, quats, colors, opacities, background = scene(n, seed=3)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=3)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(123), (H, W, 3))
 
@@ -120,7 +120,7 @@ def test_render_grad_jit_matches_eager():
         img, _ = splax.render(m, s, q, c, o, **kw)
         return jnp.mean(weights * img**2)
 
-    args = (means, scales, quats, colors, opacities)
+    args = (means, log_scales, quats, sh_colors, logit_opacities)
     eager = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
     jitted = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4)))(*args)
     for a, b in zip(eager, jitted):
@@ -130,12 +130,14 @@ def test_render_grad_jit_matches_eager():
 def test_render_grad_viewmat():
     """Check the camera-pose gradient with directional finite differences."""
     n, H, W = 4000, 120, 120
-    means, scales, quats, colors, opacities, background = scene(n, seed=11)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=11)
     kw = {"background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(4), (H, W, 3))
 
     def loss(viewmat: jax.Array) -> jax.Array:
-        img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
+        img, _ = splax.render(
+            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
+        )
         return jnp.mean(weights * img)
 
     grad = jax.grad(loss)(VIEWMAT)
@@ -149,7 +151,7 @@ def test_render_grad_viewmat():
 def test_render_grad_viewmat_pose_chain_rule():
     """Check the gradient through an se3 pose parameterization with finite differences."""
     n, H, W = 4000, 120, 120
-    means, scales, quats, colors, opacities, background = scene(n, seed=13)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=13)
     kw = {"background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(8), (H, W, 3))
     xi0 = jnp.array([0.03, -0.02, 0.015, 0.04, -0.03, 0.02])
@@ -164,7 +166,9 @@ def test_render_grad_viewmat_pose_chain_rule():
             ]
         )
         viewmat = jax.scipy.linalg.expm(generator) @ VIEWMAT
-        img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
+        img, _ = splax.render(
+            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
+        )
         return jnp.mean(weights * img)
 
     grad = jax.grad(loss)(xi0)
@@ -175,12 +179,14 @@ def test_render_grad_viewmat_pose_chain_rule():
 def test_render_grad_selection_consistency():
     """Match the joint-kernel gradients against the single-path kernel gradients."""
     n, H, W = 3000, 110, 110
-    means, scales, quats, colors, opacities, background = scene(n, seed=5)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=5)
     kw = {"background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(6), (H, W, 3))
 
     def loss(m: jax.Array, viewmat: jax.Array) -> jax.Array:
-        img, _ = splax.render(m, scales, quats, colors, opacities, viewmat=viewmat, **kw)
+        img, _ = splax.render(
+            m, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
+        )
         return jnp.mean(weights * img)
 
     # Gaussian grad: means-only (gaussian kernel) vs joint (both kernel).
@@ -199,12 +205,12 @@ def test_render_grad_selection_consistency():
 def test_render_grad_vmap_matches_loop():
     """Match the vmapped gaussian gradients against the sequential gradients."""
     n, H, W = 500, 96, 96
-    means, scales, quats, colors, opacities, background = scene(n, seed=2)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=2)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     batched_means = means + 0.02 * jax.random.normal(jax.random.key(1), (B, n, 3))
 
     def loss(m: jax.Array) -> jax.Array:
-        img, _ = splax.render(m, scales, quats, colors, opacities, **kw)
+        img, _ = splax.render(m, log_scales, quats, sh_colors, logit_opacities, **kw)
         return jnp.sum(img)
 
     batched = np.asarray(jax.vmap(jax.grad(loss))(batched_means))
@@ -217,14 +223,16 @@ def test_render_grad_vmap_matches_loop():
 def test_render_grad_vmap_matches_loop_multiview():
     """Match per-image gaussian gradients under batched poses against the sequential stack."""
     n, H, W = 800, 96, 96
-    means, scales, quats, colors, opacities, background = scene(n, seed=2)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=2)
     kw = {"background": background, **camera(H, W)}
     viewmats = poses(B, 7)
     weights = jax.random.uniform(jax.random.key(3), (B, H, W, 3))
     batched_means = means + 0.02 * jax.random.normal(jax.random.key(4), (B, n, 3))
 
     def loss(m: jax.Array, viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
-        img, _ = splax.render(m, scales, quats, colors, opacities, viewmat=viewmat, **kw)
+        img, _ = splax.render(
+            m, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
+        )
         return jnp.mean(weights[i] * img)
 
     batched = jax.vmap(jax.grad(loss))(batched_means, viewmats, jnp.arange(B))
@@ -235,13 +243,15 @@ def test_render_grad_vmap_matches_loop_multiview():
 def test_render_grad_viewmat_vmap_matches_loop():
     """Match the vmapped per-pose camera gradients against the sequential gradients."""
     n, H, W = 800, 96, 96
-    means, scales, quats, colors, opacities, background = scene(n, seed=11)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=11)
     kw = {"background": background, **camera(H, W)}
     viewmats = poses(B, 12)
     weights = jax.random.uniform(jax.random.key(13), (B, H, W, 3))
 
     def loss(viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
-        img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
+        img, _ = splax.render(
+            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
+        )
         return jnp.mean(weights[i] * img)
 
     batched = jax.vmap(jax.grad(loss))(viewmats, jnp.arange(B))
@@ -257,13 +267,15 @@ def test_render_grad_viewmat_vmap_finite_difference():
     sequential kernel.
     """
     n, H, W = 3000, 110, 110
-    means, scales, quats, colors, opacities, background = scene(n, seed=21)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=21)
     kw = {"background": background, **camera(H, W)}
     viewmats = poses(B, 22)
     weights = jax.random.uniform(jax.random.key(23), (B, H, W, 3))
 
     def loss(viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
-        img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat, **kw)
+        img, _ = splax.render(
+            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
+        )
         return jnp.mean(weights[i] * img)
 
     grad = jax.vmap(jax.grad(loss))(viewmats, jnp.arange(B))[0]
@@ -283,8 +295,8 @@ def test_render_grad_broadcast_summed(param: str):
     batched, while the gaussians stay shared.
     """
     n, H, W = 800, 96, 96
-    means, scales, quats, colors, opacities, background = scene(n, seed=5)
-    splat = (means, scales, quats, colors, opacities)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=5)
+    splat = (means, log_scales, quats, sh_colors, logit_opacities)
     index = PARAMS.index(param)
     kw = {"background": background, **camera(H, W)}
     viewmats = poses(B, 8)
@@ -302,7 +314,7 @@ def test_render_grad_broadcast_summed(param: str):
     _assert_grads_close(f"{param} broadcast", jnp.sum(per_image, axis=0), total)
 
 
-@pytest.mark.parametrize("param", ["means", "colors", "opacities"])
+@pytest.mark.parametrize("param", ["means", "sh_colors", "logit_opacities"])
 def test_render_grad_broadcast_geometry(param: str):
     """Match the vmapped gradients of a render shared across the batch against the loop.
 
@@ -310,8 +322,8 @@ def test_render_grad_broadcast_geometry(param: str):
     geometry is broadcast while the image cotangent is batched.
     """
     n, H, W = 600, 80, 80
-    means, scales, quats, colors, opacities, background = scene(n, seed=17)
-    splat = (means, scales, quats, colors, opacities)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=17)
+    splat = (means, log_scales, quats, sh_colors, logit_opacities)
     index = PARAMS.index(param)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(18), (B, H, W, 3))
@@ -334,8 +346,8 @@ def test_render_grad_broadcast_geometry(param: str):
 @pytest.mark.parametrize("which", ["sum", "wmse"])
 def test_render_grad_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: ModuleType):
     """Match the gradients of two scalar losses against gsplat's torch autograd."""
-    means, scales, quats, colors, opacities, background = scene(n, seed=n)
-    splat = (means, scales, quats, colors, opacities)
+    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=n)
+    splat = (means, log_scales, quats, sh_colors, logit_opacities)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(123), (H, W, 3))
 
@@ -345,7 +357,14 @@ def test_render_grad_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: 
 
     grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splat)
     weight = None if which == "sum" else np.asarray(weights)
-    reference = gsplat_shim.grad(*splat, **kw, weight=weight)
+    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    g_means, g_scales, g_quats, g_colors, g_opacities = gsplat_shim.grad(
+        means, scales, quats, colors, opacities, **kw, weight=weight
+    )
+    # gsplat differentiates the activated arrays, so its gradients pull back through the activations
+    _, pullback = jax.vjp(splax.io.apply_activations, log_scales, sh_colors, logit_opacities)
+    pulled = pullback((jnp.asarray(g_scales), jnp.asarray(g_colors), jnp.asarray(g_opacities)))
+    reference = (g_means, pulled[0], g_quats, pulled[1], pulled[2])
 
     for name, grad, ref in zip(PARAMS, grads, reference):
         grad, ref = np.asarray(grad), np.asarray(ref)
@@ -364,7 +383,11 @@ def test_render_grad_vs_gsplat_lego_viewmat(
     Both implementations differentiate a pixelwise MSE against a target rendered at a slightly
     offset pose. Single-view and vmap-batched gradients are covered.
     """
-    means, scales, quats, colors, opacities = splax.io.load_ply(lego_ply)
+    splat = splax.io.load_ply(lego_ply)
+    means, log_scales, quats, sh_colors, logit_opacities = splat
+    # gsplat renders from the activated arrays the parameters map onto
+    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    gsplat_splat = (means, scales, quats, colors, opacities)
     viewmat = splax.utils.nerf_camera(lego_meta["frames"][0]["transform_matrix"])
     focal = float(0.5 * LEGO_WIDTH / np.tan(0.5 * lego_meta["camera_angle_x"]))
     kw = {
@@ -379,18 +402,16 @@ def test_render_grad_vs_gsplat_lego_viewmat(
     viewmats = RigidTransform.from_exp_coords(tangents).as_matrix() @ viewmat
 
     # Render the target in the same framework to reduce noise from framework differences.
-    target = splax.render(means, scales, quats, colors, opacities, viewmat=target_viewmat, **kw)[0]
-    gsplat_target, _gsplat_alpha = gsplat_shim.render(
-        means, scales, quats, colors, opacities, viewmat=target_viewmat, **kw
-    )
+    target = splax.render(*splat, viewmat=target_viewmat, **kw)[0]
+    gsplat_target, _gsplat_alpha = gsplat_shim.render(*gsplat_splat, viewmat=target_viewmat, **kw)
 
     def loss(viewmat_in: jax.Array) -> jax.Array:
-        img, _ = splax.render(means, scales, quats, colors, opacities, viewmat=viewmat_in, **kw)
+        img, _ = splax.render(*splat, viewmat=viewmat_in, **kw)
         return jnp.mean((img - target) ** 2)
 
     single = np.asarray(jax.grad(loss)(viewmats[1]))
     reference = gsplat_shim.viewmat_grad(
-        means, scales, quats, colors, opacities, viewmat=viewmats[1], target=gsplat_target, **kw
+        *gsplat_splat, viewmat=viewmats[1], target=gsplat_target, **kw
     )
     assert np.allclose(single, reference, rtol=1e-3, atol=1e-4)
     assert not np.allclose(single, np.zeros_like(single)), "gradient is zero"
@@ -399,14 +420,7 @@ def test_render_grad_vs_gsplat_lego_viewmat(
     batched_reference = np.asarray(
         [
             gsplat_shim.viewmat_grad(
-                means,
-                scales,
-                quats,
-                colors,
-                opacities,
-                viewmat=viewmats[view],
-                target=gsplat_target,
-                **kw,
+                *gsplat_splat, viewmat=viewmats[view], target=gsplat_target, **kw
             )
             for view in range(B)
         ]

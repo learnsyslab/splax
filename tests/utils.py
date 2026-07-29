@@ -1,8 +1,9 @@
 """Scene builders and shared assertions of the splax test suite.
 
-``scene`` draws a random splat, in either of the two regimes the suite needs, and ``camera`` builds
-the matching intrinsics for a square-focal pinhole. ``assert_finite_difference`` is the numeric
-check every gradient test runs against.
+``scene`` draws a random splat in activated form, in either of the two regimes the suite needs, and
+``scene_params`` returns the same splat in the parameters ``splax.render`` consumes. ``camera``
+builds the matching intrinsics for a square-focal pinhole. ``assert_finite_difference`` is the
+numeric check every gradient test runs against.
 """
 
 from __future__ import annotations
@@ -29,12 +30,12 @@ VIEWS = jnp.stack([VIEWMAT.at[0, 3].set(dx) for dx in (0.0, 0.3, -0.2)])
 def scene(
     n: int, seed: int = 0, *, dense: bool = False
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Draw a random splat with a random background color.
+    """Draw a random splat in activated form with a random background color.
 
     Args:
         n: Number of gaussians.
         seed: Seed for the parameter draws.
-        dense: Draw many small gaussians over a unit ball across the full opacity range, the
+        dense: Draw many small gaussians over a unit ball across almost the full opacity range, the
             regime the parity and tile-emission tests exercise. Otherwise the gaussians are large,
             soft, and tightly clustered, which suits the gradient and finite-difference checks.
 
@@ -44,7 +45,8 @@ def scene(
     """
     spread = 1.0 if dense else 0.5
     scale_lo, scale_hi = (0.005, 0.05) if dense else (0.02, 0.08)
-    opacity_lo, opacity_hi = (0.0, 1.0) if dense else (0.1, 0.6)
+    # The lower opacity bound stays clear of 0, where the logit of the parameter space diverges.
+    opacity_lo, opacity_hi = (0.01, 1.0) if dense else (0.1, 0.6)
     k = jax.random.split(jax.random.key(seed), 6)
     means = jax.random.normal(k[0], (n, 3)) * spread
     scales = jax.random.uniform(k[1], (n, 3), minval=scale_lo, maxval=scale_hi)
@@ -54,6 +56,25 @@ def scene(
     opacities = jax.random.uniform(k[4], (n,), minval=opacity_lo, maxval=opacity_hi)
     background = jax.random.uniform(k[5], (3,))
     return means, scales, quats, colors, opacities, background
+
+
+def scene_params(
+    n: int, seed: int = 0, *, dense: bool = False
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Draw a random splat in the unconstrained parameters ``splax.render`` consumes.
+
+    Args:
+        n: Number of gaussians.
+        seed: Seed for the parameter draws.
+        dense: Select the regime as in ``scene``.
+
+    Returns:
+        means ``(n, 3)``, log_scales ``(n, 3)``, quats ``(n, 4)``, sh_colors ``(n, 3)``,
+        logit_opacities ``(n,)``, and a background color ``(3,)``.
+    """
+    means, scales, quats, colors, opacities, background = scene(n, seed, dense=dense)
+    log_scales, sh_colors, logit_opacities = splax.io.invert_activations(scales, colors, opacities)
+    return means, log_scales, quats, sh_colors, logit_opacities, background
 
 
 def camera(H: int, W: int) -> dict:

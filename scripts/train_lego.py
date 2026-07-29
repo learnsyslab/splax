@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 logger = logging.getLogger(__name__)
 
 LEGO = Path("data/nerf_synthetic/lego")
-SPLAT_KEYS = ("means", "log_scales", "quats", "colors_logit", "opac_logit")
+SPLAT_KEYS = ("means", "log_scales", "quats", "sh_colors", "opac_logit")
 
 
 def load_view(frame: dict, res: int) -> tuple[jax.Array, jax.Array]:
@@ -64,7 +64,7 @@ def init_params(n: int, init_scale: float, init_opa: float, seed: int = 0) -> di
         "means": jax.random.uniform(key_means, (n, 3), minval=-1.3, maxval=1.3),
         "log_scales": jnp.full((n, 3), jnp.log(init_scale)),
         "quats": jax.random.normal(key_quats, (n, 4)),
-        "colors_logit": jax.random.normal(key_colors, (n, 3)) * 0.1,
+        "sh_colors": jax.random.normal(key_colors, (n, 3)) * 0.1,
         "opac_logit": jnp.full((n,), float(np.log(init_opa / (1 - init_opa)))),
     }
 
@@ -77,12 +77,8 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
 
 def save_ply(path: str | Path, params: dict[str, jax.Array]):
     """Write the fitted Gaussians to a PLY file."""
-    scales = jnp.exp(params["log_scales"])
-    quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
-    colors = jax.nn.sigmoid(params["colors_logit"])
-    opac = jax.nn.sigmoid(params["opac_logit"])
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    splax.io.write_ply(path, params["means"], scales, quats, colors, opac)
+    splax.io.write_ply(path, *(params[key] for key in SPLAT_KEYS))
     logger.info(f"wrote {path}")
 
 
@@ -106,7 +102,7 @@ def _make_step(
         viewmat: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         splats = tuple(params[k] for k in SPLAT_KEYS)
-        img, _ = splax.render_log(*splats, viewmat=viewmat, background=bg, **camera)
+        img, _ = splax.render(*splats, viewmat=viewmat, background=bg, **camera)
         gt = gt_alpha * gt_rgb + (1.0 - gt_alpha) * bg
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
@@ -193,7 +189,7 @@ def train(args: argparse.Namespace) -> dict:
 
     def eval_render(viewmat: jax.Array) -> jax.Array:
         splats = tuple(params[k] for k in SPLAT_KEYS)
-        return splax.render_log(*splats, viewmat=viewmat, **eval_camera)[0]
+        return splax.render(*splats, viewmat=viewmat, **eval_camera)[0]
 
     def eval_psnr() -> tuple[float, list[float]]:
         """Evaluate the current parameters on held out frames."""
@@ -205,7 +201,7 @@ def train(args: argparse.Namespace) -> dict:
         "means": optax.adam(means_sched),
         "log_scales": optax.adam(args.scales_lr),
         "quats": optax.adam(args.quats_lr),
-        "colors_logit": optax.adam(args.colors_lr),
+        "sh_colors": optax.adam(args.colors_lr),
         "opac_logit": optax.adam(args.opac_lr),
     }
     opt = optax.multi_transform(transforms, {key: key for key in params})

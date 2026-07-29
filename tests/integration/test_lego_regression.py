@@ -37,7 +37,7 @@ SLACK = 0.05
 def test_lego_render_psnr_regression(
     frame_idx: int, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
 ):
-    means, scales, quats, colors, opac = splax.io.load_ply(lego_ply)
+    splats = splax.io.load_ply(lego_ply)
 
     frame = lego_meta["frames"][frame_idx]
     gt = lego_view(frame["file_path"])
@@ -48,11 +48,7 @@ def test_lego_render_psnr_regression(
 
     ff = 0.5 * W / np.tan(0.5 * lego_meta["camera_angle_x"])
     img, _ = splax.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
+        *splats,
         viewmat=jnp.asarray(viewmat),
         background=jnp.ones(3),
         img_shape=(H, W),

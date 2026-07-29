@@ -27,20 +27,16 @@ def test_viewer_roundtrip():
     rng = np.random.default_rng(0)
     n = 50
     means = rng.normal(size=(n, 3)).astype(np.float32)
-    scales = rng.uniform(0.01, 0.1, (n, 3)).astype(np.float32)
+    log_scales = np.log(rng.uniform(0.01, 0.1, (n, 3))).astype(np.float32)
     quats = rng.normal(size=(n, 4)).astype(np.float32)
-    quats /= np.linalg.norm(quats, axis=-1, keepdims=True)
-    colors = rng.uniform(0.0, 1.0, (n, 3)).astype(np.float32)
-    opacities = rng.uniform(0.0, 1.0, (n,)).astype(np.float32)
+    sh_colors = rng.uniform(-1.0, 1.0, (n, 3)).astype(np.float32)
+    logit_opacities = rng.normal(size=(n,)).astype(np.float32)
+    splats = (means, log_scales, quats, sh_colors, logit_opacities)
 
     viewer = Viewer(host="127.0.0.1", port=_free_port())
     try:
-        viewer.add_splats("scene", means, scales, quats, colors, opacities)
-        viewer.add_splats(
-            "drone",
-            *(jnp.asarray(x) for x in (means, scales, quats, colors, opacities)),
-            position=(1.0, 2.0, 3.0),
-        )
+        viewer.add_splats("scene", *splats)
+        viewer.add_splats("drone", *(jnp.asarray(x) for x in splats), position=(1.0, 2.0, 3.0))
 
         pos, wxyz = np.array([0.5, -0.5, 1.0]), np.array([0.0, 0.0, 0.0, 1.0])
         viewer.update_pose("drone", pos, wxyz)

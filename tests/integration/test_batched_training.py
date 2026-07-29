@@ -18,7 +18,7 @@ import optax
 import pytest
 from train_colmap import init_exposure, make_step
 
-from splax import render_log
+from splax import render
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
@@ -37,7 +37,7 @@ def _params(n: int = 200, seed: int = 0) -> dict[str, jax.Array]:
         "means": jax.random.uniform(k[0], (n, 3), minval=-0.6, maxval=0.6),
         "log_scales": jnp.full((n, 3), jnp.log(0.05)),
         "quats": jax.random.normal(k[1], (n, 4)),
-        "colors_logit": jax.random.normal(k[2], (n, 3)) * 0.3,
+        "sh_colors": jax.random.normal(k[2], (n, 3)) * 0.3,
         "opac_logit": jnp.full((n,), -1.0),
     }
 
@@ -83,8 +83,8 @@ def test_batch1_matches_single_view():
     gt, vm = _view(3)
 
     def single_view_loss(p: dict[str, jax.Array]) -> jax.Array:
-        splats = (p["means"], p["log_scales"], p["quats"], p["colors_logit"], p["opac_logit"])
-        img, _ = render_log(*splats, viewmat=vm, background=jnp.ones(3), **CAMERA)
+        splats = (p["means"], p["log_scales"], p["quats"], p["sh_colors"], p["opac_logit"])
+        img, _ = render(*splats, viewmat=vm, background=jnp.ones(3), **CAMERA)
         l1 = jnp.mean(jnp.abs(img - gt))
         dssim = 1.0 - dm_pix.ssim(img, gt)
         loss = (1.0 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * dssim

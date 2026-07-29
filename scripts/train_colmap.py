@@ -30,7 +30,7 @@ from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 
 import splax
-from splax import render_log
+from splax import render
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
 
-SPLAT_KEYS = ("means", "log_scales", "quats", "colors_logit", "opac_logit")
+SPLAT_KEYS = ("means", "log_scales", "quats", "sh_colors", "opac_logit")
 
 
 def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
@@ -184,7 +184,7 @@ def make_step(
         splats = tuple(p[k] for k in SPLAT_KEYS)
         if depth_loss:
             args = {"viewmat": vm, "background": bg, "render_depth": True, **camera}
-            colors, _ = render_log(*splats, **args)
+            colors, _ = render(*splats, **args)
             img = colors[..., :3]
             dpred = _bilinear_sample(colors[..., 3], pts_uv)
             npts = jnp.sum(pts_mask) + 1e-8
@@ -193,7 +193,7 @@ def make_step(
             scale = jnp.sum(pts_mask * pts_depth) / npts + 1e-8
             dl = jnp.sum(pts_mask * jnp.abs(dpred - pts_depth)) / npts / scale
         else:
-            img, _ = render_log(*splats, viewmat=vm, background=bg, **camera)
+            img, _ = render(*splats, viewmat=vm, background=bg, **camera)
             dl = jnp.array(0.0, jnp.float32)
         if exp_opt:
             assert aux_p is not None
@@ -525,12 +525,8 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
 
 def save_ply(path: str | Path, params: dict[str, jax.Array]):
     """Write current parameters to a 3DGS PLY file."""
-    scales = jnp.exp(params["log_scales"])
-    quats = params["quats"] / (jnp.linalg.norm(params["quats"], axis=-1, keepdims=True) + 1e-8)
-    colors = jax.nn.sigmoid(params["colors_logit"])
-    opac = jax.nn.sigmoid(params["opac_logit"])
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    splax.io.write_ply(path, params["means"], scales, quats, colors, opac)
+    splax.io.write_ply(path, *(params[k] for k in SPLAT_KEYS))
     logger.info(f"wrote {path}")
 
 
@@ -596,9 +592,7 @@ def train(args: argparse.Namespace) -> dict:
 
     def eval_psnr(idxs: list[int]) -> list[float]:
         splats = tuple(params[k] for k in SPLAT_KEYS)
-        return [
-            psnr(render_log(*splats, viewmat=eval_vms[i], **camera)[0], eval_imgs[i]) for i in idxs
-        ]
+        return [psnr(render(*splats, viewmat=eval_vms[i], **camera)[0], eval_imgs[i]) for i in idxs]
 
     # spread the scored eval views over the whole trajectory. The first n_eval held-out
     # views all come from the start of the capture and are not representative.
@@ -640,7 +634,7 @@ def train(args: argparse.Namespace) -> dict:
         "means": optax.adam(means_sched),
         "log_scales": optax.adam(group_sched(args.scales_lr * lr_scale)),
         "quats": optax.adam(group_sched(args.quats_lr * lr_scale)),
-        "colors_logit": optax.adam(group_sched(args.colors_lr * lr_scale)),
+        "sh_colors": optax.adam(group_sched(args.colors_lr * lr_scale)),
         "opac_logit": optax.adam(group_sched(args.opac_lr * lr_scale)),
     }
     opt = optax.multi_transform(txs, {k: k for k in params})
@@ -910,7 +904,7 @@ def main():
         help="COLMAP sparse-point depth regularization (gsplat depth_loss, "
         "survey T2): scale-normalized masked L1 between the rendered "
         "expected-depth channel and the sparse points' camera depths. "
-        "Off by default; off-path is bit-identical. See "
+        "Off by default, leaving the render unchanged. See "
         "reports/phase8g_depth_reg.md.",
     )
     ap.add_argument(

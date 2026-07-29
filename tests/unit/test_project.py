@@ -24,7 +24,7 @@ B = len(VIEWS)
 
 
 def _assert_matches_loop(batched: tuple[jax.Array, ...], refs: list[tuple[jax.Array, ...]]):
-    """Assert each per-image slice of a batched projection is bit-exact against its single call.
+    """Assert each per-image slice of a batched projection matches its single call exactly.
 
     ``cum_tiles_hit`` is excluded because it scans the whole batch and has no per-image counterpart.
     """
@@ -251,7 +251,7 @@ def test_project_quat_scale():
 
     The rotation is built from the normalized quaternion, so the outputs depend on the quaternion
     direction alone while the gradient carries the ``1 / |q|`` factor of that normalization. A
-    power-of-two scale keeps both relations bit-exact in float32.
+    power-of-two scale keeps both relations exact in float32.
     """
     n, H, W = 400, 96, 96
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=15)
@@ -269,7 +269,7 @@ def test_project_grad_vmap_matches_loop():
     """Match vmap(grad) over a batch of scenes and cameras against the loop over single gradients.
 
     The per-gaussian gradients are written by the thread owning the gaussian, so they stay
-    bit-exact. The viewmat gradient accumulates every gaussian of an image with atomics, whose
+    exact. The viewmat gradient accumulates every gaussian of an image with atomics, whose
     order follows the launch geometry, so it is compared numerically.
     """
     n, H, W = 800, 96, 96

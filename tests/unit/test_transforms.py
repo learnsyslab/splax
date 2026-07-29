@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
-from utils import VIEWMAT, camera, manual_move, scene
+from utils import VIEWMAT, camera, manual_move, scene, scene_params
 
 import splax
 
@@ -55,19 +55,19 @@ def test_projection_matches_manual_transform():
 
 
 def test_invalid_transform_inputs_raise():
-    means, scales, quats, colors, opac, bg = scene(1000, seed=6)
+    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(1000, seed=6)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(64, 64)}
     eye = jnp.eye(4, dtype=jnp.float32)[None]
 
     with pytest.raises(ValueError, match="together"):
-        splax.render(means, scales, quats, colors, opac, **kw, gaussian_transforms=eye)
+        splax.render(means, log_scales, quats, sh_colors, logit_opac, **kw, gaussian_transforms=eye)
     with pytest.raises(ValueError, match="does not match"):
         splax.render(
             means,
-            scales,
+            log_scales,
             quats,
-            colors,
-            opac,
+            sh_colors,
+            logit_opac,
             **kw,
             gaussian_transforms=eye,
             gaussian_slices=((0, 100), (200, 300)),
@@ -75,10 +75,10 @@ def test_invalid_transform_inputs_raise():
     with pytest.raises(ValueError, match="outside"):
         splax.render(
             means,
-            scales,
+            log_scales,
             quats,
-            colors,
-            opac,
+            sh_colors,
+            logit_opac,
             **kw,
             gaussian_transforms=eye,
             gaussian_slices=((900, 1100),),
@@ -86,10 +86,10 @@ def test_invalid_transform_inputs_raise():
     with pytest.raises(ValueError, match="overlap"):
         splax.render(
             means,
-            scales,
+            log_scales,
             quats,
-            colors,
-            opac,
+            sh_colors,
+            logit_opac,
             **kw,
             gaussian_transforms=jnp.broadcast_to(eye[0], (2, 4, 4)),
             gaussian_slices=((0, 500), (400, 600)),

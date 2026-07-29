@@ -6,7 +6,7 @@
 
 **Differentiable 3D gaussian splatting for JAX, with rasterization kernels written in [NVIDIA Warp](https://github.com/NVIDIA/warp).**
 
-splax renders and trains 3D gaussian splats inside JAX. Projection, rasterization, and their backward passes run as Warp kernels wired into JAX through FFI custom calls under `jax.custom_vjp`, so rendering composes with `jax.vmap`, `jax.grad`, and `jax.jit`. No system CUDA toolchain is required.
+splax renders and trains 3D gaussian splats inside JAX. Projection, rasterization, and their backward passes are Warp kernels called from JAX, so rendering composes with `jax.vmap`, `jax.grad`, and `jax.jit`. No system CUDA toolchain is required.
 
 ## Hero example
 
@@ -14,9 +14,9 @@ splax renders and trains 3D gaussian splats inside JAX. Projection, rasterizatio
 import jax.numpy as jnp
 import splax
 
-means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
+splats = splax.io.load_ply("scene.ply")  # means, log_scales, quats, sh_colors, logit_opacities
 img, _ = splax.render(
-    means, scales, quats, colors, opacities, viewmat=viewmat,
+    *splats, viewmat=viewmat,
     background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
 )  # (H, W, 3)
 ```

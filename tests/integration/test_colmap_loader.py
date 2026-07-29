@@ -47,7 +47,7 @@ def test_point_init_static_shapes(drone_sparse: Path):
     assert p["means"].shape == (n, 3)
     assert p["log_scales"].shape == (n, 3)
     assert p["quats"].shape == (n, 4)
-    assert p["colors_logit"].shape == (n, 3)
+    assert p["sh_colors"].shape == (n, 3)
     assert p["opac_logit"].shape == (n,)
     assert np.all(np.isfinite(np.asarray(p["means"])))
     assert np.all(np.isfinite(np.asarray(p["log_scales"])))

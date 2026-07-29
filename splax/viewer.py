@@ -21,6 +21,8 @@ except ImportError as e:
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from splax.io import apply_activations
+
 if TYPE_CHECKING:
     import jax
 
@@ -49,10 +51,10 @@ class Viewer:
         self,
         name: str,
         means: jax.Array | np.ndarray,
-        scales: jax.Array | np.ndarray,
+        log_scales: jax.Array | np.ndarray,
         quats: jax.Array | np.ndarray,
-        colors: jax.Array | np.ndarray,
-        opacities: jax.Array | np.ndarray,
+        sh_colors: jax.Array | np.ndarray,
+        logit_opacities: jax.Array | np.ndarray,
         *,
         position: jax.Array | np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
         wxyz: jax.Array | np.ndarray | tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
@@ -62,13 +64,14 @@ class Viewer:
         Args:
             name: Name of the object.
             means: (N, 3) float32 centers in the object frame.
-            scales: (N, 3) positive per-axis scales.
-            quats: (N, 4) wxyz unit quaternions.
-            colors: (N, 3) float32 RGB values.
-            opacities: (N,) float32 opacity values.
+            log_scales: (N, 3) log of the per-axis scales.
+            quats: (N, 4) wxyz quaternions, normalized internally.
+            sh_colors: (N, 3) degree-0 SH color coefficients.
+            logit_opacities: (N,) opacity logits.
             position: Initial world position of the object.
             wxyz: Initial world orientation of the object as a wxyz quaternion.
         """
+        scales, colors, opacities = apply_activations(log_scales, sh_colors, logit_opacities)
         # Rotate covariances into the world frame
         scales = np.asarray(scales, np.float32)
         rot = R.from_quat(np.asarray(quats, np.float32), scalar_first=True).as_matrix()

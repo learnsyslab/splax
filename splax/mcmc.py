@@ -11,8 +11,8 @@ reports which rows need their optimizer moments reset. ``inject_noise`` perturbs
 covariance and opacity weighted Gaussian noise every step, so low-opacity gaussians random-walk to
 explore the scene while high-opacity ones stay put.
 
-The relocation math matches gsplat's CUDA relocation kernel, and ``tests/test_mcmc.py`` checks
-parity against a direct transcription of it.
+The relocation math matches gsplat's CUDA relocation kernel, and ``tests/unit/test_mcmc.py``
+checks parity against a direct transcription of it.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ def relocate(
     means3d: jax.Array,
     log_scales: jax.Array,
     quats: jax.Array,
-    logit_colors: jax.Array,
+    sh_colors: jax.Array,
     logit_opacities: jax.Array,
     binoms: jax.Array,
     min_opacity: float = 0.005,
@@ -94,7 +94,7 @@ def relocate(
         means3d: Gaussian centers, shape ``(N, 3)``.
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
-        logit_colors: Color logits, shape ``(N, 3)``.
+        sh_colors: Degree-0 SH color coefficients, shape ``(N, 3)``.
         logit_opacities: Opacity logits, shape ``(N,)``.
         binoms: Binomial table from ``make_binoms``.
         min_opacity: Opacity threshold at or below which a gaussian counts as dead.
@@ -125,7 +125,7 @@ def relocate(
         jnp.where(m, means3d[source], means3d),
         jnp.where(m, new_log_scales, log_scales),
         jnp.where(m, quats[source], quats),
-        jnp.where(m, logit_colors[source], logit_colors),
+        jnp.where(m, sh_colors[source], sh_colors),
         jnp.where(reset, new_logit_opac, logit_opacities),
     )
     return out, reset

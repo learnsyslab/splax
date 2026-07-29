@@ -59,7 +59,7 @@ def gsplat_shim() -> ModuleType:
 
 @pytest.fixture
 def faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch):
-    """Pin the 64-bit sort key for the bit-exact batch-native assertions."""
+    """Pin the 64-bit sort key for the batch-native equality assertions."""
     monkeypatch.setattr(_sort, "_use_32bit_keys", lambda depth_bits: False)
 
 

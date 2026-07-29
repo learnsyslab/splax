@@ -15,7 +15,7 @@ so rendering unit colours over a black background reproduces it channel for chan
 Two properties pin the depth channel down. For a single gaussian the expected depth is metric, i.e.
 it equals that gaussian's camera-space depth on every pixel it covers however thin the coverage, and
 pixels the splat does not cover carry depth 0. The depth accumulator is separate from the colour
-blend, so the RGB channels the depth path returns are bit-for-bit the plain ``rasterize`` image.
+blend, so the RGB channels the depth path returns are the plain ``rasterize`` image.
 
 The gradients are checked against a central-difference directional derivative at the 8e-2 relative
 bound the splat finite-difference tests use. The hard 1/255 cull and the early-termination cutoff
@@ -139,7 +139,7 @@ def test_rasterize_depth():
 
 
 def test_rasterize_depth_image_byte_identical():
-    """Return bit-for-bit the plain rasterize image and alpha from the depth path.
+    """Return the plain rasterize image and alpha unchanged from the depth path.
 
     The expected depth accumulates in its own kernel and accumulator, which must not perturb the
     colour blend.
@@ -160,7 +160,7 @@ def test_rasterize_vmap_matches_loop():
     """Match the batched blend of B views against the loop over the unbatched blends.
 
     Batching packs the image id above the tile bits of the sort key, so each image keeps the
-    blend order it has on its own and the images come out bit-identical.
+    blend order it has on its own and the images come out the same.
     """
     n, H, W = 4000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=1, dense=True)

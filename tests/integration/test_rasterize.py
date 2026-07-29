@@ -4,7 +4,7 @@ gsplat exposes no standalone blend entry point, so the reference goes through it
 ``rasterization`` and the comparison feeds ``splax.rasterize`` from ``splax.project``. The
 projection itself is pinned against ``gsplat.fully_fused_projection`` in the projection tests, so
 what these bound is the blend. The two blends use a different sort, tiling, and accumulation order
-and cannot agree bit-for-bit, so the difference is bounded perceptually with the max abs difference
+and cannot agree exactly, so the difference is bounded perceptually with the max abs difference
 and the PSNR.
 
 The accumulated alpha ``sum_i w_i`` is gsplat's ``render_alphas``, bounded the same way. It is a
@@ -152,7 +152,8 @@ def test_rasterize_depth_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleTy
 
 def test_rasterize_packed_vs_64bit_lego(lego_ply: Path):
     """Match the packed 32-bit sort key against the 64-bit key on the real lego scene."""
-    means, scales, quats, colors, opacities = splax.io.load_ply(lego_ply)
+    means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(lego_ply)
+    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
     H, W = 720, 1280
     xys, depths, radii, conics, _nth, cum = splax.project(
         means, scales, quats, VIEWMAT.at[2, 3].set(6.0), opacities=opacities, **camera(H, W)

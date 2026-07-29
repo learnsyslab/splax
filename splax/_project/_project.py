@@ -4,6 +4,8 @@
 ``jax.custom_vjp``, so ``jax.grad`` flows through it with respect to the gaussian parameters, the
 camera pose, and the rigid transforms. One backward kernel computes every gradient in a single pass,
 so gradient selection is left to ``jax.grad``.
+
+The stage takes activated arrays, i.e. linear scales and opacities in ``[0, 1]``.
 """
 
 from __future__ import annotations

@@ -14,6 +14,8 @@ from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 from scipy.special import logit
 
+from splax.io import rgb_to_sh
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -108,8 +110,8 @@ def init_from_points(
         weights: Positive per-point sampling weights such as track lengths, shape ``(M,)``.
 
     Returns:
-        Parameter dict with the ``render_log`` arrays ``means``, ``log_scales``, ``quats``,
-        ``colors_logit``, and ``opac_logit``.
+        Parameter dict with the arrays ``means``, ``log_scales``, ``quats``, ``sh_colors``, and
+        ``opac_logit``.
     """
     rng = np.random.default_rng(seed)
     m = xyz.shape[0]
@@ -140,12 +142,11 @@ def init_from_points(
         xyz_n = np.concatenate([xyz, xyz[src] + jitter], 0)
         rgb_n = np.concatenate([rgb, rgb[src]], 0)
         log_scales = np.concatenate([base_ls, base_ls[src]], 0)
-    # logit is infinite at exactly 0 and 1, which pure black/white uint8 colors hit
-    colors_logit = logit(np.clip(rgb_n / 255.0, 1e-4, 1.0 - 1e-4))
+    sh_colors = rgb_to_sh(rgb_n / 255.0)
     return {
         "means": jnp.asarray(xyz_n, jnp.float32),
         "log_scales": jnp.asarray(log_scales[:, None].repeat(3, 1)),
         "quats": jnp.asarray(rng.normal(size=(n, 4)), jnp.float32),
-        "colors_logit": jnp.asarray(colors_logit, jnp.float32),
+        "sh_colors": jnp.asarray(sh_colors, jnp.float32),
         "opac_logit": jnp.full((n,), logit(opacity), jnp.float32),
     }

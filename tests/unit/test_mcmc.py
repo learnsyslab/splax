@@ -75,13 +75,13 @@ def test_relocate_teleports_dead_onto_alive():
     means = jax.random.uniform(k[0], (n, 3), minval=-1, maxval=1)
     log_scales = jnp.full((n, 3), jnp.log(0.05))
     quats = jax.random.normal(k[1], (n, 4))
-    colors_logit = jax.random.normal(k[2], (n, 3))
+    sh_colors = jax.random.normal(k[2], (n, 3))
     # first 100 dead (opacity ~0), rest alive (opacity ~0.7)
     opac_logit = jnp.concatenate([jnp.full((100,), -20.0), jnp.full((400,), 0.85)])
 
     binoms = mcmc.make_binoms(51)
     (new_means, _, _, _, new_opac_logit), reset = mcmc.relocate(
-        k[3], means, log_scales, quats, colors_logit, opac_logit, binoms, min_opacity=0.005
+        k[3], means, log_scales, quats, sh_colors, opac_logit, binoms, min_opacity=0.005
     )
 
     # shapes are static

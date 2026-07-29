@@ -5,6 +5,10 @@ scenes render fast and fit with jax.grad.
 
 splax.render is the rendering entry point. It is differentiable with respect to the gaussian
 parameters, the camera pose, and per-object rigid transforms.
+
+Gaussians are held as unconstrained parameters, i.e. log scales, degree-0 SH colors, and logit
+opacities. The kernel-facing primitives splax.project and splax.rasterize take the activated arrays
+instead, and splax.io.apply_activations and splax.io.invert_activations convert between the two.
 """
 
 __version__ = "0.1.0"
@@ -31,7 +35,7 @@ from splax import io, mcmc, utils
 from splax._cache import clear_cache
 from splax._project import opacity_compensation, project
 from splax._rasterize import rasterize, rasterize_depth
-from splax._render import render, render_log
+from splax._render import render
 
 __all__ = [
     "clear_cache",
@@ -40,7 +44,6 @@ __all__ = [
     "rasterize",
     "rasterize_depth",
     "render",
-    "render_log",
     "mcmc",
     "io",
     "utils",

@@ -3,7 +3,9 @@
 Three scenes cover different Gaussian distributions: random synthetic clusters, the trained lego
 splat with its real test cameras, and an online reconstruction from the ``amacati/splats`` dataset.
 Each scene sweeps the camera batch and records render time, throughput, and peak GPU memory for
-both frameworks.
+both frameworks. Scenes are stored as the splat parameters ``splax.render`` takes, so splax applies
+the scale, color, and opacity activations inside the timed call, whereas gsplat consumes render
+space and is handed the converted arrays during setup.
 
 Results are written to ``reports/benchmark_suite.json`` plus one sample render per scene under
 ``reports/benchmark_assets/``. Run the benchmark with:
@@ -65,8 +67,9 @@ LEGO_RES = 400
 HF_URL = "https://huggingface.co/datasets/amacati/splats/resolve/main/robot_hall.ply"
 HF_RES = 400
 
-# A benchmark scene with its cameras. scene is the (means, scales, quats, colors, opacities,
-# background) arrays, viewmats is (max_batch, 4, 4) world-to-camera in OpenCV convention.
+# A benchmark scene with its cameras. scene is the (means, log_scales, quats, sh_colors,
+# logit_opacities, background) arrays, viewmats is (max_batch, 4, 4) world-to-camera in OpenCV
+# convention.
 Scene = namedtuple("Scene", ["name", "description", "scene", "viewmats", "res", "focal"])
 
 
@@ -101,7 +104,8 @@ def build_synthetic() -> Scene:
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     colors = jax.random.uniform(k[5], (n, 3))
     opacities = jax.random.uniform(k[6], (n,))
-    scene = (means, scales, quats, colors, opacities, jnp.ones(3))
+    log_scales, sh_colors, logit_opacities = splax.io.invert_activations(scales, colors, opacities)
+    scene = (means, log_scales, quats, sh_colors, logit_opacities, jnp.ones(3))
     viewmats, focal = orbit(np.zeros(3), max(BATCHES), res, radius=9.0)
     description = f"Random Gaussian clusters, {n:,} splats in {SYN_CLUSTERS} compact blobs."
     return Scene("synthetic", description, scene, viewmats, res, focal)
@@ -109,8 +113,8 @@ def build_synthetic() -> Scene:
 
 def build_lego() -> Scene:
     """Trained lego splat rendered from the real NeRF-synthetic test cameras."""
-    means, scales, quats, colors, opacities = splax.io.load_ply(LEGO_PLY)
-    scene = (means, scales, quats, colors, opacities, jnp.ones(3))
+    means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(LEGO_PLY)
+    scene = (means, log_scales, quats, sh_colors, logit_opacities, jnp.ones(3))
     tf = json.loads(LEGO_TF.read_text())
     focal = 0.5 * LEGO_RES / np.tan(0.5 * tf["camera_angle_x"])
     viewmats = splax.utils.nerf_camera([f["transform_matrix"] for f in tf["frames"]])
@@ -122,8 +126,8 @@ def build_lego() -> Scene:
 
 def build_hf() -> Scene:
     """Online reconstruction from the amacati/splats dataset, viewed from inside."""
-    means, scales, quats, colors, opacities = splax.io.load_ply(splax.io.fetch(HF_URL))
-    scene = (means, scales, quats, colors, opacities, jnp.ones(3))
+    means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(splax.io.fetch(HF_URL))
+    scene = (means, log_scales, quats, sh_colors, logit_opacities, jnp.ones(3))
     viewmats, focal = orbit(np.array([0.0, 0.0, 3.0]), max(BATCHES), HF_RES, radius=4.0)
     description = f"Online robot_hall reconstruction ({means.shape[0]:,} splats) from HF, "
     description += "cameras orbiting inside the hall."
@@ -149,10 +153,11 @@ def make_splax(sc: Scene, batch: int) -> tuple[Callable[[], object], Callable]:
 def make_gsplat(sc: Scene, batch: int) -> Callable[[], object]:
     """Build a gsplat render over ``batch`` viewmats."""
     res, focal = sc.res, sc.focal
+    means, log_scales, quats, sh_colors, logit_opacities, background = sc.scene
+    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
     # Older torch versions crash for asarray from jax Arrays
-    tensors = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in sc.scene]
-    means_t, scales_t, quats_t, colors_t, opac_t, bg_t = tensors
-    params = [means_t, quats_t, scales_t, opac_t, colors_t]
+    arrays = (means, quats, scales, opacities, colors, background)
+    *params, bg_t = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in arrays]
     k = np.array([[focal, 0.0, res / 2], [0.0, focal, res / 2], [0.0, 0.0, 1.0]], np.float32)
     ks_t = torch.as_tensor(k, device="cuda")[None].repeat(batch, 1, 1)
     views_t = torch.as_tensor(sc.viewmats[:batch], device="cuda")

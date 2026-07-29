@@ -1,6 +1,6 @@
 """Test I/O operations.
 
-A real scene written to a copy then reloaded must render to the same image.
+A real scene written to a copy then reloaded must render to the identical image.
 
 ``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral port: download, cache
 hit, force re-download, ETag-based invalidation, and the ``SPLAX_CACHE`` environment fallback.
@@ -47,11 +47,9 @@ def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
     kw = {"viewmat": viewmat, "background": jnp.ones(3), **camera(200, 200)}
     img1 = np.asarray(splax.render(*splats, **kw)[0])
     img2 = np.asarray(splax.render(*splats2, **kw)[0])
-    # The activation round-trip through log/exp and logit/sigmoid moves the parameters by a few ulp,
-    # which the hard 1/255 cull can turn into a handful of flipped pixels, so the renders are bound
-    # by their max abs difference rather than by bit-exactness.
-    deviation = np.max(np.abs(img1 - img2))
-    assert deviation < 1e-3, f"PLY roundtrip render deviates by {deviation:.2e}"
+    # The file stores the parameters verbatim, so the reloaded splat is the written one unchanged
+    # and renders to the identical image.
+    assert np.array_equal(img1, img2), "PLY roundtrip changed the render"
 
 
 @pytest.fixture

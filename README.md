@@ -31,37 +31,36 @@ Render a `.ply` scene from one camera.
 import jax.numpy as jnp
 import splax
 
-means, scales, quats, colors, opacities = splax.io.load_ply("scene.ply")
+splats = splax.io.load_ply("scene.ply")  # means, log_scales, quats, sh_colors, logit_opacities
 img, _ = splax.render(
-    means, scales, quats, colors, opacities, viewmat=viewmat,
+    *splats, viewmat=viewmat,
     background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
 )  # (H, W, 3)
 ```
 
-Batch over a stack of camera poses with `jax.vmap`. One batched kernel launch, not a Python loop.
+Batch over a stack of camera poses with `jax.vmap`, rendered in one go rather than in a Python loop.
 
 ```python
 import jax
 
 frames = jax.vmap(lambda vm: splax.render(
-    means, scales, quats, colors, opacities,
-    viewmat=vm, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
+    *splats, viewmat=vm, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
 )[0])(viewmats)  # (B, H, W, 3)
 ```
 
-Take gradients through the renderer with `jax.grad`. `splax.render` differentiates with respect to means, scales, quats, colors, opacities, the camera pose, and per-object rigid transforms.
+Take gradients through the renderer with `jax.grad`. `splax.render` differentiates with respect to means, log scales, quats, SH colors, logit opacities, the camera pose, and per-object rigid transforms.
 
 ```python
 import jax
 
-def loss(means, scales, quats, colors, opacities):
+def loss(means, log_scales, quats, sh_colors, logit_opacities):
     img, _ = splax.render(
-        means, scales, quats, colors, opacities,
+        means, log_scales, quats, sh_colors, logit_opacities,
         viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
     )
     return jnp.mean((img - target) ** 2)
 
-grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(means, scales, quats, colors, opacities)
+grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splats)
 ```
 
 To edit ``.ply`` scenes, we recommend [superspl.at](https://superspl.at/editor).
@@ -76,7 +75,7 @@ Gaussian splatting lives mostly in PyTorch and hand-written CUDA. splax puts it 
 
 ## Architecture
 
-The renderer is not pure JAX because the core of splatting does not map to XLA primitives. Rasterization is tile-binned with a data-dependent sort of gaussian-tile intersections, per-pixel early termination once transmittance saturates, and a memory-frugal backward that recomputes the blend instead of storing per-pixel state. splax implements the projection, rasterization, and their backward passes as Warp kernels and wires them into JAX through FFI custom calls under `jax.custom_vjp`. The kernels are batch-native: `jax.vmap` maps to a single batched launch (camera id folded into the sort key) rather than a sequential per-sample loop.
+Splatting does not map onto XLA primitives, so projection, rasterization, and their backward passes are Warp kernels called from JAX. Rendering therefore composes with `jax.vmap`, `jax.grad`, and `jax.jit`, and a batch renders in one go rather than looping in Python.
 
 ## Relation to jaxsplat
 
@@ -86,7 +85,7 @@ splax started from [jaxsplat](https://github.com/yklcs/jaxsplat) as the referenc
 
 Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the papers behind it, which inspired most of the performance work (credit per item).
 
-- Native multi-camera batched rendering, one launch with the camera id folded into the sort key (gsplat)
+- Native multi-camera batched rendering (gsplat)
 - Opacity-aware tight tile intersection (StopThePop, Speedy-Splat, gsplat #927)
 - Packed 32-bit sort keys with quantized depth
 - Persistent sort and bin scratch across frames (gsplat caching allocator design)
@@ -96,8 +95,8 @@ Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the paper
 - Progressive resolution fine-tuning (coarse-to-fine, 3DGS)
 - Per-parameter Adam learning-rate schedules (gsplat, 3DGS)
 - L1 plus D-SSIM photometric loss (3DGS, gsplat, via dm-pix)
-- Camera pose gradients via `jax.grad(loss, argnums=viewmat)`, dispatched by JAX symbolic zeros so a pose-only step skips the gaussian projection backward (gsplat projection backward)
-- Batch-native backward passes, `jax.vmap(jax.grad(render))` runs as one batched launch (gsplat)
+- Camera pose gradients, where a pose-only step costs only the camera gradient (gsplat projection backward)
+- Batch-native backward passes under `jax.vmap(jax.grad(render))` (gsplat)
 - Batched training steps with sqrt-batch learning-rate scaling (gsplat `batch_size` and `steps_scaler`)
 - Anti-aliased opacity compensation (Mip-Splatting, gsplat), depth regularization from COLMAP points (gsplat `depth_loss`), per-image exposure correction (gsplat appearance optimization), all opt-in
 

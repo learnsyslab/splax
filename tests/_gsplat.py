@@ -7,15 +7,13 @@ gsplat functions to return the same as ``splax.project`` / ``splax.render``.
 Convention differences:
 
   - Backend: gsplat uses torch.
+  - Parameterization: the shims take the activated arrays via ``splax.io.apply_activations``.
   - viewmat: gsplat always uses batched camera axes.
   - Intrinsics: gsplat takes a 3x3 K matrix rather than separate f and c values.
   - glob_scale: gsplat is missing a global scale.
   - Camera z clipping: gsplat uses `near_plane` instead of `clip_thresh`.
   - Alpha: gsplat returns the accumulated alpha with a trailing singleton channel, splax as (H, W).
-  - Depth: gsplat appends the depth as an extra image channel selected by `render_mode`, where
-    `"ED"` renders the expected depth `sum_i w_i z_i / sum_i w_i` as splax does. gsplat clamps the
-    denominator at 1e-10, which lands on splax's depth 0 for pixels no gaussian covers and never
-    binds elsewhere, because a contributing gaussian carries at least the 1/255 alpha cull.
+  - Depth: gsplat clamps the denominator at 1e-10, which lands on splax's depth 0.
 """
 
 from __future__ import annotations

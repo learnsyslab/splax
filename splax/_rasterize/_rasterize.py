@@ -3,6 +3,8 @@
 ``rasterize`` and ``rasterize_depth`` blend the projected gaussians into an image and the
 accumulated alpha map. The depth variant packs an expected depth map in camera-space z into the
 fourth image channel.
+
+The stage takes activated arrays, i.e. RGB colors and opacities in ``[0, 1]``.
 """
 
 from __future__ import annotations

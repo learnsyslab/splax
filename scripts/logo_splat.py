@@ -166,8 +166,8 @@ def init_params(n: int, H: int, W: int, seed: int = 0) -> dict[str, jax.Array]:
         "means": means,
         "log_scales": log_s,
         "quats": jax.random.normal(k[4], (n, 4)),
-        "colors_logit": jax.random.normal(k[5], (n, 3)) * 0.6,  # varied colours
-        "opac_logit": jnp.full((n, 1), -2.0),  # sigmoid(-2) ~ 0.12: faint start
+        "sh_colors": jax.random.normal(k[5], (n, 3)) * 0.6,  # varied colours
+        "opac_logit": jnp.full((n,), -2.0),  # sigmoid(-2) ~ 0.12: faint start
     }
 
 
@@ -176,9 +176,9 @@ VIEWMAT = jnp.eye(4)  # camera at origin, +z forward (OpenCV); slab sits at z~1
 
 def render_logo(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> jax.Array:
     """Render the current parameter state into an RGB image."""
-    splats = (p["means"], p["log_scales"], p["quats"], p["colors_logit"], p["opac_logit"])
+    splats = (p["means"], p["log_scales"], p["quats"], p["sh_colors"], p["opac_logit"])
     camera: dict = {"viewmat": VIEWMAT, "background": jnp.asarray(bg), "img_shape": (H, W)}
-    return splax.render_log(*splats, f=(F, F), **camera)[0]
+    return splax.render(*splats, f=(F, F), **camera)[0]
 
 
 def frame(p: dict[str, jax.Array], H: int, W: int, bg: np.ndarray) -> np.ndarray:
@@ -216,13 +216,7 @@ def main() -> tuple[float, float]:
 
     params = init_params(N, H, W, SEED)
 
-    lrs = {
-        "means": 2e-3,
-        "log_scales": 5e-3,
-        "quats": 1e-3,
-        "colors_logit": 1e-2,
-        "opac_logit": 3e-2,
-    }
+    lrs = {"means": 2e-3, "log_scales": 5e-3, "quats": 1e-3, "sh_colors": 1e-2, "opac_logit": 3e-2}
     opt = optax.multi_transform({k: optax.adam(v) for k, v in lrs.items()}, {k: k for k in params})
     opt_state = opt.init(params)
 

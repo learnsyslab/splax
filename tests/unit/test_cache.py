@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import warp as wp
-from utils import VIEWMAT, camera, projected, rasterize_both_keymodes, scene
+from utils import VIEWMAT, camera, projected, rasterize_both_keymodes, scene, scene_params
 
 import splax
 import splax._cache as _cache
@@ -84,9 +84,8 @@ def test_packed_key_falls_back_when_bits_dont_fit():
     """
     dev = str(wp.get_device("cuda:0"))
     H, W = 1080, 1920
-    means, scales, quats, colors, opac, _bg = scene(4000, seed=1, dense=True)
+    splats = scene_params(4000, seed=1, dense=True)[:5]
     kw = {"background": jnp.zeros(3), **camera(H, W)}
-    splats = (means, scales, quats, colors, opac)
 
     # B=1 packs into int32 scratch
     splax.clear_cache()
@@ -117,7 +116,7 @@ def test_tile_emission_matches_count(n: int, H: int, W: int):
 
     Launch the emission kernel into a sentinel-filled buffer and verify that every
     slot in [cum[i-1], cum[i]) is written by gaussian i and no slot is left stale or
-    overwritten, i.e. the emitted count agrees bit-for-bit with the projection's
+    overwritten, i.e. the emitted count agrees exactly with the projection's
     AccuTile tile count. A divergence between the count (projection) and the walk
     (emission) would show up as sentinels remaining or a wrong gaussian id.
     """

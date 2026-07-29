@@ -6,12 +6,12 @@
 pip install splax[viewer]
 ```
 
-The module is imported lazily (`splax.viewer` or `from splax import viewer`), so the base package works without viser installed.
 
 ## Rigid objects
 
-The viewer models a scene the same way `splax.render` does with dynamic transforms. It takes a set of named rigid objects, each with its own gaussians
-and world pose. `add_splats` uploads an object's gaussians to the browser once, and `update_pose` moves it afterwards without re-uploading.
+The viewer holds a set of named rigid objects, each with its own gaussians and world
+pose. `add_splats` uploads an object's gaussians once and `update_pose` moves it
+afterwards.
 
 ```python
 import splax
@@ -25,11 +25,12 @@ for pos, wxyz in trajectory:  # e.g. from a simulator
     viewer.update_pose("drone", pos, wxyz)
 ```
 
-Open `http://localhost:8080` in a browser to view the scene. Quaternions are wxyz, as everywhere in splax. `update_poses` sets several objects at once from
-a `{name: (position, wxyz)}` dict, `remove` deletes an object, and `close` stops the server. Note that the server runs in a background thread. Keep the
-process alive (e.g. block on `input()`) for as long as the viewer should stay reachable.
+Open `http://localhost:8080` in a browser to view the scene. `remove` deletes an
+object and `close` stops the server. The server runs in a background thread, so keep
+the process alive for as long as the viewer should stay reachable.
 
 ## Beyond splats
 
-The wrapped `viser.ViserServer` is exposed as `Viewer.server` for anything the wrapper does not cover, such as GUI elements, meshes, or camera controls. See
-the [viser documentation](https://viser.studio) for its full API.
+`Viewer.server` exposes the underlying `viser.ViserServer` for anything the wrapper
+does not cover, such as GUI elements, meshes, or camera controls. See the
+[viser documentation](https://viser.studio) for its full API.

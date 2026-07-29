@@ -2,7 +2,8 @@
 
 We measure the full forward plus backward pass. Both frameworks render the camera batch, take a
 scalar L2 loss against a fixed random target image stack, and compute gradients with respect to the
-five splat parameter arrays.
+five splat arrays. splax differentiates the stored parameters, so its step carries the scale, color,
+and opacity activations, while gsplat differentiates the activated arrays it consumes.
 
 Results are written to ``reports/bench_backward.json``. Run the benchmark with:
 
@@ -66,10 +67,12 @@ def make_splax_step(sc: Scene, batch: int) -> tuple[Callable[[], object], Callab
 def make_gsplat_step(sc: Scene, batch: int) -> Callable[[], object]:
     """Build a gsplat training step over ``batch`` viewmats."""
     res, focal = sc.res, sc.focal
+    means, log_scales, quats, sh_colors, logit_opacities, background = sc.scene
+    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
     # Older torch versions crash for asarray from jax Arrays
-    tensors = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in sc.scene]
-    means_t, scales_t, quats_t, colors_t, opac_t, bg_t = tensors
-    params = [p.requires_grad_() for p in (means_t, quats_t, scales_t, opac_t, colors_t)]
+    arrays = (means, quats, scales, opacities, colors, background)
+    *params, bg_t = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in arrays]
+    params = [p.requires_grad_() for p in params]
     k = np.array([[focal, 0.0, res / 2], [0.0, focal, res / 2], [0.0, 0.0, 1.0]], np.float32)
     ks_t = torch.as_tensor(k, device="cuda")[None].repeat(batch, 1, 1)
     views_t = torch.as_tensor(sc.viewmats[:batch], device="cuda")

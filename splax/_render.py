@@ -9,29 +9,30 @@ launch and matches per-sample sequential gradients. Inputs shared across the bat
 gradients summed over the batch axis, while per-image inputs such as a batch of camera poses get
 per-image gradients.
 
-``render_log`` renders from the unconstrained log/logit parameterization on top of it.
+``render`` takes the unconstrained parameters, i.e. log scales, degree-0 SH colors, and logit
+opacities, and applies their activations before the projection.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import jax
-import jax.numpy as jnp
-
 from splax._project import opacity_compensation, project, transform_ids
 from splax._rasterize import rasterize, rasterize_depth
+from splax.io import apply_activations
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import jax
+
 
 def render(
     means3d: jax.Array,
-    scales: jax.Array,
+    log_scales: jax.Array,
     quats: jax.Array,
-    colors: jax.Array,
-    opacities: jax.Array,
+    sh_colors: jax.Array,
+    logit_opacities: jax.Array,
     *,
     viewmat: jax.Array,
     background: jax.Array,
@@ -47,6 +48,10 @@ def render(
 ) -> tuple[jax.Array, jax.Array]:
     """Render a splat.
 
+    The parameters are the ones a ``.ply`` stores and a trainer optimizes. Their activations, the
+    ``exp`` on the scales, the SH map on the colors, and the ``sigmoid`` on the opacities, are
+    applied here, and the quaternions are normalized inside the projection kernel.
+
     The render is differentiable and aware of the arguments with respect to which gradients are
     requested, so only the necessary backward kernels launch. Depth rendering additionally packs the
     differentiable expected depth map into the image for sparse-point depth regularization.
@@ -58,10 +63,10 @@ def render(
 
     Args:
         means3d: Gaussian centers, shape ``(N, 3)``.
-        scales: Per-axis scales, shape ``(N, 3)``.
+        log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, not necessarily normalized, shape ``(N, 4)``.
-        colors: Gaussian colors, shape ``(N, 3)``.
-        opacities: Gaussian opacities, shape ``(N,)``.
+        sh_colors: Degree-0 SH color coefficients, shape ``(N, 3)``.
+        logit_opacities: Opacity logits, shape ``(N,)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
         background: Constant background color, shape ``(3,)``.
         img_shape: Image size as ``(height, width)`` in pixels.
@@ -92,6 +97,7 @@ def render(
             )
         tf_ids = transform_ids(means3d.shape[0], gaussian_slices)
 
+    scales, colors, opacities = apply_activations(log_scales, sh_colors, logit_opacities)
     camera: dict = {"img_shape": img_shape, "f": f, "c": c}
     camera |= {"glob_scale": glob_scale, "clip_thresh": clip_thresh}
     xys, depths, radii, conics, _, cum_tiles_hit = project(
@@ -114,58 +120,3 @@ def render(
     inputs = (colors, blend_opacities, background, xys, depths, radii, conics, cum_tiles_hit)
     blend = rasterize_depth if render_depth else rasterize
     return blend(*inputs, img_shape=img_shape, map_opacities=map_opacities)
-
-
-def render_log(
-    means3d: jax.Array,
-    log_scales: jax.Array,
-    quats: jax.Array,
-    logit_colors: jax.Array,
-    logit_opacities: jax.Array,
-    *,
-    viewmat: jax.Array,
-    background: jax.Array,
-    img_shape: tuple[int, int],
-    f: tuple[float, float],
-    c: tuple[float, float] | None = None,
-    glob_scale: float = 1.0,
-    clip_thresh: float = 0.01,
-    antialiased: bool = False,
-    render_depth: bool = False,
-) -> tuple[jax.Array, jax.Array]:
-    """Render from the unconstrained log/logit parameterization used for training.
-
-    Maps the log/logit arrays to the constrained splat arrays (``exp`` on the log scales, normalized
-    quaternions, ``sigmoid`` on the color and opacity logits) and calls ``render`` with the same
-    camera arguments. ``splax.mcmc`` operates in the same parameterization.
-
-    Args:
-        means3d: Gaussian centers, shape ``(N, 3)``.
-        log_scales: Log of the per-axis scales, shape ``(N, 3)``.
-        quats: Rotations as wxyz quaternions, not necessarily normalized, shape ``(N, 4)``.
-        logit_colors: Color logits, shape ``(N, 3)``.
-        logit_opacities: Opacity logits, shape ``(N,)``.
-        viewmat: World-to-camera matrix, shape ``(4, 4)``.
-        background: Constant background color, shape ``(3,)``.
-        img_shape: Image size as ``(height, width)`` in pixels.
-        f: Focal lengths ``(fx, fy)`` in pixels.
-        c: Principal point ``(cx, cy)`` in pixels, defaulting to the image center.
-        glob_scale: Global factor applied to all scales.
-        clip_thresh: Near-plane clipping threshold.
-        antialiased: Enable the Mip-Splatting opacity compensation.
-        render_depth: Additionally render the expected depth map in camera-space z.
-
-    Returns:
-        Tuple of the rendered image and the ``(H, W)`` accumulated alpha, the coverage the gaussians
-        contribute, which is 0 on pixels no gaussian covers. The image is ``(H, W, 3)`` RGB, or
-        ``(H, W, 4)`` with the expected depth in the fourth channel if ``render_depth`` is True.
-        Depth is the expected camera-space z along the optical axis, not a Euclidean range, and
-        reads 0 on pixels no gaussian covers.
-    """
-    scales = jnp.exp(log_scales)
-    colors = jax.nn.sigmoid(logit_colors)
-    opacities = jax.nn.sigmoid(logit_opacities)
-    camera: dict = {"viewmat": viewmat, "background": background, "img_shape": img_shape}
-    camera |= {"f": f, "c": c, "glob_scale": glob_scale, "clip_thresh": clip_thresh}
-    camera |= {"antialiased": antialiased, "render_depth": render_depth}
-    return render(means3d, scales, quats, colors, opacities, **camera)

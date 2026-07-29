@@ -26,7 +26,7 @@ def test_init_exposure_is_identity():
 
 
 def test_apply_exposure_identity_is_noop():
-    """Leave the render bit-identical under an identity transform."""
+    """Leave the render unchanged under an identity transform."""
     rng = np.random.default_rng(0)
     img = rng.random((5, 4, 3)).astype(np.float32)
     affine = np.asarray(init_exposure(1))[0]  # (3,4) identity

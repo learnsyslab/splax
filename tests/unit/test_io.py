@@ -1,7 +1,8 @@
 """PLY export round-trip.
 
-``splax.io.write_ply`` must be the exact inverse of ``splax.io.load_ply``. Random render-space
-splats written and reloaded must reproduce the inputs.
+``splax.io.write_ply`` stores the parameters as they arrive and ``splax.io.load_ply`` reads them
+back verbatim, so a random splat survives a write and a reload unchanged, and any number of
+further cycles leaves the file unchanged.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from utils import scene
+from utils import scene_params
 
 import splax
 from splax.io import load_ply
@@ -19,17 +20,25 @@ if TYPE_CHECKING:
 
 
 def test_write_ply_is_load_ply_inverse(tmp_path: Path):
-    """Random splats through write_ply then load_ply reproduce the render-space inputs."""
-    means, scales, quats, colors, opac, _bg = scene(5000)
+    """Random splats through write_ply then load_ply reproduce the parameters exactly."""
+    means, log_scales, quats, sh_colors, logit_opacities = scene_params(5000)[:5]
     out = tmp_path / "rand.ply"
-    splax.io.write_ply(out, means, scales, quats, colors, opac)
+    splax.io.write_ply(out, means, log_scales, quats, sh_colors, logit_opacities)
 
     lm, ls, lq, lc, lo = (np.asarray(x) for x in load_ply(out))
 
-    np.testing.assert_allclose(lm, means, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(ls, scales, rtol=1e-5, atol=1e-6)
-    # quats are normalized on both sides, compare up to sign is unnecessary since
-    # write_ply preserves the stored raw quat direction and load re-normalizes.
-    np.testing.assert_allclose(lq, quats, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(lc, colors, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(lo, opac, rtol=1e-4, atol=1e-4)
+    np.testing.assert_array_equal(lm, means)
+    np.testing.assert_array_equal(ls, log_scales)
+    np.testing.assert_array_equal(lq, quats)
+    np.testing.assert_array_equal(lc, sh_colors)
+    np.testing.assert_array_equal(lo, logit_opacities)
+
+
+def test_repeated_ply_cycles_are_stable(tmp_path: Path):
+    """A second load and write cycle writes the identical bytes."""
+    splats = scene_params(5000, seed=1)[:5]
+    first, second = tmp_path / "first.ply", tmp_path / "second.ply"
+    splax.io.write_ply(first, *splats)
+    splax.io.write_ply(second, *load_ply(first))
+
+    assert second.read_bytes() == first.read_bytes()

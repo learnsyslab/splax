@@ -1,7 +1,7 @@
 """Parity of ``splax.project`` against ``gsplat.fully_fused_projection`` (forward).
 
-gsplat is a different CUDA kernel from splax's Warp port, so the two cannot agree bit-for-bit the
-way a faithful port would. They DO share the projection math (EWA covariance, the same 0.3 px eps2d
+gsplat is a different CUDA kernel from splax's Warp port, so the two cannot agree exactly the way a
+faithful port would. They DO share the projection math (EWA covariance, the same 0.3 px eps2d
 dilation, the same pinhole intrinsics), so for every gaussian visible in both the projected
 quantities match to a tight numeric tolerance:
 
@@ -77,7 +77,8 @@ def test_project_vs_gsplat_jit(gsplat_shim: ModuleType):
 
 @pytest.mark.gsplat
 def test_project_vs_gsplat_lego(gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path):
-    means, scales, quats, _colors, _opacities = splax.io.load_ply(lego_ply)
+    means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(lego_ply)
+    scales, _colors, _opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
     means, scales, quats = means[:50_000], scales[:50_000], quats[:50_000]
     H = W = 800
     focal = float(0.5 * W / np.tan(0.5 * lego_meta["camera_angle_x"]))
