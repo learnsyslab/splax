@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
 
 import splax
 
 
+@pytest.mark.unit
 def test_look_at_frame():
     """The eye maps to the origin and the target onto the +z axis at its distance."""
     eye, target = np.array([1.0, 2.0, 3.0]), np.array([4.0, 2.0, -1.0])
@@ -17,12 +19,14 @@ def test_look_at_frame():
     np.testing.assert_allclose(w2c @ [*target, 1.0], [0.0, 0.0, dist, 1.0], atol=1e-6)
 
 
+@pytest.mark.unit
 def test_look_at_up():
     """World up maps to image up (-y) for a level view."""
     w2c = splax.utils.look_at(np.zeros(3), np.array([1.0, 0.0, 0.0]), up=(0, 0, 1))
     np.testing.assert_allclose(w2c[:3, :3] @ [0.0, 0.0, 1.0], [0.0, -1.0, 0.0], atol=1e-6)
 
 
+@pytest.mark.unit
 def test_look_at_batched():
     """A batched call with a broadcast target matches per-eye single calls."""
     eyes = np.random.default_rng(0).normal(size=(5, 3))
@@ -31,12 +35,14 @@ def test_look_at_batched():
     np.testing.assert_allclose(splax.utils.look_at(eyes, target), single)
 
 
+@pytest.mark.unit
 def test_nerf_camera():
     """A blender pose flips the y and z axes and inverts to world-to-camera."""
     w2c = splax.utils.nerf_camera(np.eye(4))
     np.testing.assert_allclose(w2c, np.diag([1.0, -1.0, -1.0, 1.0]))
 
 
+@pytest.mark.unit
 def test_nerf_camera_center():
     """The camera centers of batched rotated and translated poses map to the origin."""
     c2w = np.tile(np.eye(4), (2, 1, 1))

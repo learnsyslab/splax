@@ -22,6 +22,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+@pytest.mark.unit
 def test_viewer_roundtrip():
     """Add (jax and numpy inputs), update, and remove splats on a live server."""
     rng = np.random.default_rng(0)
@@ -31,7 +32,7 @@ def test_viewer_roundtrip():
     quats = rng.normal(size=(n, 4)).astype(np.float32)
     quats /= np.linalg.norm(quats, axis=-1, keepdims=True)
     colors = rng.uniform(0.0, 1.0, (n, 3)).astype(np.float32)
-    opacities = rng.uniform(0.0, 1.0, (n, 1)).astype(np.float32)
+    opacities = rng.uniform(0.0, 1.0, (n,)).astype(np.float32)
 
     viewer = Viewer(host="127.0.0.1", port=_free_port())
     try:

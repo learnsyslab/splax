@@ -39,6 +39,7 @@ KNOWN_PSNR = {0: 30.89, 25: 31.43, 50: 32.08}
 SLACK = 0.05
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("frame_idx", [0, 25, 50])
 def test_lego_render_psnr_regression(
     frame_idx: int, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path

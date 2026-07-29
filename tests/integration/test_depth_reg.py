@@ -66,19 +66,20 @@ def _scene(
     quats = jax.random.normal(key[2], (n, 4))
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     colors = jax.random.uniform(key[3], (n, 3))
-    opac = jax.random.uniform(key[4], (n, 1), minval=0.1, maxval=0.6)
+    opac = jax.random.uniform(key[4], (n,), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(key[5], (3,))
     vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
 
 
+@pytest.mark.integration
 def test_depth_render_single_gaussian():
     """Match single gaussian expected depth against accumulated alpha."""
     H = W = 64
     means = jnp.array([[0.1, -0.05, 0.0]])
     scales = jnp.array([[0.12, 0.12, 0.12]])
     quats = jnp.array([[1.0, 0.0, 0.0, 0.0]])
-    opac = jnp.array([[0.9]])
+    opac = jnp.array([0.9])
     vm = jnp.array([[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 4.0], [0, 0, 0, 1]], jnp.float32)
     pvz = float((vm[:3, :3] @ means[0] + vm[:3, 3])[2])  # camera-space depth
     black = jnp.zeros(3)
@@ -107,6 +108,7 @@ def test_depth_render_single_gaussian():
     assert depth.max() > 0.5 * pvz  # gaussian actually contributes
 
 
+@pytest.mark.integration
 def test_offpath_image_byte_identical():
     """The depth path's image is bit-for-bit the plain rasterize image."""
     n, H, W = 4000, 128, 128
@@ -117,6 +119,7 @@ def test_offpath_image_byte_identical():
     assert np.array_equal(np.asarray(img_plain), np.asarray(img_depth))
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("mode", ["depth_only", "mixed"])
 def test_depth_grad_finite_difference(mode: str):
     """Check depth gradient chain with central finite differences."""
@@ -152,6 +155,7 @@ def test_depth_grad_finite_difference(mode: str):
     assert rel < 8e-2, f"{mode} FD mismatch: {analytic:.6e} vs {numeric:.6e} (rel {rel:.2e})"
 
 
+@pytest.mark.integration
 def test_depth_grad_under_jit():
     n, H, W = 2000, 96, 96
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=3)
@@ -171,6 +175,7 @@ def test_depth_grad_under_jit():
         assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.integration
 def test_depth_grad_under_vmap_matches_sequential():
     """Match vmap depth grads against sequential depth grads."""
     n, H, W, B = 500, 96, 96, 3

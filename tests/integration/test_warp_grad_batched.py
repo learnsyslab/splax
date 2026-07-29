@@ -58,7 +58,7 @@ def _scene(
     quats = jax.random.normal(k[2], (n, 4))
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     colors = jax.random.uniform(k[3], (n, 3))
-    opac = jax.random.uniform(k[4], (n, 1), minval=0.1, maxval=0.6)
+    opac = jax.random.uniform(k[4], (n,), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(k[5], (3,))
     vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
@@ -122,6 +122,7 @@ def _assert_close(name: str, gv: jax.Array | np.ndarray, gs: jax.Array | np.ndar
 # differentiated parameter is either mapped (per-image grad) or broadcast (summed).
 
 
+@pytest.mark.integration
 def test_batched_gaussians_per_image():
     """Per-image gaussian input (means batched): vmap(grad) == sequential stack."""
     n, H, W = 800, 96, 96
@@ -138,6 +139,7 @@ def test_batched_gaussians_per_image():
     _assert_close("means(batched)", gv, gs)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("param", ["means", "scales", "quats", "colors", "opac"])
 def test_broadcast_param_summed(param: str):
     """Match summed broadcast parameter grads against total loss grads."""
@@ -167,6 +169,7 @@ def test_broadcast_param_summed(param: str):
     _assert_close(f"{param}(broadcast summed)", gsummed, jax.grad(total)(base[param]))
 
 
+@pytest.mark.integration
 def test_batched_viewmat_per_pose():
     """Match per pose viewmat vmap grads against sequential grads."""
     n, H, W = 800, 96, 96
@@ -186,6 +189,7 @@ def test_batched_viewmat_per_pose():
 # --- Degenerate broadcast-geometry: shared render, batched target -------------
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("param", ["means", "colors", "opac"])
 def test_broadcast_geometry_shared_render(param: str):
     """Match shared render broadcast geometry grads against sequential grads."""
@@ -212,6 +216,7 @@ def test_broadcast_geometry_shared_render(param: str):
 # --- Finite-difference spot check of a batched viewmat gradient ---------------
 
 
+@pytest.mark.integration
 def test_batched_viewmat_finite_difference():
     """Check one batched viewmat gradient with finite differences."""
     n, H, W = 3000, 110, 110

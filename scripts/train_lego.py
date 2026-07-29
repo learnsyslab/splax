@@ -65,7 +65,7 @@ def init_params(n: int, init_scale: float, init_opa: float, seed: int = 0) -> di
         "log_scales": jnp.full((n, 3), jnp.log(init_scale)),
         "quats": jax.random.normal(key_quats, (n, 4)),
         "colors_logit": jax.random.normal(key_colors, (n, 3)) * 0.1,
-        "opac_logit": jnp.full((n, 1), float(np.log(init_opa / (1 - init_opa)))),
+        "opac_logit": jnp.full((n,), float(np.log(init_opa / (1 - init_opa)))),
     }
 
 
@@ -185,7 +185,7 @@ def train(args: argparse.Namespace) -> dict:
     eval_views = [load_view(test_meta["frames"][index], eval_res) for index in args.eval_frames]
     eval_imgs = [np.asarray(img) for img, _ in eval_views]
     eval_viewmats = [viewmat for _, viewmat in eval_views]
-    eval_focal = 0.5 * eval_res / np.tan(0.5 * camera_angle_x)
+    eval_focal = float(0.5 * eval_res / np.tan(0.5 * camera_angle_x))
 
     params = init_params(args.n, args.init_scale, args.init_opa, args.seed)
     eval_camera: dict = {"img_shape": (eval_res, eval_res), "f": (eval_focal, eval_focal)}
@@ -233,7 +233,7 @@ def train(args: argparse.Namespace) -> dict:
         r: _make_step(
             opt,
             r,
-            0.5 * r / np.tan(0.5 * camera_angle_x),
+            float(0.5 * r / np.tan(0.5 * camera_angle_x)),
             args.ssim_lambda,
             args.opacity_reg,
             args.scale_reg,

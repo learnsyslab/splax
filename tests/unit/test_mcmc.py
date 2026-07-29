@@ -14,6 +14,7 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from splax import mcmc
 
@@ -39,6 +40,7 @@ def _cuda_relocation_reference(
     return new_opac, new_scales
 
 
+@pytest.mark.unit
 def test_compute_relocation_matches_cuda_kernel():
     rng = np.random.default_rng(0)
     n = 200
@@ -59,6 +61,7 @@ def test_compute_relocation_matches_cuda_kernel():
     np.testing.assert_allclose(np.asarray(got_s), ref_s, rtol=2e-3, atol=1e-5)
 
 
+@pytest.mark.unit
 def test_compute_relocation_ratio_one_is_identity():
     """Ratio == 1 must pass opacity/scale through unchanged (untouched gaussians)."""
     opac = jnp.array([0.1, 0.5, 0.9], jnp.float32)
@@ -69,6 +72,7 @@ def test_compute_relocation_ratio_one_is_identity():
     np.testing.assert_allclose(np.asarray(s), np.asarray(scales), rtol=1e-5)
 
 
+@pytest.mark.unit
 def test_relocate_teleports_dead_onto_alive():
     n = 500
     k = jax.random.split(jax.random.key(1), 4)
@@ -77,7 +81,7 @@ def test_relocate_teleports_dead_onto_alive():
     quats = jax.random.normal(k[1], (n, 4))
     colors_logit = jax.random.normal(k[2], (n, 3))
     # first 100 dead (opacity ~0), rest alive (opacity ~0.7)
-    opac_logit = jnp.concatenate([jnp.full((100, 1), -20.0), jnp.full((400, 1), 0.85)])
+    opac_logit = jnp.concatenate([jnp.full((100,), -20.0), jnp.full((400,), 0.85)])
 
     binoms = mcmc.make_binoms(51)
     (new_means, _, _, _, new_opac_logit), reset = mcmc.relocate(
@@ -86,11 +90,11 @@ def test_relocate_teleports_dead_onto_alive():
 
     # shapes are static
     assert new_means.shape == (n, 3)
-    assert new_opac_logit.shape == (n, 1)
+    assert new_opac_logit.shape == (n,)
     # every dead gaussian was reset and now has opacity above the dead threshold
     reset = np.asarray(reset)
     assert reset[:100].all()
-    new_opac = np.asarray(jax.nn.sigmoid(new_opac_logit).reshape(-1))
+    new_opac = np.asarray(jax.nn.sigmoid(new_opac_logit))
     assert (new_opac[:100] > 0.005).all()
     # relocated means coincide with some alive source position
     alive_means = np.asarray(means[100:])
@@ -99,6 +103,7 @@ def test_relocate_teleports_dead_onto_alive():
         assert d < 1e-4
 
 
+@pytest.mark.unit
 def test_inject_noise_respects_opacity():
     n = 400
     k = jax.random.split(jax.random.key(2), 2)
@@ -106,7 +111,7 @@ def test_inject_noise_respects_opacity():
     log_scales = jnp.full((n, 3), jnp.log(0.1))
     quats = jnp.tile(jnp.array([1.0, 0.0, 0.0, 0.0]), (n, 1))
     # half near-transparent, half near-opaque
-    opac_logit = jnp.concatenate([jnp.full((200, 1), -5.0), jnp.full((200, 1), 8.0)])
+    opac_logit = jnp.concatenate([jnp.full((200,), -5.0), jnp.full((200,), 8.0)])
     moved = mcmc.inject_noise(k[0], means, log_scales, quats, opac_logit, scaler=100.0)
     disp = np.linalg.norm(np.asarray(moved), axis=1)
     # low-opacity gaussians move, high-opacity ones barely move

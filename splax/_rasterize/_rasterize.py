@@ -125,8 +125,8 @@ def _rasterize(
     """
     final_Ts, final_idx, out_img = rasterize_ffi(
         colors,
-        opacities.reshape(n),
-        map_opacities.reshape(n),
+        opacities,
+        map_opacities,
         background.reshape(1, 3),
         xys,
         depths,
@@ -207,8 +207,8 @@ def _rasterize_bwd(
     v_img, _, _ = cotangents  # only the image cotangent is nonzero
     v_colors, v_opacity, v_xy, v_conic = rasterize_bwd_ffi(
         colors,
-        opacities.reshape(n),
-        map_opacities.reshape(n),
+        opacities,
+        map_opacities,
         background.reshape(1, 3),
         xys,
         depths,
@@ -223,7 +223,6 @@ def _rasterize_bwd(
         W,
         output_dims=n,
     )
-    v_opacity = v_opacity.reshape(opacities.shape)
     # Cotangents for (colors, opacities, map_opacities, background, xys, depths, radii, conics,
     # cum_tiles_hit). map_opacities feeds only the integer key emission, so it is non-diff like
     # background, depths, radii, and the cumsum.
@@ -251,8 +250,8 @@ def _rasterize_depth(
     """Custom vjp for the depth blend, returning (out_img, out_depth, final_Ts, final_idx)."""
     final_Ts, final_idx, out_img, out_depth = rasterize_depth_ffi(
         colors,
-        opacities.reshape(n),
-        map_opacities.reshape(n),
+        opacities,
+        map_opacities,
         background.reshape(1, 3),
         xys,
         depths,
@@ -333,8 +332,8 @@ def _rasterize_depth_bwd(
     v_img, v_depth_img, _, _ = cotangents
     v_colors, v_opacity, v_xy, v_conic, v_depths = rasterize_bwd_depth_ffi(
         colors,
-        opacities.reshape(n),
-        map_opacities.reshape(n),
+        opacities,
+        map_opacities,
         background.reshape(1, 3),
         xys,
         depths,
@@ -350,8 +349,6 @@ def _rasterize_depth_bwd(
         W,
         output_dims=n,
     )
-    v_opacity = v_opacity.reshape(opacities.shape)
-    v_depths = v_depths.reshape(depths.shape)
     # Unlike the plain rasterize, depths carries a nonzero cotangent
     return v_colors, v_opacity, None, None, v_xy, v_depths, None, v_conic, None
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pytest
 from colmap import init_from_points, read_reconstruction
 from scipy.spatial.transform import Rotation
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.mark.integration
 def test_parsers_and_conventions(drone_sparse: Path):
     cams, imgs, (xyz, rgb, ids, _) = read_reconstruction(drone_sparse)
 
@@ -37,6 +39,7 @@ def test_parsers_and_conventions(drone_sparse: Path):
     assert np.isclose(np.linalg.det(rot), 1.0, atol=1e-5)
 
 
+@pytest.mark.integration
 def test_point_init_static_shapes(drone_sparse: Path):
     _, _, (xyz, rgb, _, _) = read_reconstruction(drone_sparse)
     n = 8000
@@ -45,6 +48,6 @@ def test_point_init_static_shapes(drone_sparse: Path):
     assert p["log_scales"].shape == (n, 3)
     assert p["quats"].shape == (n, 4)
     assert p["colors_logit"].shape == (n, 3)
-    assert p["opac_logit"].shape == (n, 1)
+    assert p["opac_logit"].shape == (n,)
     assert np.all(np.isfinite(np.asarray(p["means"])))
     assert np.all(np.isfinite(np.asarray(p["log_scales"])))

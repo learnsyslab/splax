@@ -83,7 +83,7 @@ def load_ply(path: Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, ja
             ``scale_0..2``, ``rot_0..3``, ``f_dc_0..2``, and ``opacity``.
 
     Returns:
-        means, scales (N, 3), quats (N, 4), colors (N, 3), opacities (N, 1) as float32 jax arrays.
+        means, scales (N, 3), quats (N, 4), colors (N, 3), opacities (N,) as float32 jax arrays.
     """
     v = PlyData.read(str(path))["vertex"]
     means = jnp.asarray(np.stack([v["x"], v["y"], v["z"]], axis=-1), jnp.float32)
@@ -94,7 +94,7 @@ def load_ply(path: Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, ja
     quats /= jnp.linalg.norm(quats, axis=-1, keepdims=True)
     sh0 = jnp.asarray(np.stack([v[f"f_dc_{i}"] for i in range(3)], axis=-1), jnp.float32)
     colors = jnp.clip(sh0 * _C0 + 0.5, 0.0, 1.0)  # files may store out-of-range SH coefficients
-    opacities = jax.nn.sigmoid(jnp.asarray(v["opacity"], jnp.float32))[:, None]
+    opacities = jax.nn.sigmoid(jnp.asarray(v["opacity"], jnp.float32))
     return means, scales, quats, colors, opacities
 
 
@@ -114,16 +114,16 @@ def write_ply(
         scales: Positive per-axis scales, shape ``(N, 3)``.
         quats: wxyz quaternions, shape ``(N, 4)``.
         colors: RGB in ``[0, 1]``, shape ``(N, 3)``.
-        opacities: Opacities in ``[0, 1]``, shape ``(N, 1)`` or ``(N,)``.
+        opacities: Opacities in ``[0, 1]``, shape ``(N,)``.
     """
     splats = [np.asarray(x, np.float32) for x in (means, scales, quats, colors, opacities)]
     means, scales, quats, colors, opacities = splats
     quats = quats / np.linalg.norm(quats, axis=-1, keepdims=True)
     f_dc = (colors - 0.5) / _C0
     # logit is infinite at exactly 0 and 1, clip to keep the stored values finite
-    opac_logit = logit(np.clip(opacities.reshape(-1, 1), 1e-7, 1.0 - 1e-7))
+    opac_logit = logit(np.clip(opacities, 1e-7, 1.0 - 1e-7))
     n = means.shape[0]
-    data = np.hstack([means, np.zeros((n, 3)), f_dc, opac_logit, np.log(scales), quats])
+    data = np.column_stack([means, np.zeros((n, 3)), f_dc, opac_logit, np.log(scales), quats])
     fields = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity"]
     fields += [f"scale_{i}" for i in range(3)] + [f"rot_{i}" for i in range(4)]
     verts = np.empty(n, dtype=[(f, "f4") for f in fields])

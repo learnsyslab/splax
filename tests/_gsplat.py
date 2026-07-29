@@ -11,7 +11,6 @@ Convention differences:
   - Intrinsics: gsplat takes a 3x3 K matrix rather than separate f and c values.
   - glob_scale: gsplat is missing a global scale.
   - Camera z clipping: gsplat uses `near_plane` instead of `clip_thresh`.
-  - Opacities / colors: gsplat uses (N,) opacities instead of (N, 1).
 """
 
 from __future__ import annotations
@@ -93,7 +92,7 @@ def render(
         cuda_tensor(means),
         cuda_tensor(quats),
         cuda_tensor(scales) * float(glob_scale),
-        cuda_tensor(opacities).reshape(-1),
+        cuda_tensor(opacities),
         cuda_tensor(colors),
         cuda_tensor(viewmat)[None],
         cuda_tensor(intrinsics(f, c))[None],
@@ -135,7 +134,7 @@ def viewmat_grad(
         cuda_tensor(means),
         cuda_tensor(quats),
         cuda_tensor(scales) * float(glob_scale),
-        cuda_tensor(opacities).reshape(-1),
+        cuda_tensor(opacities),
         cuda_tensor(colors),
         viewmat_t[None],
         cuda_tensor(intrinsics(f, c))[None],
@@ -166,14 +165,13 @@ def grad(
     clip_thresh: float,
     weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Gsplat grads wrt (means, scales, quats, colors, opacities), opacities grad as (N, 1)."""
+    """Gsplat grads wrt (means, scales, quats, colors, opacities)."""
     H, W = img_shape
-    n = np.asarray(means, dtype=np.float32).shape[0]
     means_t = cuda_tensor(means).requires_grad_(True)
     scales_t = cuda_tensor(scales).requires_grad_(True)
     quats_t = cuda_tensor(quats).requires_grad_(True)
     colors_t = cuda_tensor(colors).requires_grad_(True)
-    opac_t = cuda_tensor(opacities).reshape(-1).requires_grad_(True)
+    opac_t = cuda_tensor(opacities).requires_grad_(True)
 
     out, alpha, _ = gsplat.rasterization(
         means_t,
@@ -195,5 +193,5 @@ def grad(
 
     grads = (means_t, scales_t, quats_t, colors_t)
     out_g = [x.grad.detach().cpu().numpy() for x in grads]
-    out_g.append(opac_t.grad.detach().cpu().numpy().reshape(n, 1))
+    out_g.append(opac_t.grad.detach().cpu().numpy())
     return tuple(out_g)

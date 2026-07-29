@@ -100,7 +100,7 @@ def build_synthetic() -> Scene:
     quats = jax.random.normal(k[4], (n, 4))
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     colors = jax.random.uniform(k[5], (n, 3))
-    opacities = jax.random.uniform(k[6], (n, 1))
+    opacities = jax.random.uniform(k[6], (n,))
     scene = (means, scales, quats, colors, opacities, jnp.ones(3))
     viewmats, focal = orbit(np.zeros(3), max(BATCHES), res, radius=9.0)
     description = f"Random Gaussian clusters, {n:,} splats in {SYN_CLUSTERS} compact blobs."
@@ -152,7 +152,6 @@ def make_gsplat(sc: Scene, batch: int) -> Callable[[], object]:
     # Older torch versions crash for asarray from jax Arrays
     tensors = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in sc.scene]
     means_t, scales_t, quats_t, colors_t, opac_t, bg_t = tensors
-    opac_t = opac_t.reshape(-1)
     params = [means_t, quats_t, scales_t, opac_t, colors_t]
     k = np.array([[focal, 0.0, res / 2], [0.0, focal, res / 2], [0.0, 0.0, 1.0]], np.float32)
     ks_t = torch.as_tensor(k, device="cuda")[None].repeat(batch, 1, 1)

@@ -69,7 +69,6 @@ def make_gsplat_step(sc: Scene, batch: int) -> Callable[[], object]:
     # Older torch versions crash for asarray from jax Arrays
     tensors = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in sc.scene]
     means_t, scales_t, quats_t, colors_t, opac_t, bg_t = tensors
-    opac_t = opac_t.reshape(-1)
     params = [p.requires_grad_() for p in (means_t, quats_t, scales_t, opac_t, colors_t)]
     k = np.array([[focal, 0.0, res / 2], [0.0, focal, res / 2], [0.0, 0.0, 1.0]], np.float32)
     ks_t = torch.as_tensor(k, device="cuda")[None].repeat(batch, 1, 1)

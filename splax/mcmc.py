@@ -95,7 +95,7 @@ def relocate(
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
         logit_colors: Color logits, shape ``(N, 3)``.
-        logit_opacities: Opacity logits, one entry per gaussian.
+        logit_opacities: Opacity logits, shape ``(N,)``.
         binoms: Binomial table from ``make_binoms``.
         min_opacity: Opacity threshold at or below which a gaussian counts as dead.
 
@@ -104,11 +104,11 @@ def relocate(
         shape ``(N,)`` marking the rows whose optimizer moments the caller should zero.
     """
     n = means3d.shape[0]
-    opac = jax.nn.sigmoid(logit_opacities).reshape(n)
+    opac = jax.nn.sigmoid(logit_opacities)
     scales = jnp.exp(log_scales)
     dead = opac <= min_opacity
     # categorical samples with p ~ exp(logits), so log-opacities sample proportional to opacity
-    logits = jnp.where(dead, -jnp.inf, jax.nn.log_sigmoid(logit_opacities).reshape(n))
+    logits = jnp.where(dead, -jnp.inf, jax.nn.log_sigmoid(logit_opacities))
     src = jax.random.categorical(key, logits, shape=(n,))
     # counts[s] = number of dead gaussians that chose source s
     counts = jnp.zeros(n, jnp.float32).at[src].add(dead.astype(jnp.float32))
@@ -116,7 +116,7 @@ def relocate(
     ratio = jnp.where(dead, counts[src], counts) + 1.0
     new_opac, new_scale = compute_relocation(opac[source], scales[source], ratio, binoms)
     new_opac = jnp.clip(new_opac, min_opacity, 1.0 - _EPS)
-    new_logit_opac = jnp.log(new_opac / (1.0 - new_opac)).reshape(logit_opacities.shape)
+    new_logit_opac = jnp.log(new_opac / (1.0 - new_opac))
     new_log_scales = jnp.log(new_scale)
 
     reset = dead | (counts > 0)  # rows that actually changed
@@ -126,7 +126,7 @@ def relocate(
         jnp.where(m, new_log_scales, log_scales),
         jnp.where(m, quats[source], quats),
         jnp.where(m, logit_colors[source], logit_colors),
-        jnp.where(reset.reshape(logit_opacities.shape), new_logit_opac, logit_opacities),
+        jnp.where(reset, new_logit_opac, logit_opacities),
     )
     return out, reset
 
@@ -152,14 +152,14 @@ def inject_noise(
         means3d: Gaussian centers, shape ``(N, 3)``.
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
-        logit_opacities: Opacity logits, one entry per gaussian.
+        logit_opacities: Opacity logits, shape ``(N,)``.
         scaler: Global noise strength.
         min_opacity: Opacity the noise gate is centered on, matching ``relocate``'s dead threshold.
 
     Returns:
         The perturbed means, shape ``(N, 3)``.
     """
-    opac = jax.nn.sigmoid(logit_opacities).reshape(means3d.shape[0])
+    opac = jax.nn.sigmoid(logit_opacities)
     scales = jnp.exp(log_scales)
     rot = R.from_quat(quats, scalar_first=True).as_matrix()
     m = rot * scales[:, None, :]  # R diag(scale) with Sigma = m m^T

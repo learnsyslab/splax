@@ -32,6 +32,7 @@ def _lego_scene(lego_meta: dict, lego_ply: Path) -> tuple[tuple[jax.Array, ...],
     return gaussians, viewmat, focal
 
 
+@pytest.mark.integration
 @pytest.mark.gsplat
 def test_lego_viewmat_grad_gsplat_parity(
     gsplat_shim: types.ModuleType, lego_meta: dict, lego_ply: Path

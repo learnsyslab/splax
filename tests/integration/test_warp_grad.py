@@ -46,7 +46,7 @@ def _scene(
     quats = jax.random.normal(k[2], (n, 4))
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     colors = jax.random.uniform(k[3], (n, 3))
-    opac = jax.random.uniform(k[4], (n, 1), minval=0.1, maxval=0.6)
+    opac = jax.random.uniform(k[4], (n,), minval=0.1, maxval=0.6)
     bg = jax.random.uniform(k[5], (3,))
     vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
     return means, scales, quats, colors, opac, bg, vm
@@ -100,6 +100,7 @@ def _losses(
     return {"sum": sum_loss, "wmse": wmse_loss}
 
 
+@pytest.mark.integration
 @pytest.mark.gsplat
 @pytest.mark.parametrize("n,H,W", [(3000, 128, 128), (8000, 160, 160)])
 @pytest.mark.parametrize("which", ["sum", "wmse"])
@@ -136,6 +137,7 @@ def test_grad_parity_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: 
         assert rel < tol, f"{which}/{name} relative grad error {rel:.2e}"
 
 
+@pytest.mark.integration
 def test_finite_difference():
     """Directional-derivative FD check: grad . v ~= (L(x+eps v) - L(x-eps v))/2eps.
 
@@ -176,6 +178,7 @@ def test_finite_difference():
     )
 
 
+@pytest.mark.integration
 def test_grad_under_jit():
     n, H, W = 2000, 128, 128
     means, scales, quats, colors, opac, bg, vm = _scene(n, H, W, seed=3)
@@ -191,6 +194,7 @@ def test_grad_under_jit():
         assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.integration
 def test_grad_under_vmap_matches_sequential():
     """Match vmap gaussian grads against sequential grads."""
     n, H, W, B = 500, 96, 96, 3
@@ -229,6 +233,7 @@ def _render(
     ]
 
 
+@pytest.mark.integration
 def test_viewmat_finite_difference():
     """Check viewmat gradients with directional finite differences."""
     n, H, W = 4000, 120, 120
@@ -255,6 +260,7 @@ def test_viewmat_finite_difference():
     )
 
 
+@pytest.mark.integration
 def test_grad_selection_consistency():
     """Match joint kernel grads against per path kernel grads."""
     n, H, W = 3000, 110, 110
@@ -274,6 +280,7 @@ def test_grad_selection_consistency():
     assert np.allclose(gv_only, np.asarray(gv_both), rtol=1e-4, atol=1e-6)
 
 
+@pytest.mark.integration
 def test_pose_chain_rule_fd():
     """Validate se3 chain rule gradients with finite differences."""
 
@@ -309,6 +316,7 @@ def test_pose_chain_rule_fd():
     )
 
 
+@pytest.mark.integration
 def test_viewmat_grad_under_vmap_matches_sequential():
     """Match vmap viewmat grads against sequential viewmat grads."""
     n, H, W, B = 500, 96, 96, 3

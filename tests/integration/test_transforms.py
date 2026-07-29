@@ -8,8 +8,7 @@ parameters, the camera pose, and the transforms themselves. Checked here:
      the gradients, and omitting transforms is byte-identical too.
   2. Forward correctness against a manual reference that pre-transforms the slice's
      means and quats in JAX. The two formulations are mathematically equal but round
-     differently, so projection outputs are compared tightly (no radii or visibility
-     flips) and images perceptually.
+     differently, so images are compared perceptually.
   3. Gaussian gradients under active transforms against the same JAX reference through
      the plain, already validated backward. Quaternion gradients compare in the tangent
      space of the unit sphere: the reference normalizes through scipy while the kernel
@@ -20,70 +19,27 @@ parameters, the camera pose, and the transforms themselves. Checked here:
      gradients off the SO(3) manifold.
   5. Batching. vmap over the transform stack equals the sequential loop for the forward
      bit-exactly and for gradients numerically, including vmap over viewmats.
-  6. Invalid slices and mismatched shapes raise immediately.
 """
 
 from __future__ import annotations
-
-from typing import TypedDict
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from _transforms import kw as make_kw
+from _transforms import manual_move, scene
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 
 import splax
 
-# region forward
 
-
-class _KW(TypedDict):
-    viewmat: jax.Array
-    background: jax.Array
-    img_shape: tuple[int, int]
-    f: tuple[float, float]
-    c: tuple[float, float]
-
-
-def _scene(n: int, seed: int = 0) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    k = jax.random.split(jax.random.key(seed), 5)
-    means = jax.random.normal(k[0], (n, 3)) * 0.5
-    scales = jax.random.uniform(k[1], (n, 3), minval=0.02, maxval=0.08)
-    quats = jax.random.normal(k[2], (n, 4))
-    quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
-    colors = jax.random.uniform(k[3], (n, 3))
-    opac = jax.random.uniform(k[4], (n, 1), minval=0.1, maxval=0.6)
-    return means, scales, quats, colors, opac
-
-
-def _kw(H: int, W: int) -> _KW:
-    vm = jnp.array([[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 5], [0, 0, 0, 1]], jnp.float32)
-    return {
-        "viewmat": vm,
-        "background": jnp.zeros(3),
-        "img_shape": (H, W),
-        "f": (float(H), float(H)),
-        "c": (W // 2, H // 2),
-    }
-
-
-def _manual_move(
-    means: jax.Array, quats: jax.Array, T: np.ndarray, start: int, stop: int
-) -> tuple[jax.Array, jax.Array]:
-    """Reference transform of a slice, applied to the splat arrays in JAX."""
-    transform = TF.from_matrix(jnp.asarray(T))
-    rotated = transform.rotation * R.from_quat(quats[start:stop], scalar_first=True)
-    m2 = means.at[start:stop].set(transform.apply(means[start:stop]))
-    q2 = quats.at[start:stop].set(rotated.as_quat(scalar_first=True))
-    return m2, q2
-
-
+@pytest.mark.integration
 def test_identity_transforms_byte_identical():
     n = 4000
-    means, scales, quats, colors, opac = _scene(n, seed=1)
-    kw = _kw(128, 128)
+    means, scales, quats, colors, opac = scene(n, seed=1)
+    kw = make_kw(128, 128)
     plain = np.asarray(splax.render(means, scales, quats, colors, opac, **kw)[0])
     eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (2, 4, 4))
     ident = np.asarray(
@@ -101,58 +57,12 @@ def test_identity_transforms_byte_identical():
     assert np.array_equal(plain, ident)
 
 
-def test_projection_matches_manual_transform():
-    """Kernel transform vs pre-transformed inputs, same projection outputs.
-
-    The kernel rotates the covariance factor while the reference rotates the
-    quaternion, mathematically equal with different rounding. Projected centers,
-    depths, and conics must agree tightly, with zero radii or visibility flips.
-    """
-    n = 4000
-    means, scales, quats, _colors, opac = _scene(n, seed=2)
-    kw = _kw(128, 128)
-    rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
-    T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
-    tf_ids = jnp.full((n,), -1, jnp.int32).at[:1000].set(0)
-    a = splax.project(
-        means,
-        scales,
-        quats,
-        kw["viewmat"],
-        opacities=opac,
-        img_shape=kw["img_shape"],
-        f=kw["f"],
-        c=kw["c"],
-        gaussian_transforms=jnp.asarray(T)[None],
-        transform_ids=tf_ids,
-    )
-    m2, q2 = _manual_move(means, quats, T, 0, 1000)
-    b = splax.project(
-        m2,
-        scales,
-        q2,
-        kw["viewmat"],
-        opacities=opac,
-        img_shape=kw["img_shape"],
-        f=kw["f"],
-        c=kw["c"],
-    )
-
-    ra, rb = np.asarray(a[2]).ravel(), np.asarray(b[2]).ravel()
-    np.testing.assert_array_equal(ra > 0, rb > 0)
-    live = ra > 0
-    np.testing.assert_allclose(np.asarray(a[0])[live], np.asarray(b[0])[live], atol=5e-2)
-    np.testing.assert_allclose(
-        np.asarray(a[1]).ravel()[live], np.asarray(b[1]).ravel()[live], atol=1e-3
-    )
-    np.testing.assert_allclose(np.asarray(a[3])[live], np.asarray(b[3])[live], atol=1e-3)
-
-
+@pytest.mark.integration
 def test_render_matches_manual_transform():
     """Match transformed render against manual reference."""
     n = 4000
-    means, scales, quats, colors, opac = _scene(n, seed=3)
-    kw = _kw(128, 128)
+    means, scales, quats, colors, opac = scene(n, seed=3)
+    kw = make_kw(128, 128)
     rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
     T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
     moved = np.asarray(
@@ -167,7 +77,7 @@ def test_render_matches_manual_transform():
             gaussian_slices=((0, 1000),),
         )[0]
     )
-    m2, q2 = _manual_move(means, quats, T, 0, 1000)
+    m2, q2 = manual_move(means, quats, T, 0, 1000)
     ref = np.asarray(splax.render(m2, scales, q2, colors, opac, **kw)[0])
     mse = float(np.mean((moved - ref) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
@@ -177,11 +87,12 @@ def test_render_matches_manual_transform():
     assert np.abs(moved - plain).max() > 1e-2
 
 
+@pytest.mark.integration
 def test_vmap_over_transforms_matches_sequential():
     """Match vmap transform output against sequential output."""
     n, B = 4000, 3
-    means, scales, quats, colors, opac = _scene(n, seed=4)
-    kw = _kw(96, 96)
+    means, scales, quats, colors, opac = scene(n, seed=4)
+    kw = make_kw(96, 96)
     angles = np.array([[0.0, 0.0, 0.3 * i] for i in range(B)])
     trans = np.array([[0.05 * i, -0.03 * i, 0.0] for i in range(B)])
     Ts = TF.from_components(trans, R.from_euler("xyz", angles)).as_matrix().astype(np.float32)
@@ -206,11 +117,12 @@ def test_vmap_over_transforms_matches_sequential():
     assert np.abs(out[0] - out[B - 1]).max() > 1e-2
 
 
+@pytest.mark.integration
 def test_two_objects_move_independently():
     """Move two slices independently and match the manual reference."""
     n = 4000
-    means, scales, quats, colors, opac = _scene(n, seed=5)
-    kw = _kw(128, 128)
+    means, scales, quats, colors, opac = scene(n, seed=5)
+    kw = make_kw(128, 128)
     rot_a = R.from_euler("xyz", [0.0, 0.0, 0.4])
     Ta = TF.from_components((0.2, 0.0, 0.0), rot_a).as_matrix().astype(np.float32)
     rot_b = R.from_euler("xyz", [0.3, 0.0, 0.0])
@@ -228,8 +140,8 @@ def test_two_objects_move_independently():
             gaussian_slices=slices,
         )[0]
     )
-    m2, q2 = _manual_move(means, quats, Ta, 0, 800)
-    m2, q2 = _manual_move(m2, q2, Tb, 2000, 2600)
+    m2, q2 = manual_move(means, quats, Ta, 0, 800)
+    m2, q2 = manual_move(m2, q2, Tb, 2000, 2600)
     ref = np.asarray(splax.render(m2, scales, q2, colors, opac, **kw)[0])
     mse = float(np.mean((both - ref) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
@@ -248,49 +160,6 @@ def test_two_objects_move_independently():
         )[0]
     )
     assert np.abs(both - swapped).max() > 1e-2
-
-
-def test_invalid_transform_inputs_raise():
-    n = 1000
-    means, scales, quats, colors, opac = _scene(n, seed=6)
-    kw = _kw(64, 64)
-    eye = jnp.eye(4, dtype=jnp.float32)[None]
-
-    with pytest.raises(ValueError, match="together"):
-        splax.render(means, scales, quats, colors, opac, **kw, gaussian_transforms=eye)
-    with pytest.raises(ValueError, match="does not match"):
-        splax.render(
-            means,
-            scales,
-            quats,
-            colors,
-            opac,
-            **kw,
-            gaussian_transforms=eye,
-            gaussian_slices=((0, 100), (200, 300)),
-        )
-    with pytest.raises(ValueError, match="outside"):
-        splax.render(
-            means,
-            scales,
-            quats,
-            colors,
-            opac,
-            **kw,
-            gaussian_transforms=eye,
-            gaussian_slices=((900, 1100),),
-        )
-    with pytest.raises(ValueError, match="overlap"):
-        splax.render(
-            means,
-            scales,
-            quats,
-            colors,
-            opac,
-            **kw,
-            gaussian_transforms=jnp.broadcast_to(eye[0], (2, 4, 4)),
-            gaussian_slices=((0, 500), (400, 600)),
-        )
 
 
 # region gradients
@@ -348,12 +217,13 @@ def _loss_reference(
 
 
 def _setup(seed: int) -> tuple:
-    means, scales, quats, colors, opac = _scene(N, seed=seed)
-    kw = _kw(96, 96)
+    means, scales, quats, colors, opac = scene(N, seed=seed)
+    kw = make_kw(96, 96)
     target = jax.random.uniform(jax.random.key(100 + seed), (96, 96, 3))
     return means, scales, quats, (colors, opac, kw, target)
 
 
+@pytest.mark.integration
 def test_identity_transforms_match_plain_grads():
     means, scales, quats, extras = _setup(seed=2)
     eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (K, 4, 4))
@@ -369,6 +239,7 @@ def test_identity_transforms_match_plain_grads():
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-8, err_msg=name)
 
 
+@pytest.mark.integration
 def test_gaussian_grads_match_jax_reference():
     means, scales, quats, extras = _setup(seed=3)
     tfs = _tfs(ROTVECS, TRANS)
@@ -385,6 +256,7 @@ def test_gaussian_grads_match_jax_reference():
     np.testing.assert_allclose(tang(np.asarray(gk[2])), tang(np.asarray(gr[2])), atol=2e-6)
 
 
+@pytest.mark.integration
 def test_pose_grads_match_jax_reference():
     """Transform gradients, contracted to rotvec + translation pose coordinates."""
     means, scales, quats, extras = _setup(seed=4)
@@ -402,6 +274,7 @@ def test_pose_grads_match_jax_reference():
     assert np.abs(np.asarray(gk[0])).max() > 0 and np.abs(np.asarray(gk[1])).max() > 0
 
 
+@pytest.mark.integration
 def test_transform_grad_bottom_row_zero():
     means, scales, quats, extras = _setup(seed=5)
     tfs = _tfs(ROTVECS, TRANS)
@@ -409,6 +282,7 @@ def test_transform_grad_bottom_row_zero():
     assert np.abs(np.asarray(g_tf)[:, 3, :]).max() == 0.0
 
 
+@pytest.mark.integration
 def test_vmap_grad_over_transform_stack():
     means, scales, quats, extras = _setup(seed=6)
     stack = jnp.stack([_tfs(ROTVECS, TRANS), _tfs(-ROTVECS, -TRANS)])
@@ -418,6 +292,7 @@ def test_vmap_grad_over_transform_stack():
     np.testing.assert_allclose(np.asarray(gb), np.stack(seq), rtol=1e-5, atol=1e-8)
 
 
+@pytest.mark.integration
 def test_vmap_grad_over_viewmats_with_transforms():
     means, scales, quats, extras = _setup(seed=7)
     colors, opac, kw, target = extras

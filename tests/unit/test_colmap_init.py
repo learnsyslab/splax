@@ -8,6 +8,7 @@ and with exactly the (1/3)ln(n/m) log-space magnitude. See ``init_from_points``.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from colmap import init_from_points, knn_scales
 
 
@@ -18,6 +19,7 @@ def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     return xyz, rgb
 
 
+@pytest.mark.unit
 def test_padding_applies_density_ratio_correction():
     """When n>m, every original knn log-scale is lowered by exactly (1/3)ln(n/m)."""
     m, n = 500, 4000
@@ -34,6 +36,7 @@ def test_padding_applies_density_ratio_correction():
     assert np.allclose(ls[:, 0], ls[:, 1]) and np.allclose(ls[:, 0], ls[:, 2])
 
 
+@pytest.mark.unit
 def test_correction_scales_with_padding_ratio():
     """Offset tracks the padding ratio: n=8m is 3x lower than n=m in log space."""
     m = 500
@@ -49,6 +52,7 @@ def test_correction_scales_with_padding_ratio():
     assert np.isclose(off_large, np.log(8) / 3.0, atol=1e-5)
 
 
+@pytest.mark.unit
 def test_subsample_branch_has_no_correction():
     """Check that subsampling skips density correction when n is not padded."""
     m, n = 4000, 500

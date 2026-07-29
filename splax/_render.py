@@ -61,7 +61,7 @@ def render(
         scales: Per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
         colors: Gaussian colors, shape ``(N, 3)``.
-        opacities: Gaussian opacities, one entry per gaussian.
+        opacities: Gaussian opacities, shape ``(N,)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
         background: Constant background color, shape ``(3,)``.
         img_shape: Image size as ``(height, width)`` in pixels.
@@ -105,8 +105,7 @@ def render(
     blend_opacities = opacities
     map_opacities = None
     if antialiased:
-        rho = opacity_compensation(conics, radii)
-        blend_opacities = opacities * rho.reshape(opacities.shape)
+        blend_opacities = opacities * opacity_compensation(conics, radii)
         map_opacities = opacities  # the tile intersection stays on the raw opacity
 
     inputs = (colors, blend_opacities, background, xys, depths, radii, conics, cum_tiles_hit)
@@ -143,7 +142,7 @@ def render_log(
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, not necessarily normalized, shape ``(N, 4)``.
         logit_colors: Color logits, shape ``(N, 3)``.
-        logit_opacities: Opacity logits, one entry per gaussian.
+        logit_opacities: Opacity logits, shape ``(N,)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
         background: Constant background color, shape ``(3,)``.
         img_shape: Image size as ``(height, width)`` in pixels.

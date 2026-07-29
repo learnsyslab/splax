@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 from train_colmap import init_exposure, make_step
 
 from splax import render_log
@@ -48,7 +49,7 @@ def _params(n: int = 200, seed: int = 0) -> dict[str, jax.Array]:
         "log_scales": jnp.full((n, 3), jnp.log(0.05)),
         "quats": jax.random.normal(k[1], (n, 4)),
         "colors_logit": jax.random.normal(k[2], (n, 3)) * 0.3,
-        "opac_logit": jnp.full((n, 1), -1.0),
+        "opac_logit": jnp.full((n,), -1.0),
     }
 
 
@@ -87,6 +88,7 @@ def _recover_grad(
     return {kk: np.asarray(params[kk] - new[kk]) for kk in params}
 
 
+@pytest.mark.integration
 def test_b1_matches_pre_t6_single_view():
     """batch=1 grad == the reconstructed single-view grad (default path frozen)."""
     params = _params(seed=1)
@@ -112,6 +114,7 @@ def test_b1_matches_pre_t6_single_view():
         )
 
 
+@pytest.mark.integration
 def test_b2_grad_equals_mean_of_b1_grads():
     """A B=2 step's gradient == mean of the two B=1 gradients (loss averaged over batch)."""
     params = _params(seed=2)
@@ -129,6 +132,7 @@ def test_b2_grad_equals_mean_of_b1_grads():
         )
 
 
+@pytest.mark.integration
 def test_b2_duplicate_view_equals_b1():
     """B=2 of the same view twice == B=1 of that view (mean of identical = identical)."""
     params = _params(seed=4)
@@ -139,6 +143,7 @@ def test_b2_duplicate_view_equals_b1():
         assert np.allclose(g_b1[kk], g_b2[kk], rtol=2e-3, atol=1e-5), kk
 
 
+@pytest.mark.integration
 def test_batched_step_runs_under_jit_with_exposure_and_depth():
     """The batched step traces + runs for B=3 with depth-loss and exposure-opt on."""
     params = _params(n=150, seed=6)

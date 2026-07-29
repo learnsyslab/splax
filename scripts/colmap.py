@@ -41,7 +41,8 @@ def read_reconstruction(
     """
     rec = pycolmap.Reconstruction(str(path))
     cams = {
-        cid: (c.model_name, c.width, c.height, tuple(c.params)) for cid, c in rec.cameras.items()
+        cid: (c.model_name, c.width, c.height, tuple(float(p) for p in c.params))
+        for cid, c in rec.cameras.items()
     }
     images = []
     for iid, im in rec.images.items():
@@ -146,5 +147,5 @@ def init_from_points(
         "log_scales": jnp.asarray(log_scales[:, None].repeat(3, 1)),
         "quats": jnp.asarray(rng.normal(size=(n, 4)), jnp.float32),
         "colors_logit": jnp.asarray(colors_logit, jnp.float32),
-        "opac_logit": jnp.full((n, 1), logit(opacity), jnp.float32),
+        "opac_logit": jnp.full((n,), logit(opacity), jnp.float32),
     }

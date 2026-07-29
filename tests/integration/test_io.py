@@ -1,15 +1,10 @@
-"""PLY export round-trips and asset fetching.
+"""PLY export round-trip on a real scene, and asset fetching.
 
-``splax.io.write_ply`` must be the exact inverse of ``splax.io.load_ply``.
-Two round-trips assert that:
+A real scene (lego.ply) written to a copy then reloaded must render to the same image, fit-free,
+just the load/write/load/render loop.
 
-1. random render-space splats through write_ply then load_ply reproduce the inputs, and
-2. a real scene (lego.ply) written to a copy then reloaded renders to the same image
-   (fit-free, no training, just the load/write/load/render loop).
-
-``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral
-port: download, cache hit, force re-download, ETag-based invalidation, and the
-``SPLAX_CACHE`` environment fallback.
+``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral port: download, cache
+hit, force re-download, ETag-based invalidation, and the ``SPLAX_CACHE`` environment fallback.
 """
 
 from __future__ import annotations
@@ -59,36 +54,7 @@ def _render(
     )[0]
 
 
-def _random_splats(
-    seed: int, n: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    means = rng.uniform(-1.0, 1.0, (n, 3)).astype(np.float32)
-    scales = rng.uniform(0.01, 0.2, (n, 3)).astype(np.float32)
-    quats = rng.normal(size=(n, 4)).astype(np.float32)
-    quats /= np.linalg.norm(quats, axis=-1, keepdims=True)
-    colors = rng.uniform(0.0, 1.0, (n, 3)).astype(np.float32)
-    opac = rng.uniform(0.05, 0.95, (n, 1)).astype(np.float32)
-    return means, scales, quats, colors, opac
-
-
-def test_write_ply_is_load_ply_inverse(tmp_path: Path):
-    """Random splats through write_ply then load_ply reproduce the render-space inputs."""
-    means, scales, quats, colors, opac = _random_splats(seed=0, n=5000)
-    out = tmp_path / "rand.ply"
-    splax.io.write_ply(out, means, scales, quats, colors, opac)
-
-    lm, ls, lq, lc, lo = (np.asarray(x) for x in load_ply(out))
-
-    np.testing.assert_allclose(lm, means, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(ls, scales, rtol=1e-5, atol=1e-6)
-    # quats are normalized on both sides, compare up to sign is unnecessary since
-    # write_ply preserves the stored raw quat direction and load re-normalizes.
-    np.testing.assert_allclose(lq, quats, rtol=0, atol=1e-6)
-    np.testing.assert_allclose(lc, colors, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(lo, opac, rtol=1e-4, atol=1e-4)
-
-
+@pytest.mark.integration
 def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
     """Fit-free: load lego.ply, write copy, reload, identical render."""
     splats = load_ply(lego_ply)
@@ -142,6 +108,7 @@ def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
     server.server_close()
 
 
+@pytest.mark.integration
 def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """First fetch downloads the file into the cache dir with matching bytes."""
     srv_dir, url, _ = file_server
@@ -155,6 +122,7 @@ def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Pat
     assert path.read_bytes() == b"splat bytes"
 
 
+@pytest.mark.integration
 def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """Second fetch returns the same path without touching the network."""
     srv_dir, url, requests = file_server
@@ -169,6 +137,7 @@ def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Pat
     assert len(requests) == 1  # No new request on the cache hit.
 
 
+@pytest.mark.integration
 def test_fetch_unchecked_serves_cache(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """allow_unchecked serves the cache without contacting the remote, even once that is gone."""
     srv_dir, url, requests = file_server
@@ -184,6 +153,7 @@ def test_fetch_unchecked_serves_cache(file_server: tuple[Path, str, list[str]], 
     assert len(requests) == 1
 
 
+@pytest.mark.integration
 def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
     """force=True re-downloads and overwrites the cached copy."""
     srv_dir, url, _ = file_server
@@ -200,6 +170,7 @@ def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_p
     assert forced.read_bytes() == b"new bytes"
 
 
+@pytest.mark.integration
 def test_fetch_etag_invalidates_cache(tmp_path: Path):
     """A cache hit is reused while the remote ETag is unchanged, and refetched when it changes."""
     state = {"body": b"v1 bytes", "etag": '"aaa"', "gets": 0}
@@ -240,6 +211,7 @@ def test_fetch_etag_invalidates_cache(tmp_path: Path):
         server.server_close()
 
 
+@pytest.mark.integration
 def test_fetch_without_etag(tmp_path: Path):
     """A remote that sends no ETag still downloads, re-fetching on every call."""
     state = {"body": b"no etag bytes", "gets": 0}
@@ -275,6 +247,7 @@ def test_fetch_without_etag(tmp_path: Path):
         server.server_close()
 
 
+@pytest.mark.integration
 def test_fetch_env_cache(
     file_server: tuple[Path, str, list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

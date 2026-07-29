@@ -65,20 +65,20 @@ class Viewer:
             scales: (N, 3) positive per-axis scales.
             quats: (N, 4) wxyz unit quaternions.
             colors: (N, 3) float32 RGB values.
-            opacities: (N, 1) float32 opacity values.
+            opacities: (N,) float32 opacity values.
             position: Initial world position of the object.
             wxyz: Initial world orientation of the object as a wxyz quaternion.
         """
         # Rotate covariances into the world frame
         scales = np.asarray(scales, np.float32)
         rot = R.from_quat(np.asarray(quats, np.float32), scalar_first=True).as_matrix()
-        covariances = np.einsum("nij,nj,nkj->nik", rot, scales**2, rot).astype(np.float32)
+        covariances = np.einsum("nij,nj,nkj->nik", rot, scales**2, rot)
         self._handles[name] = self.server.scene.add_gaussian_splats(
             f"/{name}",
             centers=np.asarray(means, np.float32),
             covariances=covariances,
             rgbs=np.asarray(colors, np.float32),
-            opacities=np.asarray(opacities, np.float32),
+            opacities=np.asarray(opacities, np.float32)[:, None],  # viser requires (N, 1)
             position=np.asarray(position, np.float32),
             wxyz=np.asarray(wxyz, np.float32),
         )

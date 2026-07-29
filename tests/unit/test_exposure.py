@@ -19,9 +19,11 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
+import pytest
 from train_colmap import apply_exposure, init_exposure
 
 
+@pytest.mark.unit
 def test_init_exposure_is_identity():
     ntr = 7
     exp = np.asarray(init_exposure(ntr))
@@ -32,6 +34,7 @@ def test_init_exposure_is_identity():
         assert np.allclose(exp[i, :, 3], 0.0)
 
 
+@pytest.mark.unit
 def test_apply_exposure_identity_is_noop():
     """Identity transform must leave the render bit-identical (off-path parity)."""
     rng = np.random.default_rng(0)
@@ -41,6 +44,7 @@ def test_apply_exposure_identity_is_noop():
     assert np.array_equal(out, img)
 
 
+@pytest.mark.unit
 def test_apply_exposure_affine_algebra():
     """Known transform M@rgb + b, applied per pixel, matches an explicit einsum."""
     rng = np.random.default_rng(1)
@@ -54,6 +58,7 @@ def test_apply_exposure_affine_algebra():
     assert np.allclose(out, ref, atol=1e-5)
 
 
+@pytest.mark.unit
 def test_apply_exposure_scalar_gain_and_offset():
     """A pure per-channel gain+bias (diagonal M) scales/shifts each channel."""
     img = np.ones((2, 2, 3), np.float32)

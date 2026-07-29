@@ -87,7 +87,7 @@ def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
         if prior:  # We are inside a nested vmap, so we have to fold with the last batch size
             i = next(k for k, mk in enumerate(mask) if mk)
             cur = moved[i].shape[1] if dims[i] is not None else moved[i].shape[0]
-        new_mask = tuple(bool(mk) or d is not None for mk, d in zip(mask, dims))
+        new_mask = tuple(mk or d is not None for mk, d in zip(mask, dims))
         flat = []
         for m, mk, d in zip(moved, mask, dims):
             if mk and d is not None:  # Has been folded before AND has a new batch dimension

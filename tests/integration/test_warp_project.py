@@ -87,6 +87,7 @@ def _assert_parity(
     np.testing.assert_allclose(conics_s[mask], conics_g[mask], atol=atol, rtol=1e-3)
 
 
+@pytest.mark.integration
 @pytest.mark.gsplat
 def test_parity_random_10k(gsplat_shim: ModuleType):
     means, scales, quats, viewmat = _random_inputs(10_000, seed=1)
@@ -96,6 +97,7 @@ def test_parity_random_10k(gsplat_shim: ModuleType):
     _assert_parity(a, b)
 
 
+@pytest.mark.integration
 @pytest.mark.gsplat
 def test_parity_under_jit(gsplat_shim: ModuleType):
     means, scales, quats, viewmat = _random_inputs(10_000, seed=2)
@@ -107,6 +109,7 @@ def test_parity_under_jit(gsplat_shim: ModuleType):
     _assert_parity(a, b)
 
 
+@pytest.mark.integration
 @pytest.mark.gsplat
 def test_parity_lego_slice(gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path):
     means, scales, quats, _colors, _opac = splax.io.load_ply(lego_ply)

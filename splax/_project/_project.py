@@ -50,7 +50,7 @@ def project(
         scales: Per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
-        opacities: Gaussian opacities, one entry per gaussian.
+        opacities: Gaussian opacities, shape ``(N,)``.
         img_shape: Image size as ``(height, width)`` in pixels.
         f: Focal lengths ``(fx, fy)`` in pixels.
         c: Principal point ``(cx, cy)`` in pixels, defaulting to the image center.
@@ -79,15 +79,15 @@ def project(
         scales,
         quats,
         viewmat,
-        opacities.reshape(n),
+        opacities,
         gaussian_transforms,
         transform_ids,
-        int(n),
+        n,
         img_shape,
         f,
         c,
-        float(glob_scale),
-        float(clip_thresh),
+        glob_scale,
+        clip_thresh,
         has_transforms,
     )
 
@@ -110,8 +110,7 @@ def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) 
     Returns:
         Per-gaussian compensation factor, shape ``(N,)``.
     """
-    conics = conics.reshape(-1, 3)
-    a, b, c = conics[:, 0], conics[:, 1], conics[:, 2]
+    a, b, c = conics[..., 0], conics[..., 1], conics[..., 2]
     rho2 = 1.0 - eps * (a + c) + (eps * eps) * (a * c - b * b)
     rho = jnp.sqrt(jnp.clip(rho2, 0.0, 1.0))
     return jnp.where(radii > 0, rho, 1.0)
@@ -174,17 +173,17 @@ def _project(
         opac,
         gaussian_transforms,
         transform_ids,
-        int(n),
-        int(n_transforms),
-        bool(has_transforms),
-        int(H),
-        int(W),
-        float(f[0]),
-        float(f[1]),
-        float(c[0]),
-        float(c[1]),
-        float(glob_scale),
-        float(clip_thresh),
+        n,
+        n_transforms,
+        has_transforms,
+        H,
+        W,
+        f[0],
+        f[1],
+        c[0],
+        c[1],
+        glob_scale,
+        clip_thresh,
         output_dims=n,
     )
     return xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit
@@ -259,12 +258,12 @@ def _project_bwd(
         v_conics,
         tf,
         ids,
-        int(n),
-        int(k),
+        n,
+        k,
         has_transforms,
-        float(f[0]),
-        float(f[1]),
-        float(glob_scale),
+        f[0],
+        f[1],
+        glob_scale,
         output_dims=dims,
     )
     return (v_mean, v_scale, v_quat, v_viewmat, None, v_transforms, None)
