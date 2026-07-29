@@ -39,10 +39,10 @@ def sort_and_bin(
         depths: (B*n,) array of gaussian depths.
         radii: (B*n,) array of gaussian radii in pixels.
         conics: (B*n, 3) array of gaussian conics.
-        map_opacities: (B*n,) array of gaussian opacities.
+        map_opacities: (n,) or (B*n,) array of the opacities the tile emission runs on.
         cum_tiles_hit: (B*n,) array of cumulative tile counts per gaussian.
         n: The number of gaussians per image.
-        B: The number of distinct images in the batch.
+        B: The number of distinct projections in the batch.
         img_h: The image height in pixels.
         img_w: The image width in pixels.
 
@@ -71,6 +71,9 @@ def sort_and_bin(
     total = B * n
     bins_len = B * n_tiles
     opac_mod = map_opacities.shape[0]
+    # The emitted tile counts have to match cum_tiles_hit exactly, so the opacities driving them
+    # must either be shared across the batch or carry one entry per projected gaussian.
+    assert opac_mod == n or opac_mod == total, "sort opacities do not match the projection batch"
 
     # Because the size of the required buffers of downstream operations only becomes known after the
     # sort, we require a host sync to read back the total intersection count. We mask this by

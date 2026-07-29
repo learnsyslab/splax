@@ -24,10 +24,9 @@ colour gradient, since the depth map does not depend on the colours, and nonzero
 The depth normalization divides by a quantity that vanishes on uncovered pixels, so those pixels are
 additionally checked to leave the gradient finite.
 
-The geometry defines the batch. ``xys``, ``depths``, ``radii``, ``conics``, and ``cum_tiles_hit``
-carry one entry per image, while ``colors``, ``opacities``, and ``background`` may stay shared and
-are then indexed modulo the per-image gaussian count. Gradients follow the same split, so a shared
-operand collects the sum of its per-image gradients.
+Geometry and appearance batch independently. ``xys``, ``depths``, ``radii``, ``conics``, and
+``cum_tiles_hit`` carry either one entry per image or a single entry shared across the batch, and so
+do ``colors``, ``opacities``, and ``background``.
 """
 
 from __future__ import annotations
@@ -255,6 +254,58 @@ def test_rasterize_depth_broadcast():
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
+def _appearances(colors: jax.Array, opacities: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Scale one splat's colors and opacities into the B appearances of a shared projection."""
+    factors = 0.4 + 0.6 * jnp.arange(B) / (B - 1)
+    return colors * factors[:, None, None], opacities * factors[:, None]
+
+
+def test_rasterize_broadcast_geometry():
+    """Share one projection across a batch of appearances.
+
+    A single projection feeds B images that differ in their colours and opacities alone, so the sort
+    runs once and every image blends the same gaussians in the same order. The tile emission stays
+    on the shared opacities, which is what the shared cumulative tile counts describe.
+    """
+    n, H, W = 4000, 96, 96
+    means, scales, quats, colors, opacities, background = scene(n, seed=3, dense=True)
+    geometry = _geometry(VIEWMAT, means, scales, quats, opacities, H, W)
+    bcolors, bopacities = _appearances(colors, opacities)
+
+    def blend(c: jax.Array, o: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return splax.rasterize(
+            c, o, background, *geometry, img_shape=(H, W), map_opacities=opacities
+        )
+
+    out_img, out_alpha = jax.vmap(blend)(bcolors, bopacities)
+    ref = [blend(bcolors[i], bopacities[i]) for i in range(B)]
+    assert out_img.shape == (B, H, W, 3) and out_alpha.shape == (B, H, W)
+    assert float(out_alpha.std(axis=0).max()) > 0.0, "the batch renders the same alpha B times"
+    np.testing.assert_array_equal(np.asarray(out_img), np.asarray(jnp.stack([r[0] for r in ref])))
+    np.testing.assert_array_equal(np.asarray(out_alpha), np.asarray(jnp.stack([r[1] for r in ref])))
+
+
+def test_rasterize_depth_broadcast_geometry():
+    """Share one projection across a batch of appearances in the depth blend."""
+    n, H, W = 4000, 96, 96
+    means, scales, quats, colors, opacities, background = scene(n, seed=3, dense=True)
+    geometry = _geometry(VIEWMAT, means, scales, quats, opacities, H, W)
+    bcolors, bopacities = _appearances(colors, opacities)
+
+    def blend(c: jax.Array, o: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return splax.rasterize_depth(
+            c, o, background, *geometry, img_shape=(H, W), map_opacities=opacities
+        )
+
+    out_img, out_alpha = jax.vmap(blend)(bcolors, bopacities)
+    ref = [blend(bcolors[i], bopacities[i]) for i in range(B)]
+    assert out_img.shape == (B, H, W, 4) and out_alpha.shape == (B, H, W)
+    depth_spread = float(out_img[..., 3].std(axis=0).max())
+    assert depth_spread > 0.0, "the batch renders the same depth B times"
+    np.testing.assert_array_equal(np.asarray(out_img), np.asarray(jnp.stack([r[0] for r in ref])))
+    np.testing.assert_array_equal(np.asarray(out_alpha), np.asarray(jnp.stack([r[1] for r in ref])))
+
+
 # region gradient
 
 
@@ -467,6 +518,100 @@ def test_rasterize_grad_broadcast():
     for k, a in enumerate(out):
         ref = sum(p[k] for p in per_view)
         np.testing.assert_allclose(np.asarray(a), np.asarray(ref), rtol=2e-3, atol=1e-4)
+
+
+def test_rasterize_grad_broadcast_geometry():
+    """Split the gradients of a batch of appearances over the projection they share.
+
+    Colours and opacities carry one entry per image and keep their own gradient, while the shared
+    projection feeds every image and collects the sum of the per-image gradients. The loss weights
+    the image and the accumulated alpha so both cotangent paths run.
+    """
+    n, H, W = 2000, 96, 96
+    means, scales, quats, colors, opacities, background = scene(n, seed=4)
+    xys, depths, radii, conics, cum = _geometry(VIEWMAT, means, scales, quats, opacities, H, W)
+    bcolors, bopacities = _appearances(colors, opacities)
+    w = jax.random.uniform(jax.random.key(13), (B, H, W, 3))
+    wa = jax.random.uniform(jax.random.key(14), (B, H, W))
+
+    def view_loss(c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array, i: int) -> jax.Array:
+        img, alpha = splax.rasterize(
+            c, o, background, xy, depths, radii, cn, cum, img_shape=(H, W), map_opacities=opacities
+        )
+        return jnp.sum(w[i] * img) + jnp.sum(wa[i] * alpha)
+
+    def loss(c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array) -> jax.Array:
+        imgs, alphas = jax.vmap(
+            lambda ci, oi: splax.rasterize(
+                ci,
+                oi,
+                background,
+                xy,
+                depths,
+                radii,
+                cn,
+                cum,
+                img_shape=(H, W),
+                map_opacities=opacities,
+            )
+        )(c, o)
+        return jnp.sum(w * imgs) + jnp.sum(wa * alphas)
+
+    args = (bcolors, bopacities, xys, conics)
+    out = jax.grad(loss, argnums=(0, 1, 2, 3))(*args)
+    per_view = [
+        jax.grad(view_loss, argnums=(0, 1, 2, 3))(bcolors[i], bopacities[i], xys, conics, i)
+        for i in range(B)
+    ]
+    assert all(float(jnp.linalg.norm(g)) > 0.0 for g in out), "the blend drops a gradient path"
+    for k in (0, 1):  # per-image appearance keeps its own gradient
+        ref = jnp.stack([p[k] for p in per_view])
+        np.testing.assert_allclose(np.asarray(out[k]), np.asarray(ref), rtol=2e-3, atol=1e-4)
+    for k in (2, 3):  # the shared projection collects the sum over the batch
+        ref = sum(p[k] for p in per_view)
+        np.testing.assert_allclose(np.asarray(out[k]), np.asarray(ref), rtol=2e-3, atol=1e-4)
+
+
+def test_rasterize_depth_grad_broadcast_geometry():
+    """Split the depth blend gradients of a batch of appearances over their shared projection."""
+    n, H, W = 2000, 96, 96
+    means, scales, quats, colors, opacities, background = scene(n, seed=4)
+    xys, depths, radii, conics, cum = _geometry(VIEWMAT, means, scales, quats, opacities, H, W)
+    bcolors, bopacities = _appearances(colors, opacities)
+    w = jax.random.uniform(jax.random.key(15), (B, H, W, 3))
+    wd = jax.random.uniform(jax.random.key(16), (B, H, W))
+
+    def view_loss(
+        c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array, d: jax.Array, i: int
+    ) -> jax.Array:
+        img, _alpha = splax.rasterize_depth(
+            c, o, background, xy, d, radii, cn, cum, img_shape=(H, W), map_opacities=opacities
+        )
+        return jnp.sum(w[i] * img[..., :3]) + jnp.sum(wd[i] * img[..., 3])
+
+    def loss(c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array, d: jax.Array) -> jax.Array:
+        imgs, _alphas = jax.vmap(
+            lambda ci, oi: splax.rasterize_depth(
+                ci, oi, background, xy, d, radii, cn, cum, img_shape=(H, W), map_opacities=opacities
+            )
+        )(c, o)
+        return jnp.sum(w * imgs[..., :3]) + jnp.sum(wd * imgs[..., 3])
+
+    args = (bcolors, bopacities, xys, conics, depths)
+    out = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
+    per_view = [
+        jax.grad(view_loss, argnums=(0, 1, 2, 3, 4))(
+            bcolors[i], bopacities[i], xys, conics, depths, i
+        )
+        for i in range(B)
+    ]
+    assert all(float(jnp.linalg.norm(g)) > 0.0 for g in out), "the depth blend drops a path"
+    for k in (0, 1):
+        ref = jnp.stack([p[k] for p in per_view])
+        np.testing.assert_allclose(np.asarray(out[k]), np.asarray(ref), rtol=2e-3, atol=1e-4)
+    for k in (2, 3, 4):
+        ref = sum(p[k] for p in per_view)
+        np.testing.assert_allclose(np.asarray(out[k]), np.asarray(ref), rtol=2e-3, atol=1e-4)
 
 
 def test_rasterize_alpha_grad_broadcast():

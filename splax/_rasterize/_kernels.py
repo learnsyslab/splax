@@ -7,8 +7,8 @@ Kernel launch functions are wrapped into JAX FFI callables that the API layer in
 
 Batching is native. Under jax.vmap the callable launches a single grid over the whole batch. The
 image index is decoded from the block rank, packed into the sort key, and used to offset per-image
-bin edges, outputs, and backgrounds. Because of the host readback and data-dependent scratch, the
-forward callable is not CUDA-graph capturable.
+bin edges, outputs, and backgrounds. Geometry and appearance batch independently. Because of the
+host readback and data-dependent scratch, the forward callable is not CUDA-graph capturable.
 """
 
 from __future__ import annotations
@@ -57,21 +57,25 @@ def _rasterize_warp(
     out_img: wp.array2d[wp.vec3],
 ):
     n = n_gaussians
-    B = out_img.shape[0] // img_h  # out_img collapses to (B*H, W) with batching, so we recover B
+    B_img = out_img.shape[0] // img_h  # out_img collapses to (B*H, W), so its rows recover B
+    B_geom = cum_tiles_hit.shape[0] // n  # Number of distinct projections
+    sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
 
     # sorting must use the same map_opacities as the forward blend to reproduce the order and index
     gaussian_ids, tile_bins, _, tile_bounds_x, n_tiles = sort_and_bin(
-        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
+        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
     cached_launch(
         _rasterize_kernel,
-        B * n_tiles,
+        B_img * n_tiles,
         [
             img_h,
             img_w,
             tile_bounds_x,
             n_tiles,
+            n,
+            sel_geom,
             colors.shape[0],
             opacities.shape[0],
             sel_bg,
@@ -109,6 +113,8 @@ def _rasterize_kernel(
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
     n_tiles: wp.int32,
+    n_gaussians: wp.int32,
+    sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
@@ -128,6 +134,8 @@ def _rasterize_kernel(
     tile_g, tr = wp.tid()  # launch_tiled: block index and thread rank
     image_id = tile_g // n_tiles
     tile_local = tile_g % n_tiles
+    geom_image = wp.where(sel_geom, image_id, 0)  # Use the first geom if broadcasted, else image_id
+    og_base = wp.where(sel_geom, 0, image_id * n_gaussians)
 
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
@@ -144,7 +152,7 @@ def _rasterize_kernel(
     inside = (i < img_h) and (j < img_w)
     done = wp.bool(not inside)
 
-    tile_range = tile_bins[tile_g]
+    tile_range = tile_bins[geom_image * n_tiles + tile_local]
     range_start = tile_range[0]
     range_end = tile_range[1]
     n_batches = (range_end - range_start + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -173,13 +181,14 @@ def _rasterize_kernel(
         batch_start = range_start + b * BLOCK_SIZE
         src = wp.min(batch_start + tr, range_end - 1)
         g = gaussian_ids_sorted[src]
+        og = og_base + g  # Index of the gaussian in the batch-expanded appearance arrays
         xy = xys[g]
         conic = conics[g]
-        opac = opacities[g % opac_mod]
+        opac = opacities[og % opac_mod]
         wp.tile_scatter_masked(
             geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
         )
-        wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
+        wp.tile_scatter_masked(color_tile, tr, colors[og % color_mod], True)
 
         # The last batch gets clamped to the final intersection
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
@@ -230,21 +239,25 @@ def _rasterize_depth_warp(
 ):
     # Depth-augmented version of _rasterize_warp
     n = n_gaussians
-    B = out_img.shape[0] // img_h
+    B_img = out_img.shape[0] // img_h
+    B_geom = cum_tiles_hit.shape[0] // n
+    sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
 
     gaussian_ids, tile_bins, _, tile_bounds_x, n_tiles = sort_and_bin(
-        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B, img_h, img_w
+        xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
 
     cached_launch(
         _rasterize_depth_kernel,
-        B * n_tiles,
+        B_img * n_tiles,
         [
             img_h,
             img_w,
             tile_bounds_x,
             n_tiles,
+            n,
+            sel_geom,
             colors.shape[0],
             opacities.shape[0],
             sel_bg,
@@ -284,6 +297,8 @@ def _rasterize_depth_kernel(
     img_w: wp.int32,
     tile_bounds_x: wp.int32,
     n_tiles: wp.int32,
+    n_gaussians: wp.int32,
+    sel_geom: wp.bool,
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
@@ -310,6 +325,8 @@ def _rasterize_depth_kernel(
     tile_g, tr = wp.tid()
     image_id = tile_g // n_tiles
     tile_local = tile_g % n_tiles
+    geom_image = wp.where(sel_geom, image_id, 0)
+    og_base = wp.where(sel_geom, 0, image_id * n_gaussians)
 
     tile_x = tile_local % tile_bounds_x
     tile_y = tile_local // tile_bounds_x
@@ -324,7 +341,7 @@ def _rasterize_depth_kernel(
     inside = (i < img_h) and (j < img_w)
     done = wp.bool(not inside)
 
-    tile_range = tile_bins[tile_g]
+    tile_range = tile_bins[geom_image * n_tiles + tile_local]
     range_start = tile_range[0]
     range_end = tile_range[1]
     n_batches = (range_end - range_start + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -348,13 +365,14 @@ def _rasterize_depth_kernel(
         batch_start = range_start + b * BLOCK_SIZE
         src = wp.min(batch_start + tr, range_end - 1)
         g = gaussian_ids_sorted[src]
+        og = og_base + g
         xy = xys[g]
         conic = conics[g]
-        opac = opacities[g % opac_mod]
+        opac = opacities[og % opac_mod]
         wp.tile_scatter_masked(
             geo_tile, tr, _vec7(xy[0], xy[1], opac, conic[0], conic[1], conic[2], depths[g]), True
         )
-        wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
+        wp.tile_scatter_masked(color_tile, tr, colors[og % color_mod], True)
 
         batch_size = wp.min(BLOCK_SIZE, range_end - batch_start)
         if not done:
@@ -417,6 +435,7 @@ def _rasterize_bwd_warp(
     B_geom = cum_tiles_hit.shape[0] // n  # Number of distinct renders/views
     sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
+    final_rows = final_Ts.shape[0]
     vout_rows = v_out_img.shape[0]
     vts_rows = v_out_Ts.shape[0]
 
@@ -442,6 +461,7 @@ def _rasterize_bwd_warp(
         colors.shape[0],
         opacities.shape[0],
         sel_bg,
+        final_rows,
         vout_rows,
         vts_rows,
         gaussian_ids,
@@ -493,6 +513,7 @@ def _rasterize_bwd_kernel(
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
+    final_rows: wp.int32,
     vout_rows: wp.int32,
     vts_rows: wp.int32,
     gaussian_ids_sorted: wp.array[wp.int32],
@@ -534,6 +555,7 @@ def _rasterize_bwd_kernel(
         n_tiles,
         img_h,
         img_w,
+        final_rows,
         vout_rows,
         sel_bg,
         tile_bins,
@@ -570,14 +592,15 @@ def _rasterize_bwd_kernel(
         batch_end = start_idx - b * BLOCK_SIZE
         src = wp.max(batch_end - tr, range_start)  # Clamp to range_start to avoid underflow
         g = gaussian_ids_sorted[src]
+        og = og_base + g
         xy = xys[g]
         conic = conics[g]
-        opac = opacities[g % opac_mod]
+        opac = opacities[og % opac_mod]
         wp.tile_scatter_masked(
             geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
         )
-        wp.tile_scatter_masked(color_tile, tr, colors[g % color_mod], True)
-        wp.tile_scatter_masked(id_tile, tr, g, True)
+        wp.tile_scatter_masked(color_tile, tr, colors[og % color_mod], True)
+        wp.tile_scatter_masked(id_tile, tr, og, True)
 
         batch_size = wp.min(BLOCK_SIZE, batch_end - range_start + 1)
         if batch_end - batch_size + 1 <= bin_final:  # Skip pixels if the last splat is not in range
@@ -597,7 +620,7 @@ def _rasterize_bwd_kernel(
                     continue
 
                 color = color_tile[t]
-                og = og_base + id_tile[t]
+                og = id_tile[t]
                 v_rgb, v_con, v_xyl, v_op, T, buffer = _blend_color_vjp(
                     dx,
                     dy,
@@ -635,6 +658,7 @@ def _rasterize_bwd_agg_kernel(
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
+    final_rows: wp.int32,
     vout_rows: wp.int32,
     vts_rows: wp.int32,
     gaussian_ids_sorted: wp.array[wp.int32],
@@ -683,6 +707,7 @@ def _rasterize_bwd_agg_kernel(
         n_tiles,
         img_h,
         img_w,
+        final_rows,
         vout_rows,
         sel_bg,
         tile_bins,
@@ -706,9 +731,10 @@ def _rasterize_bwd_agg_kernel(
 
     for idx in range(start_idx, range_start - 1, -1):
         g = gaussian_ids_sorted[idx]
+        og = og_base + g
         xy = xys[g]
         conic = conics[g]
-        opac = opacities[g % opac_mod]
+        opac = opacities[og % opac_mod]
         dx = xy[0] - px
         dy = xy[1] - py
         sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
@@ -723,7 +749,7 @@ def _rasterize_bwd_agg_kernel(
         v_xyl = wp.vec2(0.0, 0.0)
         v_op = wp.float32(0.0)
         if valid:
-            color = colors[g % color_mod]
+            color = colors[og % color_mod]
             v_rgb, v_con, v_xyl, v_op, T, buffer = _blend_color_vjp(
                 dx,
                 dy,
@@ -748,7 +774,6 @@ def _rasterize_bwd_agg_kernel(
         s_xy = wp.tile_sum(wp.tile(v_xyl, preserve_type=True))[0]
         s_op = wp.tile_sum(wp.tile(v_op))[0]
         if tr == 0:
-            og = og_base + g
             wp.atomic_add(v_colors, og, s_rgb)
             wp.atomic_add(v_conic, og, s_con)
             wp.atomic_add(v_xy, og, s_xy)
@@ -786,6 +811,7 @@ def _rasterize_bwd_depth_warp(
     B_geom = cum_tiles_hit.shape[0] // n
     sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
+    final_rows = final_Ts.shape[0]
     vout_rows = v_out_img.shape[0]
     vdepth_rows = v_out_depth.shape[0]
     vts_rows = v_out_Ts.shape[0]
@@ -812,6 +838,7 @@ def _rasterize_bwd_depth_warp(
         colors.shape[0],
         opacities.shape[0],
         sel_bg,
+        final_rows,
         vout_rows,
         vdepth_rows,
         vts_rows,
@@ -866,6 +893,7 @@ def _rasterize_bwd_depth_kernel(
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
+    final_rows: wp.int32,
     vout_rows: wp.int32,
     vdepth_rows: wp.int32,
     vts_rows: wp.int32,
@@ -910,6 +938,7 @@ def _rasterize_bwd_depth_kernel(
         n_tiles,
         img_h,
         img_w,
+        final_rows,
         vout_rows,
         sel_bg,
         tile_bins,
@@ -946,15 +975,16 @@ def _rasterize_bwd_depth_kernel(
         batch_end = start_idx - b * BLOCK_SIZE
         src = wp.max(batch_end - tr, range_start)
         g = gaussian_ids_sorted[src]
+        og = og_base + g
         xy = xys[g]
         conic = conics[g]
-        opac = opacities[g % opac_mod]
-        color = colors[g % color_mod]
+        opac = opacities[og % opac_mod]
+        color = colors[og % color_mod]
         wp.tile_scatter_masked(
             geo_tile, tr, _vec6(xy[0], xy[1], opac, conic[0], conic[1], conic[2]), True
         )
         wp.tile_scatter_masked(cd_tile, tr, wp.vec4(color[0], color[1], color[2], depths[g]), True)
-        wp.tile_scatter_masked(id_tile, tr, g, True)
+        wp.tile_scatter_masked(id_tile, tr, og, True)
 
         batch_size = wp.min(BLOCK_SIZE, batch_end - range_start + 1)
         if batch_end - batch_size + 1 <= bin_final:
@@ -974,7 +1004,7 @@ def _rasterize_bwd_depth_kernel(
                     continue
 
                 cd = cd_tile[t]
-                og = og_base + id_tile[t]
+                og = id_tile[t]
                 color = wp.vec3(cd[0], cd[1], cd[2])
                 v_rgb, v_dep, v_con, v_xyl, v_op, T, buffer, dbuffer = _blend_depth_vjp(
                     dx,
@@ -1017,6 +1047,7 @@ def _rasterize_bwd_depth_agg_kernel(
     color_mod: wp.int32,
     opac_mod: wp.int32,
     sel_bg: wp.bool,
+    final_rows: wp.int32,
     vout_rows: wp.int32,
     vdepth_rows: wp.int32,
     vts_rows: wp.int32,
@@ -1067,6 +1098,7 @@ def _rasterize_bwd_depth_agg_kernel(
         n_tiles,
         img_h,
         img_w,
+        final_rows,
         vout_rows,
         sel_bg,
         tile_bins,
@@ -1093,9 +1125,10 @@ def _rasterize_bwd_depth_agg_kernel(
 
     for idx in range(start_idx, range_start - 1, -1):
         g = gaussian_ids_sorted[idx]
+        og = og_base + g
         xy = xys[g]
         conic = conics[g]
-        opac = opacities[g % opac_mod]
+        opac = opacities[og % opac_mod]
         dx = xy[0] - px
         dy = xy[1] - py
         sigma = 0.5 * (conic[0] * dx * dx + conic[2] * dy * dy) + conic[1] * dx * dy
@@ -1111,7 +1144,7 @@ def _rasterize_bwd_depth_agg_kernel(
         v_op = wp.float32(0.0)
         v_dep = wp.float32(0.0)
         if valid:
-            color = colors[g % color_mod]
+            color = colors[og % color_mod]
             v_rgb, v_dep, v_con, v_xyl, v_op, T, buffer, dbuffer = _blend_depth_vjp(
                 dx,
                 dy,
@@ -1139,7 +1172,6 @@ def _rasterize_bwd_depth_agg_kernel(
         s_op = wp.tile_sum(wp.tile(v_op))[0]
         s_dep = wp.tile_sum(wp.tile(v_dep))[0]
         if tr == 0:
-            og = og_base + g
             wp.atomic_add(v_colors, og, s_rgb)
             wp.atomic_add(v_conic, og, s_con)
             wp.atomic_add(v_xy, og, s_xy)
@@ -1157,6 +1189,7 @@ def _load_bwd_pixel(
     n_tiles: wp.int32,
     img_h: wp.int32,
     img_w: wp.int32,
+    final_rows: wp.int32,
     vout_rows: wp.int32,
     sel_bg: wp.bool,
     tile_bins: wp.array[wp.vec2i],
@@ -1179,7 +1212,7 @@ def _load_bwd_pixel(
     v_out = wp.vec3(0.0, 0.0, 0.0)
     bg = wp.vec3(0.0, 0.0, 0.0)
     if inside:
-        final_row = geom_image * img_h + i  # final_Ts and final_idx are geometry outputs
+        final_row = (image_id * img_h + i) % final_rows  # The residuals follow the forward's batch
         bin_final = final_idx[final_row, j]
         t_final = final_Ts[final_row, j]
         v_out = v_out_img[(image_id * img_h + i) % vout_rows, j]
