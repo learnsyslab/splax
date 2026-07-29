@@ -35,10 +35,10 @@ from splax import render
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable
 
-logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
 
-SPLAT_KEYS = ("means", "log_scales", "quats", "sh_colors", "opac_logit")
+logger = logging.getLogger(__name__)
+SPLAT_KEYS = ("means", "log_scales", "quats", "colors_logit", "opac_logit")
 
 
 def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
@@ -181,7 +181,7 @@ def make_step(
             assert aux_p is not None
             dlt = jax.lax.dynamic_index_in_dim(aux_p["pose"], vi, axis=0, keepdims=False)
             vm = apply_pose_delta(vm, dlt)
-        splats = tuple(p[k] for k in SPLAT_KEYS)
+        splats = render_args(p)
         if depth_loss:
             args = {"viewmat": vm, "background": bg, "render_depth": True, **camera}
             colors, _ = render(*splats, **args)
@@ -517,6 +517,16 @@ def load_scene(
 # region Rendering / metrics
 
 
+def render_args(params: dict[str, jax.Array]) -> tuple[jax.Array, ...]:
+    """Map the trainer parameters onto the arguments ``render`` takes.
+
+    The colour is optimized as a logit, so the rendered colour stays inside the displayable range
+    and the render's colour clip never binds.
+    """
+    sh_colors = splax.io.rgb_to_sh(jax.nn.sigmoid(params["colors_logit"]))
+    return (params["means"], params["log_scales"], params["quats"], sh_colors, params["opac_logit"])
+
+
 def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
     """Compute PSNR from two images in [0, 1]."""
     mse = float(np.mean((np.clip(np.asarray(a), 0, 1) - np.asarray(b)) ** 2))
@@ -526,7 +536,7 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
 def save_ply(path: str | Path, params: dict[str, jax.Array]):
     """Write current parameters to a 3DGS PLY file."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    splax.io.write_ply(path, *(params[k] for k in SPLAT_KEYS))
+    splax.io.write_ply(path, *render_args(params))
     logger.info(f"wrote {path}")
 
 
@@ -591,7 +601,7 @@ def train(args: argparse.Namespace) -> dict:
     camera |= {"background": jnp.ones(3), "antialiased": args.antialiased}
 
     def eval_psnr(idxs: list[int]) -> list[float]:
-        splats = tuple(params[k] for k in SPLAT_KEYS)
+        splats = render_args(params)
         return [psnr(render(*splats, viewmat=eval_vms[i], **camera)[0], eval_imgs[i]) for i in idxs]
 
     # spread the scored eval views over the whole trajectory. The first n_eval held-out
@@ -634,7 +644,7 @@ def train(args: argparse.Namespace) -> dict:
         "means": optax.adam(means_sched),
         "log_scales": optax.adam(group_sched(args.scales_lr * lr_scale)),
         "quats": optax.adam(group_sched(args.quats_lr * lr_scale)),
-        "sh_colors": optax.adam(group_sched(args.colors_lr * lr_scale)),
+        "colors_logit": optax.adam(group_sched(args.colors_lr * lr_scale)),
         "opac_logit": optax.adam(group_sched(args.opac_lr * lr_scale)),
     }
     opt = optax.multi_transform(txs, {k: k for k in params})

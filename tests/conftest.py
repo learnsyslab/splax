@@ -1,7 +1,6 @@
 """Pytest configuration.
 
-Every test carries the marker of the directory it lives in, ``unit`` or ``integration``, so a test
-only spells out what its path does not already say. Two further markers name an optional
+Every test carries the marker of the directory it lives in. Two further markers name an optional
 dependency. ``gsplat`` marks the parity tests against the reference implementation, which are
 skipped when gsplat is not installed, and ``colmap`` marks the tests of the COLMAP training toolkit
 under ``scripts/``, which need pycolmap. Either group deselects with ``-m``, for example

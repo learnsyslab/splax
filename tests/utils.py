@@ -1,10 +1,4 @@
-"""Scene builders and shared assertions of the splax test suite.
-
-``scene`` draws a random splat in activated form, in either of the two regimes the suite needs, and
-``scene_params`` returns the same splat in the parameters ``splax.render`` consumes. ``camera``
-builds the matching intrinsics for a square-focal pinhole. ``assert_finite_difference`` is the
-numeric check every gradient test runs against.
-"""
+"""Scene builders and shared assertions of the splax test suite."""
 
 from __future__ import annotations
 
@@ -91,7 +85,7 @@ def projected(
         ``(colors, opacities, background, xys, depths, radii, conics, cum_tiles_hit)``.
     """
     means, scales, quats, colors, opacities, background = scene(n, seed, dense=dense)
-    xys, depths, radii, conics, _nth, cum = splax.project(
+    xys, depths, radii, conics, _, cum = splax.project(
         means, scales, quats, VIEWMAT, opacities=opacities, **camera(H, W)
     )
     return colors, opacities, background, xys, depths, radii, conics, cum
@@ -101,7 +95,7 @@ def poses(batch: int, seed: int = 0) -> jax.Array:
     """Draw ``batch`` distinct camera poses around ``VIEWMAT``, with an exact bottom row."""
     d = 0.02 * jax.random.normal(jax.random.key(seed), (batch, 4, 4))
     vms = jnp.broadcast_to(VIEWMAT, (batch, 4, 4)) + d
-    return vms.at[:, 3, :].set(jnp.array([0.0, 0.0, 0.0, 1.0]))
+    return TF.from_matrix(vms).as_matrix()  # Only return valid matrices
 
 
 def manual_move(
@@ -143,9 +137,7 @@ def assert_finite_difference(
     minus = float(loss(*(a - eps * d for a, d in zip(args, directions))))
     numeric = (plus - minus) / (2 * eps)
     rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < rtol, (
-        f"{name}FD mismatch: analytic {analytic:.6e} vs numeric {numeric:.6e} (rel {rel:.2e})"
-    )
+    assert rel < rtol, f"{name}FD mismatch: {analytic=:.6e} vs {numeric=:.6e} ({rel=:.2e})"
 
 
 def rasterize_both_keymodes(args: tuple[jax.Array, ...], H: int, W: int) -> tuple[np.ndarray, ...]:
