@@ -27,10 +27,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from _transforms import kw as make_kw
-from _transforms import manual_move, scene
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
+from utils import VIEWMAT, camera, manual_move, scene
 
 import splax
 
@@ -38,8 +37,8 @@ import splax
 @pytest.mark.integration
 def test_identity_transforms_byte_identical():
     n = 4000
-    means, scales, quats, colors, opac = scene(n, seed=1)
-    kw = make_kw(128, 128)
+    means, scales, quats, colors, opac, bg = scene(n, seed=1)
+    kw = {"viewmat": VIEWMAT, "background": bg, **camera(128, 128)}
     plain = np.asarray(splax.render(means, scales, quats, colors, opac, **kw)[0])
     eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (2, 4, 4))
     ident = np.asarray(
@@ -61,8 +60,8 @@ def test_identity_transforms_byte_identical():
 def test_render_matches_manual_transform():
     """Match transformed render against manual reference."""
     n = 4000
-    means, scales, quats, colors, opac = scene(n, seed=3)
-    kw = make_kw(128, 128)
+    means, scales, quats, colors, opac, bg = scene(n, seed=3)
+    kw = {"viewmat": VIEWMAT, "background": bg, **camera(128, 128)}
     rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
     T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
     moved = np.asarray(
@@ -91,8 +90,8 @@ def test_render_matches_manual_transform():
 def test_vmap_over_transforms_matches_sequential():
     """Match vmap transform output against sequential output."""
     n, B = 4000, 3
-    means, scales, quats, colors, opac = scene(n, seed=4)
-    kw = make_kw(96, 96)
+    means, scales, quats, colors, opac, bg = scene(n, seed=4)
+    kw = {"viewmat": VIEWMAT, "background": bg, **camera(96, 96)}
     angles = np.array([[0.0, 0.0, 0.3 * i] for i in range(B)])
     trans = np.array([[0.05 * i, -0.03 * i, 0.0] for i in range(B)])
     Ts = TF.from_components(trans, R.from_euler("xyz", angles)).as_matrix().astype(np.float32)
@@ -121,8 +120,8 @@ def test_vmap_over_transforms_matches_sequential():
 def test_two_objects_move_independently():
     """Move two slices independently and match the manual reference."""
     n = 4000
-    means, scales, quats, colors, opac = scene(n, seed=5)
-    kw = make_kw(128, 128)
+    means, scales, quats, colors, opac, bg = scene(n, seed=5)
+    kw = {"viewmat": VIEWMAT, "background": bg, **camera(128, 128)}
     rot_a = R.from_euler("xyz", [0.0, 0.0, 0.4])
     Ta = TF.from_components((0.2, 0.0, 0.0), rot_a).as_matrix().astype(np.float32)
     rot_b = R.from_euler("xyz", [0.3, 0.0, 0.0])
@@ -217,8 +216,8 @@ def _loss_reference(
 
 
 def _setup(seed: int) -> tuple:
-    means, scales, quats, colors, opac = scene(N, seed=seed)
-    kw = make_kw(96, 96)
+    means, scales, quats, colors, opac, bg = scene(N, seed=seed)
+    kw = {"viewmat": VIEWMAT, "background": bg, **camera(96, 96)}
     target = jax.random.uniform(jax.random.key(100 + seed), (96, 96, 3))
     return means, scales, quats, (colors, opac, kw, target)
 

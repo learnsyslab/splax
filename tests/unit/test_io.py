@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
+from utils import scene
 
 import splax
 from splax.io import load_ply
@@ -18,23 +19,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _random_splats(
-    seed: int, n: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    means = rng.uniform(-1.0, 1.0, (n, 3)).astype(np.float32)
-    scales = rng.uniform(0.01, 0.2, (n, 3)).astype(np.float32)
-    quats = rng.normal(size=(n, 4)).astype(np.float32)
-    quats /= np.linalg.norm(quats, axis=-1, keepdims=True)
-    colors = rng.uniform(0.0, 1.0, (n, 3)).astype(np.float32)
-    opac = rng.uniform(0.05, 0.95, (n,)).astype(np.float32)
-    return means, scales, quats, colors, opac
-
-
 @pytest.mark.unit
 def test_write_ply_is_load_ply_inverse(tmp_path: Path):
     """Random splats through write_ply then load_ply reproduce the render-space inputs."""
-    means, scales, quats, colors, opac = _random_splats(seed=0, n=5000)
+    means, scales, quats, colors, opac, _bg = scene(5000)
     out = tmp_path / "rand.ply"
     splax.io.write_ply(out, means, scales, quats, colors, opac)
 

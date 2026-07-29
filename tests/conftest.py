@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import imageio.v3 as iio
 import pytest
 
+import splax._rasterize._sort._sort as _sort
 from splax.io import fetch
 
 if TYPE_CHECKING:
@@ -50,6 +51,18 @@ def gsplat_shim() -> ModuleType:
     import _gsplat
 
     return _gsplat
+
+
+@pytest.fixture
+def faithful_64bit_keys(monkeypatch: pytest.MonkeyPatch):
+    """Pin the 64-bit sort key for the bit-exact batch-native assertions.
+
+    Batch-native == stack-of-unbatched is bit-exact only for the 64-bit key, whose per-image
+    (tile, depth) order is independent of B. The default packed 32-bit key sizes its depth field
+    as 31 - image_bits - tile_bits, which shrinks as B grows, so a batched render quantizes depth
+    slightly coarser than the B=1 reference and matches only up to a perceptual bound.
+    """
+    monkeypatch.setattr(_sort, "_use_32bit_keys", lambda depth_bits: False)
 
 
 # region splat data

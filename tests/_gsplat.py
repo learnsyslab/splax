@@ -46,8 +46,8 @@ def project(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
+    glob_scale: float = 1.0,
+    clip_thresh: float = 0.01,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Gsplat ``fully_fused_projection`` as numpy (radii, means2d, depths, conics).
 
@@ -83,8 +83,8 @@ def render(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
+    glob_scale: float = 1.0,
+    clip_thresh: float = 0.01,
 ) -> np.ndarray:
     """Gsplat ``rasterization`` in splax.render's terms. Returns numpy (H, W, 3)."""
     H, W = img_shape
@@ -121,8 +121,8 @@ def viewmat_grad(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
+    glob_scale: float = 1.0,
+    clip_thresh: float = 0.01,
 ) -> np.ndarray:
     """Gsplat gradient of ``mean((render(viewmat) - target) ** 2)`` wrt the viewmat.
 
@@ -161,8 +161,8 @@ def grad(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
-    glob_scale: float,
-    clip_thresh: float,
+    glob_scale: float = 1.0,
+    clip_thresh: float = 0.01,
     weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Gsplat grads wrt (means, scales, quats, colors, opacities)."""

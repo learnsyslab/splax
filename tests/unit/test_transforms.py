@@ -14,9 +14,9 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from _transforms import kw, manual_move, scene
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
+from utils import VIEWMAT, camera, manual_move, scene
 
 import splax
 
@@ -30,8 +30,7 @@ def test_projection_matches_manual_transform():
     depths, and conics must agree tightly, with zero radii or visibility flips.
     """
     n = 4000
-    means, scales, quats, _colors, opac = scene(n, seed=2)
-    camera = kw(128, 128)
+    means, scales, quats, _colors, opac, _bg = scene(n, seed=2)
     rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
     T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
     tf_ids = jnp.full((n,), -1, jnp.int32).at[:1000].set(0)
@@ -39,45 +38,31 @@ def test_projection_matches_manual_transform():
         means,
         scales,
         quats,
-        camera["viewmat"],
+        VIEWMAT,
         opacities=opac,
-        img_shape=camera["img_shape"],
-        f=camera["f"],
-        c=camera["c"],
+        **camera(128, 128),
         gaussian_transforms=jnp.asarray(T)[None],
         transform_ids=tf_ids,
     )
     m2, q2 = manual_move(means, quats, T, 0, 1000)
-    b = splax.project(
-        m2,
-        scales,
-        q2,
-        camera["viewmat"],
-        opacities=opac,
-        img_shape=camera["img_shape"],
-        f=camera["f"],
-        c=camera["c"],
-    )
+    b = splax.project(m2, scales, q2, VIEWMAT, opacities=opac, **camera(128, 128))
 
-    ra, rb = np.asarray(a[2]).ravel(), np.asarray(b[2]).ravel()
+    ra, rb = np.asarray(a[2]), np.asarray(b[2])
     np.testing.assert_array_equal(ra > 0, rb > 0)
     live = ra > 0
     np.testing.assert_allclose(np.asarray(a[0])[live], np.asarray(b[0])[live], atol=5e-2)
-    np.testing.assert_allclose(
-        np.asarray(a[1]).ravel()[live], np.asarray(b[1]).ravel()[live], atol=1e-3
-    )
+    np.testing.assert_allclose(np.asarray(a[1])[live], np.asarray(b[1])[live], atol=1e-3)
     np.testing.assert_allclose(np.asarray(a[3])[live], np.asarray(b[3])[live], atol=1e-3)
 
 
 @pytest.mark.unit
 def test_invalid_transform_inputs_raise():
-    n = 1000
-    means, scales, quats, colors, opac = scene(n, seed=6)
-    camera = kw(64, 64)
+    means, scales, quats, colors, opac, bg = scene(1000, seed=6)
+    kw = {"viewmat": VIEWMAT, "background": bg, **camera(64, 64)}
     eye = jnp.eye(4, dtype=jnp.float32)[None]
 
     with pytest.raises(ValueError, match="together"):
-        splax.render(means, scales, quats, colors, opac, **camera, gaussian_transforms=eye)
+        splax.render(means, scales, quats, colors, opac, **kw, gaussian_transforms=eye)
     with pytest.raises(ValueError, match="does not match"):
         splax.render(
             means,
@@ -85,7 +70,7 @@ def test_invalid_transform_inputs_raise():
             quats,
             colors,
             opac,
-            **camera,
+            **kw,
             gaussian_transforms=eye,
             gaussian_slices=((0, 100), (200, 300)),
         )
@@ -96,7 +81,7 @@ def test_invalid_transform_inputs_raise():
             quats,
             colors,
             opac,
-            **camera,
+            **kw,
             gaussian_transforms=eye,
             gaussian_slices=((900, 1100),),
         )
@@ -107,7 +92,7 @@ def test_invalid_transform_inputs_raise():
             quats,
             colors,
             opac,
-            **camera,
+            **kw,
             gaussian_transforms=jnp.broadcast_to(eye[0], (2, 4, 4)),
             gaussian_slices=((0, 500), (400, 600)),
         )

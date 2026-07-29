@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from utils import camera
 
 import splax
 from splax.io import fetch, load_ply
@@ -33,27 +34,6 @@ def lookat_viewmats(center: np.ndarray, radius: float, n_views: int) -> jax.Arra
     return jnp.asarray(splax.utils.look_at(eyes, center))
 
 
-def _render(
-    splats: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
-    viewmat: jax.Array,
-    H: int,
-    W: int,
-) -> jax.Array:
-    means, scales, quats, colors, opac = splats
-    return splax.render(
-        means,
-        scales,
-        quats,
-        colors,
-        opac,
-        viewmat=viewmat,
-        background=jnp.ones(3),
-        img_shape=(H, W),
-        f=(float(H), float(H)),
-        c=(W // 2, H // 2),
-    )[0]
-
-
 @pytest.mark.integration
 def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
     """Fit-free: load lego.ply, write copy, reload, identical render."""
@@ -66,9 +46,9 @@ def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
     radius = float(np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
     viewmat = lookat_viewmats(center, radius, 1)[0]
 
-    H = W = 200
-    img1 = np.asarray(_render(splats, viewmat, H, W))
-    img2 = np.asarray(_render(splats2, viewmat, H, W))
+    kw = {"viewmat": viewmat, "background": jnp.ones(3), **camera(200, 200)}
+    img1 = np.asarray(splax.render(*splats, **kw)[0])
+    img2 = np.asarray(splax.render(*splats2, **kw)[0])
     # Activation round-trip (log/exp, logit/sigmoid) is ULP-level, the render is
     # essentially identical. Splatting's hard 1/255 cull can flip a handful of
     # pixels, so bound by max abs diff rather than requiring bit-exactness.
