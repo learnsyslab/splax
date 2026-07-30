@@ -1,33 +1,4 @@
-"""Rasterization stage tests.
-
-``splax.rasterize`` blends the projected gaussians into an image and the accumulated alpha
-``A(p) = sum_i w_i``, the coverage the splat contributes to a pixel. ``splax.rasterize_depth``
-additionally packs the expected depth map ``D(p) = sum_i w_i d_i / sum_i w_i`` into the fourth image
-channel, built from the same visibility weights ``w_i`` as the colour blend, which COLMAP
-sparse-point depth regularization optimizes. All three outputs are covered along the same matrix,
-i.e. the plain call, batching under ``jax.vmap``, broadcasting of the operands that stay shared
-across the batch, and gradients in the plain and the batched setting.
-
-The alpha is bounded in [0, 1] by construction, reads exactly 0 where no gaussian contributes, and
-saturates towards 1 under a dense opaque splat. It is what the image composites the background with,
-so rendering unit colours over a black background reproduces it channel for channel.
-
-Two properties pin the depth channel down. For a single gaussian the expected depth is metric, i.e.
-it equals that gaussian's camera-space depth on every pixel it covers however thin the coverage, and
-pixels the splat does not cover carry depth 0. The depth accumulator is separate from the colour
-blend, so the RGB channels the depth path returns are the plain ``rasterize`` image.
-
-The gradients are checked against a central-difference directional derivative at the 8e-2 relative
-bound the splat finite-difference tests use. The hard 1/255 cull and the early-termination cutoff
-that the difference steps cross are the intrinsic residual. A depth-only loss leaves an exactly zero
-colour gradient, since the depth map does not depend on the colours, and nonzero geometry gradients.
-The depth normalization divides by a quantity that vanishes on uncovered pixels, so those pixels are
-additionally checked to leave the gradient finite.
-
-Geometry and appearance batch independently. ``xys``, ``depths``, ``radii``, ``conics``, and
-``cum_tiles_hit`` carry either one entry per image or a single entry shared across the batch, and so
-do ``colors``, ``opacities``, and ``background``.
-"""
+"""Test the color, alpha, and depth blends produced by rasterize and rasterize_depth."""
 
 from __future__ import annotations
 
@@ -64,11 +35,7 @@ def _geometry(
 
 
 def test_rasterize():
-    """Decompose a blended image into its colour blend and its background composite.
-
-    The image is ``sum_i w_i c_i + T * background``, so rendering over a black background and
-    rendering unlit gaussians over the background add back up to the full image.
-    """
+    """Decompose a blended image into its colour blend and its background composite."""
     n, H, W = 4000, 96, 96
     colors, opacities, background, *geometry = projected(n, H, W, seed=1)
     black = jnp.zeros(3)
@@ -82,13 +49,7 @@ def test_rasterize():
 
 
 def test_rasterize_alpha():
-    """Read the accumulated alpha of a splat that saturates in the centre and misses the corners.
-
-    The alpha is the coverage the blend accumulates, so it is bounded in [0, 1], reads exactly 0
-    where no gaussian contributes, and saturates towards 1 under a dense opaque cluster. It is also
-    the weight the image composites the background with, which unit colours over a black background
-    reproduce channel for channel.
-    """
+    """Read the accumulated alpha of a splat that saturates in the centre and misses the corners."""
     n, H, W = 600, 96, 96
     means, scales, quats, _colors, _opacities, _bg = scene(n, seed=8)
     means, opacities = means * 0.15, jnp.full((n,), 0.9)  # a tight, opaque cluster
@@ -107,12 +68,7 @@ def test_rasterize_alpha():
 
 
 def test_rasterize_depth():
-    """Read back a single gaussian's own camera-space depth on every pixel it covers.
-
-    Normalizing by the accumulated alpha makes the depth metric, so a lone gaussian reports its
-    centre depth independently of how thinly it covers a pixel. The accumulated alpha separates the
-    covered pixels from the background.
-    """
+    """Read back a single gaussian's own camera-space depth on every pixel it covers."""
     H = W = 64
     means = jnp.array([[0.1, -0.05, 0.0]])
     scales = jnp.full((1, 3), 0.12)
@@ -139,11 +95,7 @@ def test_rasterize_depth():
 
 
 def test_rasterize_depth_image_byte_identical():
-    """Return the plain rasterize image and alpha unchanged from the depth path.
-
-    The expected depth accumulates in its own kernel and accumulator, which must not perturb the
-    colour blend.
-    """
+    """Return the plain rasterize image and alpha unchanged from the depth path."""
     n, H, W = 4000, 128, 128
     args = projected(n, H, W, seed=1)
     plain, plain_alpha = splax.rasterize(*args, img_shape=(H, W))
@@ -152,16 +104,26 @@ def test_rasterize_depth_image_byte_identical():
     np.testing.assert_array_equal(np.asarray(plain_alpha), np.asarray(alpha))
 
 
+def test_rasterize_jit():
+    """Test that rasterize runs under jit."""
+    args = projected(4000, 128, 128, seed=1)
+    blend = jax.jit(splax.rasterize, static_argnames="img_shape")
+    jax.block_until_ready(blend(*args, img_shape=(128, 128)))
+
+
+def test_rasterize_depth_jit():
+    """Test that rasterize_depth runs under jit."""
+    args = projected(4000, 128, 128, seed=1)
+    blend = jax.jit(splax.rasterize_depth, static_argnames="img_shape")
+    jax.block_until_ready(blend(*args, img_shape=(128, 128)))
+
+
 # region batching
 
 
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_rasterize_vmap_matches_loop():
-    """Match the batched blend of B views against the loop over the unbatched blends.
-
-    Batching packs the image id above the tile bits of the sort key, so each image keeps the
-    blend order it has on its own and the images come out the same.
-    """
+    """Match the batched blend of B views against the loop over the unbatched blends."""
     n, H, W = 4000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=1, dense=True)
     geometry = partial(
@@ -205,12 +167,7 @@ def test_rasterize_depth_vmap_matches_loop():
 
 @pytest.mark.usefixtures("faithful_64bit_keys")
 def test_rasterize_broadcast():
-    """Share colors, opacities, and background across a batched geometry.
-
-    The shared operands are indexed modulo the per-image gaussian count and a single background is
-    selected for every image, which must reproduce the fully batched blend that carries one explicit
-    copy per image.
-    """
+    """Share colors, opacities, and background across a batched geometry."""
     n, H, W = 4000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=3, dense=True)
     geometry = partial(
@@ -261,12 +218,7 @@ def _appearances(colors: jax.Array, opacities: jax.Array) -> tuple[jax.Array, ja
 
 
 def test_rasterize_broadcast_geometry():
-    """Share one projection across a batch of appearances.
-
-    A single projection feeds B images that differ in their colours and opacities alone, so the sort
-    runs once and every image blends the same gaussians in the same order. The tile emission stays
-    on the shared opacities, which is what the shared cumulative tile counts describe.
-    """
+    """Share one projection across a batch of appearances."""
     n, H, W = 4000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=3, dense=True)
     geometry = _geometry(VIEWMAT, means, scales, quats, opacities, H, W)
@@ -310,12 +262,7 @@ def test_rasterize_depth_broadcast_geometry():
 
 
 def test_rasterize_grad():
-    """Check the blend gradients against a central-difference directional derivative.
-
-    Colors, opacities, xys, and conics are perturbed along their own gradient direction at once,
-    which maximizes the directional-derivative signal against the float32 render noise. jit must
-    leave the gradients untouched.
-    """
+    """Check the blend gradients against a central-difference directional derivative."""
     n, H, W = 400, 80, 80
     colors, opacities, background, xys, depths, radii, conics, cum = projected(
         n, H, W, seed=7, dense=False
@@ -339,11 +286,7 @@ def test_rasterize_grad():
 
 
 def test_rasterize_alpha_grad():
-    """Check the accumulated alpha gradients against a central-difference directional derivative.
-
-    The alpha is built from the opacities and the geometry alone, so an alpha-only loss leaves an
-    exactly zero colour gradient while the remaining paths stay nonzero.
-    """
+    """Check the accumulated alpha gradients against a central-difference directional derivative."""
     n, H, W = 400, 80, 80
     colors, opacities, background, xys, depths, radii, conics, cum = projected(
         n, H, W, seed=7, dense=False
@@ -369,12 +312,7 @@ def test_rasterize_alpha_grad():
 
 @pytest.mark.parametrize("mode", ["depth_only", "mixed"])
 def test_rasterize_depth_grad(mode: str):
-    """Check the depth blend gradients against a central-difference directional derivative.
-
-    A depth-only loss isolates the depth cotangent chain, a mixed colour and depth loss runs it
-    alongside the colour chain. Depth is independent of the colours, so the depth-only loss leaves
-    an exactly zero colour gradient while the geometry gradients stay nonzero.
-    """
+    """Check the depth blend gradients against a central-difference directional derivative."""
     n, H, W = 400, 80, 80
     colors, opacities, background, xys, depths, radii, conics, cum = projected(
         n, H, W, seed=7, dense=False
@@ -403,12 +341,7 @@ def test_rasterize_depth_grad(mode: str):
 
 
 def test_rasterize_depth_grad_empty_pixels():
-    """Keep the depth gradient finite on an image a single gaussian barely covers.
-
-    The normalization divides by the accumulated alpha, which is exactly zero wherever no gaussian
-    contributes. Those pixels are masked out of the quotient on both the forward and the backward
-    side, so summing the whole depth map leaves finite gradients.
-    """
+    """Keep the depth gradient finite on an image a single gaussian barely covers."""
     H = W = 64
     means = jnp.array([[0.1, -0.05, 0.0]])
     scales = jnp.full((1, 3), 0.12)
@@ -434,11 +367,7 @@ def test_rasterize_depth_grad_empty_pixels():
 
 
 def test_rasterize_grad_vmap_matches_loop():
-    """Match the batch-native geometry gradients against the loop over the unbatched gradients.
-
-    The backward accumulates per gaussian with atomics, so the batched and the sequential reduction
-    orders differ and the comparison is a tolerance rather than an equality.
-    """
+    """Match the batch-native geometry gradients against the loop over the unbatched gradients."""
     n, H, W = 2000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=2)
     geometry = partial(
@@ -490,11 +419,7 @@ def test_rasterize_depth_grad_vmap_matches_loop():
 
 
 def test_rasterize_grad_broadcast():
-    """Sum the per-image gradients into an operand shared across the batch.
-
-    colors and opacities feed every image of the batch, so their gradient is the sum of the
-    gradients the images produce on their own.
-    """
+    """Sum the per-image gradients into an operand shared across the batch."""
     n, H, W = 2000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=4)
     geometry = partial(
@@ -521,12 +446,7 @@ def test_rasterize_grad_broadcast():
 
 
 def test_rasterize_grad_broadcast_geometry():
-    """Split the gradients of a batch of appearances over the projection they share.
-
-    Colours and opacities carry one entry per image and keep their own gradient, while the shared
-    projection feeds every image and collects the sum of the per-image gradients. The loss weights
-    the image and the accumulated alpha so both cotangent paths run.
-    """
+    """Split the gradients of a batch of appearances over the projection they share."""
     n, H, W = 2000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=4)
     xys, depths, radii, conics, cum = _geometry(VIEWMAT, means, scales, quats, opacities, H, W)

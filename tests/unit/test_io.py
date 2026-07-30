@@ -1,9 +1,4 @@
-"""PLY export round-trip.
-
-``splax.io.write_ply`` stores the parameters as they arrive and ``splax.io.load_ply`` reads them
-back verbatim, so a random splat survives a write and a reload unchanged, and any number of
-further cycles leaves the file unchanged.
-"""
+"""Test PLY export round-trip."""
 
 from __future__ import annotations
 
@@ -40,5 +35,4 @@ def test_repeated_ply_cycles_are_stable(tmp_path: Path):
     first, second = tmp_path / "first.ply", tmp_path / "second.ply"
     splax.io.write_ply(first, *splats)
     splax.io.write_ply(second, *load_ply(first))
-
     assert second.read_bytes() == first.read_bytes()

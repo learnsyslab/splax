@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import jax
@@ -76,6 +77,7 @@ def camera(H: int, W: int) -> dict:
     return {"img_shape": (H, W), "f": (float(H), float(H)), "c": (W // 2, H // 2)}
 
 
+@partial(jax.jit, static_argnames=("n", "H", "W", "dense"))
 def projected(
     n: int, H: int, W: int, seed: int = 0, *, dense: bool = True
 ) -> tuple[jax.Array, ...]:
@@ -98,6 +100,7 @@ def poses(batch: int, seed: int = 0) -> jax.Array:
     return TF.from_matrix(vms).as_matrix()  # Only return valid matrices
 
 
+@partial(jax.jit, static_argnames=("start", "stop"))
 def manual_move(
     means: jax.Array, quats: jax.Array, T: np.ndarray, start: int, stop: int
 ) -> tuple[jax.Array, jax.Array]:

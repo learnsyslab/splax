@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import gsplat
+import gsplat.relocation
 import numpy as np
 import torch
 
@@ -248,3 +249,20 @@ def grad(
     out_g = [x.grad.detach().cpu().numpy() for x in grads]
     out_g.append(opac_t.grad.detach().cpu().numpy())
     return tuple(out_g)
+
+
+def relocation(
+    opacities: jax.Array | np.ndarray,
+    scales: jax.Array | np.ndarray,
+    ratios: jax.Array | np.ndarray,
+    binoms: jax.Array | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Gsplat ``compute_relocation`` in splax.mcmc's terms.
+
+    Returns:
+        The new numpy opacities ``(N,)`` and scales ``(N, 3)``.
+    """
+    new_opacities, new_scales = gsplat.relocation.compute_relocation(
+        cuda_tensor(opacities), cuda_tensor(scales), cuda_tensor(ratios), cuda_tensor(binoms)
+    )
+    return new_opacities.detach().cpu().numpy(), new_scales.detach().cpu().numpy()

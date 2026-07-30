@@ -9,11 +9,18 @@ Wrap `splax.render` in `jax.vmap` over any batched argument. Mapping
 over a stack of view matrices renders one image per camera.
 
 ```python
-frames = jax.vmap(lambda vm: splax.render(
-    means, log_scales, quats, sh_colors, logit_opacities,
-    viewmat=vm, background=jnp.ones(3), img_shape=(H, W),
+render_at = partial(
+    splax.render,
+    means,
+    log_scales,
+    quats,
+    sh_colors,
+    logit_opacities,
+    background=jnp.ones(3),
+    img_shape=(H, W),
     f=(fx, fy),
-)[0])(viewmats)  # (B, H, W, 3)
+)
+frames, _ = jax.vmap(render_at)(viewmat=viewmats)  # (B, H, W, 3)
 ```
 
 

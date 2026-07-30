@@ -1,13 +1,4 @@
-"""Unit tests for the projection stage.
-
-``splax.project`` is walked along one matrix of aspects. A plain call, the vmap that has to match
-the loop over its single calls, mixed batched and shared operands, the gradient, and the gradient
-under vmap. Parity against the gsplat reference lives in ``tests/integration/test_project.py``.
-
-The projection is differentiable with respect to the means, scales, quaternions and the viewmat.
-Opacities only drive the integer tile counts and carry no gradient, so the gradient tests keep them
-shared and differentiate the four remaining operands.
-"""
+"""Test the projection stage across plain calls, batching and gradients."""
 
 from __future__ import annotations
 
@@ -24,23 +15,19 @@ B = len(VIEWS)
 
 
 def _assert_matches_loop(batched: tuple[jax.Array, ...], refs: list[tuple[jax.Array, ...]]):
-    """Assert each per-image slice of a batched projection matches its single call exactly.
-
-    ``cum_tiles_hit`` is excluded because it scans the whole batch and has no per-image counterpart.
-    """
+    """Assert each per-image slice of a batched projection matches its single call."""
     for i, ref in enumerate(refs):
+        # cum_tiles_hit is excluded: it scans the whole batch and has no per-image counterpart.
         for batched_out, ref_out in zip(batched[:5], ref[:5]):
             np.testing.assert_array_equal(np.asarray(batched_out[i]), np.asarray(ref_out))
 
 
 def _weights(n: int, seed: int) -> tuple[jax.Array, ...]:
-    """Draw the loss weights of the xys, depths and conics of ``n`` gaussians.
-
-    The weights are signed, which keeps the loss close to zero so that a float32 loss still
-    resolves a finite-difference step instead of drowning it in cancellation.
-    """
+    """Draw signed loss weights for the xys, depths and conics of n gaussians."""
     keys = jax.random.split(jax.random.key(seed), 3)
     shapes = [(n, 2), (n,), (n, 3)]
+    # Signed weights keep the loss near zero, so a float32 finite difference doesn't drown in
+    # cancellation.
     return tuple(jax.random.uniform(k, s, minval=-1.0) for k, s in zip(keys, shapes))
 
 
@@ -54,11 +41,7 @@ def _loss(
     weights: tuple[jax.Array, ...],
     img_shape: tuple[int, int],
 ) -> jax.Array:
-    """Reduce a projection to the weighted scalar the gradient tests differentiate.
-
-    Screen-space centers, depths and conics all enter, so every differentiable operand receives an
-    O(1) gradient. Scales and quaternions reach the loss through the conics alone.
-    """
+    """Reduce a projection to the weighted scalar the gradient tests differentiate."""
     xys, depths, _radii, conics, _nth, _cum = splax.project(
         mean3ds, scales, quats, viewmat, opacities=opacities, **camera(*img_shape)
     )
@@ -104,11 +87,9 @@ def test_project():
 
 
 def test_project_principal_point_default():
-    """Leaving the principal point out puts it at the image center.
-
-    The image is deliberately not square, so a principal point that swaps its axes lands the
-    projection somewhere else.
-    """
+    """Test that omitting the principal point defaults it to the image center."""
+    # The image is deliberately not square, so a principal point with swapped axes would land the
+    # projection somewhere else.
     n, H, W = 3000, 128, 192
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=2, dense=True)
     kw = camera(H, W)
@@ -125,11 +106,7 @@ def test_project_principal_point_default():
 
 
 def test_opacity_compensation():
-    """Rebuild the compensation factor from the conic and bound it to [0, 1].
-
-    The factor is the square root of the determinant ratio of the undilated and the dilated 2D
-    covariance, and a culled gaussian carries no dilation to compensate, so it reads exactly 1.
-    """
+    """Test that the compensation factor rebuilt from the conic matches the reference in [0, 1]."""
     n, H, W = 3000, 128, 128
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=1)
     _xys, _depths, radii, conics, _nth, _cum = splax.project(
@@ -156,19 +133,20 @@ def test_opacity_compensation():
     assert rho[live].min() < 0.98, "no thin gaussian is compensated at all"
 
 
+def test_project_jit():
+    """Test that project jits with the camera arguments declared static."""
+    means, scales, quats, _colors, opacities, _bg = scene(3000, seed=1, dense=True)
+    project = jax.jit(splax.project, static_argnames=("img_shape", "f", "c"))
+    jax.block_until_ready(
+        project(means, scales, quats, VIEWMAT, opacities=opacities, **camera(128, 128))
+    )
+
+
 # region batching
 
 
 def test_project_vmap_matches_loop():
-    """Match a vmap over a batch of scenes and cameras against the loop over its single calls.
-
-    ``splax.project`` carries vmap_method="expand_dims" and launches a single grid over the whole
-    batch. Every output except ``cum_tiles_hit`` is per-gaussian and batch-invariant, so it matches
-    the stacked unbatched projections exactly. ``cum_tiles_hit`` is intentionally a *global*
-    inclusive prefix sum across the whole batch, the gsplat single-sort layout in which every
-    image's intersections lie contiguously, so it equals the global cumsum of the flattened
-    ``n_tiles_hit`` rather than the per-image cumsum.
-    """
+    """Test that a vmap over a batch of scenes and cameras matches the loop over single calls."""
     n, H, W = 8_000, 128, 128
     draws = [scene(n, seed=seed, dense=True) for seed in range(B)]
     means, scales, quats = (jnp.stack([draw[i] for draw in draws]) for i in range(3))
@@ -179,13 +157,15 @@ def test_project_vmap_matches_loop():
     refs = [project(means[i], scales[i], quats[i], VIEWS[i]) for i in range(B)]
     _assert_matches_loop(batched, refs)
 
+    # cum_tiles_hit is a global inclusive prefix sum across the whole batch rather than a
+    # per-image cumsum, so compare it against the cumsum of the flattened n_tiles_hit.
     nth = np.asarray(batched[4]).reshape(-1).astype(np.int64)
     cum = np.asarray(batched[5]).reshape(-1).astype(np.int64)
     np.testing.assert_array_equal(cum, np.cumsum(nth))
 
 
 def test_project_broadcast():
-    """Mixed batched and shared operands match the loop that spells the batch out by hand."""
+    """Test that mixed batched and shared operands match the loop spelled out by hand."""
     n, H, W = 4000, 128, 128
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=3, dense=True)
     batched_means = means + 0.05 * jax.random.normal(jax.random.key(4), (B, n, 3))
@@ -219,11 +199,7 @@ def test_project_broadcast():
 
 
 def test_project_grad():
-    """Validate the gradient of every differentiable operand with directional finite differences.
-
-    Stepping along the gradient of one operand at a time maximizes the directional-derivative
-    signal against float32 noise and attributes a mismatch to that operand.
-    """
+    """Test the gradient of every differentiable operand with directional finite differences."""
     n, H, W = 400, 96, 96
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=5)
     loss = partial(_loss, opacities=opacities, weights=_weights(n, seed=6), img_shape=(H, W))
@@ -247,17 +223,13 @@ def test_project_grad():
 
 
 def test_project_quat_scale():
-    """Scaling the quaternions leaves the projection unchanged and rescales its gradient.
-
-    The rotation is built from the normalized quaternion, so the outputs depend on the quaternion
-    direction alone while the gradient carries the ``1 / |q|`` factor of that normalization. A
-    power-of-two scale keeps both relations exact in float32.
-    """
+    """Test that scaling the quaternions leaves the projection unchanged and scales its gradient."""
     n, H, W = 400, 96, 96
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=15)
     loss = partial(_loss, opacities=opacities, weights=_weights(n, seed=16), img_shape=(H, W))
     grad = jax.grad(loss, argnums=2)
 
+    # A power-of-two scale keeps both relations exact in float32.
     assert float(loss(means, scales, 2.0 * quats, VIEWMAT)) == float(
         loss(means, scales, quats, VIEWMAT)
     )
@@ -266,12 +238,7 @@ def test_project_quat_scale():
 
 
 def test_project_grad_vmap_matches_loop():
-    """Match vmap(grad) over a batch of scenes and cameras against the loop over single gradients.
-
-    The per-gaussian gradients are written by the thread owning the gaussian, so they stay
-    exact. The viewmat gradient accumulates every gaussian of an image with atomics, whose
-    order follows the launch geometry, so it is compared numerically.
-    """
+    """Test that vmap(grad) over a batch matches the loop over the single gradients."""
     n, H, W = 800, 96, 96
     draws = [scene(n, seed=seed) for seed in range(B)]
     means, scales, quats = (jnp.stack([draw[i] for draw in draws]) for i in range(3))
@@ -281,20 +248,18 @@ def test_project_grad_vmap_matches_loop():
     grad = jax.grad(loss, argnums=(0, 1, 2, 3))
     batched = jax.vmap(grad)(means, scales, quats, viewmats)
     refs = [grad(means[i], scales[i], quats[i], viewmats[i]) for i in range(B)]
+    # Per-gaussian gradients are written by the thread owning the gaussian, so they stay exact.
     for i, name in enumerate(["means", "scales", "quats"]):
         ref = np.stack([np.asarray(r[i]) for r in refs])
         np.testing.assert_array_equal(np.asarray(batched[i]), ref, err_msg=name)
+    # The viewmat gradient accumulates over an image's gaussians with atomics, whose order
+    # follows the launch geometry, so it is compared numerically instead of exactly.
     ref_viewmat = np.stack([np.asarray(r[3]) for r in refs])
     np.testing.assert_allclose(np.asarray(batched[3]), ref_viewmat, rtol=1e-4, atol=1e-6)
 
 
 def test_project_grad_broadcast():
-    """The gradient of a shared operand is the sum over the batch axis of the per-image gradients.
-
-    Batching the camera alone makes the projected geometry per-image while the gaussians stay
-    shared. The vjp of a broadcast is a sum, so the gradient of the summed batch loss with respect
-    to the shared gaussians equals the summed per-image gradients.
-    """
+    """Test that the gradient of a shared operand equals the sum of the per-image gradients."""
     n, H, W = 800, 96, 96
     means, scales, quats, _colors, opacities, _bg = scene(n, seed=11)
     viewmats = poses(B, seed=12)

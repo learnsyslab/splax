@@ -18,9 +18,7 @@ import splax
 
 splats = splax.io.load_ply("scene.ply")  # means, log_scales, quats, sh_colors, logit_opacities
 img, _ = splax.render(
-    *splats,
-    viewmat=viewmat, background=jnp.ones(3),
-    img_shape=(H, W), f=(fx, fy),
+    *splats, viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy)
 )  # (H, W, 3)
 ```
 
@@ -34,12 +32,10 @@ forward). `f` is the focal length `(fx, fy)` and `c` is the principal point
 
 ```python
 import jax
+from functools import partial
 
-frames = jax.vmap(lambda vm: splax.render(
-    *splats,
-    viewmat=vm, background=jnp.ones(3), img_shape=(H, W),
-    f=(fx, fy),
-)[0])(viewmats)  # (B, H, W, 3)
+render_at = partial(splax.render, *splats, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy))
+frames, _ = jax.vmap(render_at)(viewmat=viewmats)  # (B, H, W, 3)
 ```
 
 ## Take a gradient
@@ -49,13 +45,21 @@ frames = jax.vmap(lambda vm: splax.render(
 ```python
 import jax
 
+
 def loss(means, log_scales, quats, sh_colors, logit_opacities):
     img, _ = splax.render(
-        means, log_scales, quats, sh_colors, logit_opacities,
-        viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W),
+        means,
+        log_scales,
+        quats,
+        sh_colors,
+        logit_opacities,
+        viewmat=viewmat,
+        background=jnp.ones(3),
+        img_shape=(H, W),
         f=(fx, fy),
     )
     return jnp.mean((img - target) ** 2)
+
 
 grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splats)
 ```

@@ -46,6 +46,11 @@ def rasterize(
         The ``(H, W, 3)`` image and the ``(H, W)`` accumulated alpha, the coverage the gaussians
         coming out of the blend contribute, which is 0 on pixels no gaussian covers.
     """
+    if any(isinstance(v, jax.Array) for v in img_shape):
+        raise TypeError(
+            "img_shape sizes the kernel launch and must be static. Under jax.jit either close "
+            'over it or pass static_argnames="img_shape".'
+        )
     n = colors.shape[0]
     H, W = img_shape
     if map_opacities is None:
@@ -90,6 +95,11 @@ def rasterize_depth(
         The ``(H, W, 4)`` image, RGB in the first three channels and the expected depth in the
         fourth, and the ``(H, W)`` accumulated alpha, which is 0 on pixels no gaussian covers.
     """
+    if any(isinstance(v, jax.Array) for v in img_shape):
+        raise TypeError(
+            "img_shape sizes the kernel launch and must be static. Under jax.jit either close "
+            'over it or pass static_argnames="img_shape".'
+        )
     n = colors.shape[0]
     H, W = img_shape
     if map_opacities is None:

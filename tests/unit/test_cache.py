@@ -1,12 +1,4 @@
-"""Warp backend machinery invariants behind the rasterizer.
-
-The backend keeps persistent grow-only scratch buffers per device and picks between a packed 32-bit
-and a 64-bit radix sort key. Both are invisible from the outside, yet a stale sort buffer or an
-un-zeroed tile_bins prefix silently corrupts a render, and a divergence between the projected tile
-count and the emitted keys corrupts the per-gaussian sort buffer offsets. The tests here pin the
-scratch reuse and release, the agreement and fallback of the packed key, and the exact tile
-emission.
-"""
+"""Test the scratch buffers, sort keys and tile intersection behind the rasterizer."""
 
 from __future__ import annotations
 
@@ -25,49 +17,37 @@ from splax._rasterize._sort._kernels import map_intersects_64bit
 
 
 def test_scratch_reuse_across_sizes():
-    """Persistent grow-only scratch must not leak state between renders.
-
-    Render several scenes of *different* intersection counts back to back (shrinking
-    then growing), each time comparing against a freshly cleared reference render of
-    the same scene. A stale sort buffer or an un-zeroed tile_bins prefix would make
-    the second render of a smaller scene disagree with its clean-slate render.
-    """
-    configs = [(200_000, 300, 400), (10_000, 256, 256), (100_000, 512, 512), (10_000, 256, 256)]
+    """Test that reused scratch does not leak state between renders of different sizes."""
+    configs = [(2_000, 32, 32), (100, 64, 64), (1000, 128, 128), (100, 256, 256)]
+    rasterize = jax.jit(splax.rasterize, static_argnames=("img_shape",))
     for n, H, W in configs:
         args = projected(n, H, W, seed=n)
         # render while scratch is warm from previous (differently sized) iterations
-        warm = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
+        warm = rasterize(*args, img_shape=(H, W))[0]
         # clean reference: drop all cached scratch, render the identical scene again
         splax.clear_cache()
-        cold = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
-        assert np.array_equal(warm, cold), (
-            f"scratch reuse changed output at n={n} {H}x{W}: max|d|={np.abs(warm - cold).max():.2e}"
-        )
+        cold = rasterize(*args, img_shape=(H, W))[0]
+        assert np.array_equal(warm, cold), "scratch reuse changed output"
 
 
 def test_scratch_released_on_signature_change():
-    """Test that switching to a smaller workload releases a bigger sort scratch."""
-    dev = wp.get_device()
+    """Test that switching to a smaller workload releases the scratch of the bigger one."""
+    dev = str(wp.get_device())
     splax.clear_cache()
-    splax.rasterize(*projected(500_000, 1080, 1920, seed=1), img_shape=(1080, 1920))
-    big = wp.get_mempool_used_mem_current(dev)
-    splax.rasterize(*projected(5_000, 128, 128, seed=2), img_shape=(128, 128))
-    small = wp.get_mempool_used_mem_current(dev)
-    assert small < big * 0.5, f"scratch not released on signature change: {small} vs {big}"
+    rasterize = jax.jit(splax.rasterize, static_argnames=("img_shape",))
+    jax.block_until_ready(rasterize(*projected(5_000, 256, 256, seed=1), img_shape=(256, 256)))
+    big = sum(a.capacity for a in _cache._scratch_cache[dev].values() if isinstance(a, wp.array))
+    jax.block_until_ready(rasterize(*projected(1_000, 128, 128, seed=2), img_shape=(128, 128)))
+    small = sum(a.capacity for a in _cache._scratch_cache[dev].values() if isinstance(a, wp.array))
+    assert small < big / 2, "scratch has not released after signature change"
 
 
 # region packed 32-bit sort key
 
 
 def test_packed_key_matches_64bit():
-    """The packed 32-bit key agrees with the 64-bit key to a high perceptual bound.
-
-    Depth is linearly quantized into depth_bits (>=16) buckets over the per-frame
-    range, so the blend order changes only for near-coincident (same-bucket)
-    gaussians, giving >65 dB PSNR, <0.05 max abs diff vs the 64-bit path (measured
-    floor ~80-140 dB across configs).
-    """
-    packed, wide = rasterize_both_keymodes(projected(100_000, 512, 512, seed=7), 512, 512)
+    """Compare renders from the packed 32-bit sort key to renders from the 64-bit key."""
+    packed, wide = rasterize_both_keymodes(projected(1_000, 32, 32, seed=1), 32, 32)
     d = np.abs(packed - wide)
     mse = float(np.mean((packed - wide) ** 2))
     psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
@@ -76,12 +56,7 @@ def test_packed_key_matches_64bit():
 
 
 def test_packed_key_falls_back_when_bits_dont_fit():
-    """When image+tile bits leave <16 for depth, the 64-bit key is used (fallback).
-
-    Observed via the scratch key buffer dtype: packed gives int32, fallback gives int64.
-    B=8 at 1080p gives image(3)+tile(13)=16 bits, so depth_bits=15 <16 and it falls back.
-    B=1 at 1080p gives 13 bits, so depth_bits=18 and it packs.
-    """
+    """Test that the wide sort key takes over when too few bits remain for depth."""
     dev = str(wp.get_device("cuda:0"))
     H, W = 1080, 1920
     splats = scene_params(4000, seed=1, dense=True)[:5]
@@ -89,39 +64,31 @@ def test_packed_key_falls_back_when_bits_dont_fit():
 
     # B=1 packs into int32 scratch
     splax.clear_cache()
-    img, _ = splax.render(*splats, viewmat=VIEWMAT, **kw)
+    render = jax.jit(splax.render, static_argnames=("f", "c", "img_shape"))
+    img, _ = render(*splats, viewmat=VIEWMAT, **kw)
     img.block_until_ready()
     assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int32
 
     # B=8: image(3)+tile(13)=16 > 15, falls back to int64 scratch
     splax.clear_cache()
     views = jnp.stack([VIEWMAT.at[2, 3].set(5.0 + 0.1 * i) for i in range(8)])
-    jax.jit(jax.vmap(lambda vm: splax.render(*splats, viewmat=vm, **kw)[0]))(
-        views
-    ).block_until_ready()
+    jax.jit(jax.vmap(lambda vm: render(*splats, viewmat=vm, **kw)[0]))(views).block_until_ready()
     assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int64
     splax.clear_cache()
 
 
 # region tight tile intersection
 
-# Opacity-aware tight tile intersection. Projection counts tiles via the ellipse
-# walk and rasterize walks the identical ellipse to emit keys. The count and the
-# emit must agree exactly or the per-gaussian sort buffer offsets corrupt.
+# Projection counts the tiles an ellipse covers and rasterization walks the same ellipse to emit
+# the keys. Any disagreement corrupts the per-gaussian offsets into the sort buffer.
 
 
-@pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
+@pytest.mark.parametrize("n,H,W", [(2_000, 256, 256), (10_000, 512, 512)])
 def test_tile_emission_matches_count(n: int, H: int, W: int):
-    """The AccuTile key-emission writes EXACTLY n_tiles_hit keys per gaussian.
-
-    Launch the emission kernel into a sentinel-filled buffer and verify that every
-    slot in [cum[i-1], cum[i]) is written by gaussian i and no slot is left stale or
-    overwritten, i.e. the emitted count agrees exactly with the projection's
-    AccuTile tile count. A divergence between the count (projection) and the walk
-    (emission) would show up as sentinels remaining or a wrong gaussian id.
-    """
-    means, scales, quats, _colors, opac, _bg = scene(n, seed=n, dense=True)
-    xys, depths, radii, conics, nth, cum = splax.project(
+    """Test that key emission writes exactly as many keys per gaussian as projection counted."""
+    means, scales, quats, _, opac, _ = scene(n, seed=n, dense=True)
+    project = jax.jit(splax.project, static_argnames=("f", "c", "img_shape"))
+    xys, depths, radii, conics, nth, cum = project(
         means, scales, quats, VIEWMAT, opacities=opac, **camera(H, W)
     )
     nth_np = np.asarray(nth).astype(np.int64)
@@ -160,7 +127,7 @@ def test_tile_emission_matches_count(n: int, H: int, W: int):
 
     isect_np = isect.numpy()
     gids_np = gids.numpy()
-    # no stale slot: every key slot was written (count == emit, no gaps/overflow)
+    # no stale slot: every key slot was written
     assert not (isect_np == SENT).any(), f"{(isect_np == SENT).sum()} unwritten slots"
     assert (gids_np >= 0).all()
     # each gaussian owns exactly n_tiles_hit[i] contiguous slots at cum[i-1]

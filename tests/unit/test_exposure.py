@@ -1,10 +1,4 @@
-"""Per-image affine exposure correction of ``scripts/train_colmap.py``.
-
-``init_exposure`` hands the trainer one affine block per image and ``apply_exposure`` maps a render
-through such a block. Both are plain JAX, so the identity init, the affine algebra, and the
-untouched render an identity block leaves behind are checked directly. The training step that
-optimizes the blocks is covered in ``tests/integration/test_batched_training.py``.
-"""
+"""Test the per-image affine exposure correction used in training."""
 
 from __future__ import annotations
 
@@ -16,6 +10,7 @@ pytestmark = pytest.mark.colmap
 
 
 def test_init_exposure_is_identity():
+    """Test that init_exposure returns an identity affine block per image."""
     ntr = 7
     exp = np.asarray(init_exposure(ntr))
     assert exp.shape == (ntr, 3, 4)
@@ -26,7 +21,7 @@ def test_init_exposure_is_identity():
 
 
 def test_apply_exposure_identity_is_noop():
-    """Leave the render unchanged under an identity transform."""
+    """Test that an identity affine transform leaves the render unchanged."""
     rng = np.random.default_rng(0)
     img = rng.random((5, 4, 3)).astype(np.float32)
     affine = np.asarray(init_exposure(1))[0]  # (3,4) identity
@@ -35,7 +30,7 @@ def test_apply_exposure_identity_is_noop():
 
 
 def test_apply_exposure_affine_algebra():
-    """Known transform M@rgb + b, applied per pixel, matches an explicit einsum."""
+    """Compare apply_exposure to an explicit einsum for a random affine transform."""
     rng = np.random.default_rng(1)
     img = rng.random((6, 3, 3)).astype(np.float32)
     M = rng.normal(size=(3, 3)).astype(np.float32)
@@ -48,7 +43,7 @@ def test_apply_exposure_affine_algebra():
 
 
 def test_apply_exposure_scalar_gain_and_offset():
-    """A pure per-channel gain+bias (diagonal M) scales/shifts each channel."""
+    """Test that a diagonal affine transform applies a per-channel gain and bias."""
     img = np.ones((2, 2, 3), np.float32)
     gain = np.array([0.5, 2.0, 1.0], np.float32)
     bias = np.array([0.1, -0.2, 0.0], np.float32)

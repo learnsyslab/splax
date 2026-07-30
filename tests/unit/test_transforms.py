@@ -1,16 +1,8 @@
-"""Per-object rigid transform projection semantics and input validation.
-
-The projection kernel applies a 4x4 world-space transform to a slice of the splat on the fly.
-Checked here:
-
-  1. Forward correctness against a manual reference that pre-transforms the slice's means and quats
-     in JAX. The two formulations are mathematically equal but round differently, so projection
-     outputs are compared tightly, with no radii or visibility flips.
-  2. Invalid slices and mismatched shapes raise immediately.
-"""
+"""Test the ability to apply rigid transforms to a slice of the splat."""
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -22,18 +14,15 @@ import splax
 
 
 def test_projection_matches_manual_transform():
-    """Kernel transform vs pre-transformed inputs, same projection outputs.
-
-    The kernel rotates the covariance factor while the reference rotates the
-    quaternion, mathematically equal with different rounding. Projected centers,
-    depths, and conics must agree tightly, with zero radii or visibility flips.
-    """
+    """Compare the kernel transform to pre-transformed inputs."""
     n = 4000
-    means, scales, quats, _colors, opac, _bg = scene(n, seed=2)
-    rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
+    rng = np.random.default_rng(0)
+    means, scales, quats, _, opac, _ = scene(n, seed=1)
+    rot = R.from_quat(rng.normal(size=(4,)))
     T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
     tf_ids = jnp.full((n,), -1, jnp.int32).at[:1000].set(0)
-    a = splax.project(
+    jit_project = jax.jit(splax.project, static_argnames=("f", "c", "img_shape"))
+    a = jit_project(
         means,
         scales,
         quats,
@@ -44,7 +33,7 @@ def test_projection_matches_manual_transform():
         transform_ids=tf_ids,
     )
     m2, q2 = manual_move(means, quats, T, 0, 1000)
-    b = splax.project(m2, scales, q2, VIEWMAT, opacities=opac, **camera(128, 128))
+    b = jit_project(m2, scales, q2, VIEWMAT, opacities=opac, **camera(128, 128))
 
     ra, rb = np.asarray(a[2]), np.asarray(b[2])
     np.testing.assert_array_equal(ra > 0, rb > 0)
@@ -55,7 +44,8 @@ def test_projection_matches_manual_transform():
 
 
 def test_invalid_transform_inputs_raise():
-    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(1000, seed=6)
+    """Test if inputs are properly validated."""
+    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(1000, seed=1)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(64, 64)}
     eye = jnp.eye(4, dtype=jnp.float32)[None]
 

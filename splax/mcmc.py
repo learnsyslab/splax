@@ -60,7 +60,8 @@ def compute_relocation(
     """
     n_max = binoms.shape[0]
     ratios = jnp.clip(jnp.round(ratios).astype(jnp.int32), 1, n_max)
-    new_opac = 1.0 - (1.0 - opacities) ** (1.0 / ratios)
+    # equivalent to 1 - (1 - o)**(1/n), but without its two float32 cancellations
+    new_opac = -jnp.expm1(jnp.log1p(-opacities) / ratios)
     k = jnp.arange(n_max, dtype=jnp.float32)
     sign_sqrt = ((-1.0) ** k) / jnp.sqrt(k + 1.0)
     cb = jnp.cumsum(binoms, axis=0)

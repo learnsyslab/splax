@@ -1,16 +1,12 @@
-"""Init-scale correction of ``colmap.init_from_points``.
-
-The init draws a fixed number of gaussians from a sparse cloud, so it pads the cloud whenever more
-are asked for than it holds. Padding raises the local density, which the knn log-scales are
-corrected for by exactly ``(1/3)ln(n/m)``. The checks run on a synthetic cloud, so they depend on no
-reconstruction.
-"""
+"""Test the fixed-N splat initialization from a sparse point cloud."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-from colmap import init_from_points, knn_scales
+from colmap import init_from_points
+from scipy.spatial import KDTree
+from scipy.special import expit
 
 pytestmark = pytest.mark.colmap
 
@@ -22,44 +18,76 @@ def _cloud(m: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     return xyz, rgb
 
 
-def test_padding_applies_density_ratio_correction():
-    """When n>m, every original knn log-scale is lowered by exactly (1/3)ln(n/m)."""
+@pytest.mark.parametrize("m,n", [(4000, 500), (500, 4000)])
+def test_scales_match_the_realized_point_density(m: int, n: int):
+    """Test that the initial scale matches the spacing of the points it initializes."""
+    xyz, rgb = _cloud(m)
+    p = init_from_points(xyz, rgb, n, 0.1)
+    means = np.asarray(p["means"])
+    scales = np.exp(np.asarray(p["log_scales"])[:, 0])
+    distances, _ = KDTree(means).query(means, k=4)  # k=4 includes the point itself at distance 0
+    # padding duplicates points, so the splat is denser than the cloud it was seeded from and the
+    # scale has to follow the density it ends up at, not the one it was measured on
+    ratio = scales.mean() / distances[:, 1:].mean()
+    assert 0.9 < ratio < 1.15, f"scale is {ratio:.2f}x the spacing of the initialized points"
+
+
+def test_scales_are_isotropic():
+    """Test that every gaussian is seeded with one scale shared across its three axes."""
+    log_scales = np.asarray(init_from_points(*_cloud(500), 4000, 0.1)["log_scales"])
+    assert (log_scales == log_scales[:, :1]).all()
+
+
+def test_padding_keeps_the_cloud_and_seeds_the_copies_next_to_it():
+    """Test that padding preserves the sparse points and seeds the copies next to them."""
     m, n = 500, 4000
     xyz, rgb = _cloud(m)
-    p = init_from_points(xyz, rgb, n, 0.1, seed=0)
-    ls = np.asarray(p["log_scales"])
-    # the correction is applied to the whole knn-derived cloud, the first m rows are the
-    # original points, so compare them against the uncorrected knn scales (cap=0.3 as in
-    # init_from_points) minus the expected (1/3)ln(n/m) offset.
-    base = knn_scales(xyz, cap=0.3)  # (m,) uncorrected
-    expected = (base - np.log(n / m) / 3.0)[:, None].repeat(3, 1)
-    assert np.allclose(ls[:m], expected, atol=1e-5)
-    # all three columns share the per-gaussian scale
-    assert np.allclose(ls[:, 0], ls[:, 1]) and np.allclose(ls[:, 0], ls[:, 2])
+    p = init_from_points(xyz, rgb, n, 0.1)
+    means = np.asarray(p["means"])
+    scales = np.exp(np.asarray(p["log_scales"])[:, 0])
+    np.testing.assert_array_equal(means[:m], xyz)
+    distance, _ = KDTree(xyz).query(means[m:], k=1)
+    assert (distance < 6.0 * scales[m:]).all(), "padded copies drift away from the cloud"
 
 
-def test_correction_scales_with_padding_ratio():
-    """Offset tracks the padding ratio: n=8m is 3x lower than n=m in log space."""
-    m = 500
-    xyz, rgb = _cloud(m)
-    base = knn_scales(xyz, cap=0.3)
-    # small pad (n just above m) vs large pad (n=8m): the mean original-block log-scale
-    # drops by exactly the difference of the two (1/3)ln(n/m) corrections.
-    p_small = init_from_points(xyz, rgb, m + 1, 0.1, seed=0)
-    p_large = init_from_points(xyz, rgb, 8 * m, 0.1, seed=0)
-    off_small = base.mean() - np.asarray(p_small["log_scales"])[:m, 0].mean()
-    off_large = base.mean() - np.asarray(p_large["log_scales"])[:m, 0].mean()
-    assert np.isclose(off_small, np.log((m + 1) / m) / 3.0, atol=1e-5)
-    assert np.isclose(off_large, np.log(8) / 3.0, atol=1e-5)
-
-
-def test_subsample_branch_has_no_correction():
-    """Check that subsampling skips density correction when n is not padded."""
+def test_subsampling_draws_distinct_input_points():
+    """Test that subsampling returns input points and draws each of them at most once."""
     m, n = 4000, 500
     xyz, rgb = _cloud(m)
-    p = init_from_points(xyz, rgb, n, 0.1, seed=0)
-    # reproduce the subsample selection with the same rng draw order as init_from_points
-    rng = np.random.default_rng(0)
-    sel = rng.choice(m, n, replace=False)
-    expected = knn_scales(xyz[sel], cap=0.3)[:, None].repeat(3, 1)
-    assert np.allclose(np.asarray(p["log_scales"]), expected, atol=1e-5)
+    means = np.asarray(init_from_points(xyz, rgb, n, 0.1)["means"])
+    distance, _ = KDTree(xyz).query(means, k=1)
+    assert not distance.any(), "subsampled means are not input points"
+    assert len(np.unique(means, axis=0)) == n
+
+
+def test_colors_and_opacity_round_trip():
+    """Test that the logit parameters decode back to the point colors and the given opacity."""
+    xyz, rgb = _cloud(4000)
+    p = init_from_points(xyz, rgb, 500, 0.37)
+    _, index = KDTree(xyz).query(np.asarray(p["means"]), k=1)
+    colors = expit(np.asarray(p["colors_logit"])) * 255.0
+    assert np.abs(colors - rgb[index]).max() < 0.1, "colors do not follow their points"
+    assert np.allclose(expit(np.asarray(p["opac_logit"])), 0.37)
+
+
+def test_weights_bias_the_subsample():
+    """Test that sampling weights pull the draw onto the points that carry them."""
+    m, n, hot = 2000, 500, 200
+    xyz, rgb = _cloud(m)
+    weights = np.full(m, 1.0, np.float32)
+    weights[:hot] = 1e4
+    tree = KDTree(xyz)
+    biased = init_from_points(xyz, rgb, n, 0.1, weights=weights)
+    _, weighted = tree.query(np.asarray(biased["means"]))
+    _, uniform = tree.query(np.asarray(init_from_points(xyz, rgb, n, 0.1)["means"]))
+    assert np.mean(weighted < hot) > 2.0 * np.mean(uniform < hot)
+
+
+def test_isolated_outlier_gets_a_bounded_scale():
+    """Test that a point far outside the cloud is not seeded with a scene-sized gaussian."""
+    xyz, rgb = _cloud(500)
+    xyz = np.concatenate([xyz, np.array([[50.0, 50.0, 50.0]], np.float32)])
+    rgb = np.concatenate([rgb, np.array([[1, 2, 3]], np.uint8)])
+    p = init_from_points(xyz, rgb, 4000, 0.1)
+    extent = np.ptp(xyz[:-1], axis=0).max()
+    assert np.exp(np.asarray(p["log_scales"])).max() < 0.25 * extent
