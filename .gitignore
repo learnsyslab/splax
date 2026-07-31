@@ -8,6 +8,8 @@ dist/
 site/
 results/*.png
 results/*.ply
+examples/*.png
+examples/*.gif
 dev
 reports/
 results/

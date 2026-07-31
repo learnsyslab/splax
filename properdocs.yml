@@ -47,6 +47,7 @@ nav:
     - Batching: user-guide/batching.md
     - IO: user-guide/io.md
     - Viewer: user-guide/viewer.md
+  - Examples: examples.md
   - API Reference: api/
 
 plugins:
@@ -88,7 +89,9 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
   - pymdownx.tabbed:
       alternate_style: true
 
@@ -99,3 +102,4 @@ extra:
 
 watch:
   - splax/
+  - examples/

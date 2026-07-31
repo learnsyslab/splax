@@ -104,6 +104,9 @@ move = partial(
 imgs, _ = jax.vmap(move)(gaussian_transforms=pose_batch)  # (B, K, 4, 4) -> (B, H, W, 3)
 ```
 
+[Examples](../examples.md#join-two-splats-and-move-one) has a runnable version that joins two splats
+and orbits one of them.
+
 Omitting both arguments renders the splat as one static scene. The transforms are differentiable,
 see [object pose gradients](training.md#camera-pose-and-object-pose-gradients).
 
