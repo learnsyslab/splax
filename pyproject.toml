@@ -39,6 +39,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages]
 find = {include = ["splax*"]}
 
+# PEP 561 marker, so type checkers use the inline annotations of the installed package.
+[tool.setuptools.package-data]
+splax = ["py.typed"]
+
 [tool.setuptools.dynamic]
 version = {attr = "splax.__version__"}
 
