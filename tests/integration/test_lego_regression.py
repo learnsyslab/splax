@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from utils import psnr
 
 import splax
 
@@ -45,6 +46,6 @@ def test_lego_render_psnr_regression(
     )
 
     img = jnp.clip(render(viewmat=viewmat)[0], 0.0, 1.0)
-    psnr = -10.0 * np.log10(float(jnp.mean((img - gt) ** 2)))
+    quality = psnr(img, gt)
     floor = KNOWN_PSNR[frame_idx] - SLACK
-    assert psnr >= floor, f"frame {frame_idx} PSNR {psnr:.3f} dB below floor {floor:.3f}"
+    assert quality >= floor, f"frame {frame_idx} PSNR {quality:.3f} dB below floor {floor:.3f}"

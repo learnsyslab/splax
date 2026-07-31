@@ -93,7 +93,7 @@ def test_rasterize_depth():
     quats = jnp.array([[1.0, 0.0, 0.0, 0.0]])
     opacities = jnp.array([0.9])
     viewmat = jnp.eye(4).at[2, 3].set(4.0)
-    camera_z = float((viewmat[:3, :3] @ means[0] + viewmat[:3, 3])[2])
+    camera_z = (viewmat[:3, :3] @ means[0] + viewmat[:3, 3])[2]
     geoms = _project_geoms(means, scales, quats, opacities, viewmat, H=H, W=W)
     rasterize_depth = jax.jit(partial(splax.rasterize_depth, img_shape=(H, W)))
 
@@ -102,7 +102,7 @@ def test_rasterize_depth():
     covered = alpha > 0.0
 
     assert img.shape == (H, W, 4)
-    deviation = float(jnp.abs(depth[covered] - camera_z).max())
+    deviation = jnp.abs(depth[covered] - camera_z).max()
     assert deviation < 1e-4, f"max deviation {deviation:.2e}"
     # the depth carries camera units and is nowhere near the [0, 1] the alpha lives in
     assert depth[covered].min() > 1.0, "the depth is not a metric camera distance"
@@ -279,7 +279,7 @@ def test_rasterize_depth_grad_empty_pixels():
     rasterize_depth = jax.jit(partial(splax.rasterize_depth, grey, img_shape=(H, W)))
 
     img, _ = rasterize_depth(opacities, jnp.zeros(3), xys, depths, radii, conics, cum)
-    empty = float(jnp.mean(img[..., 3] == 0.0))
+    empty = jnp.mean(img[..., 3] == 0.0)
     assert 0.5 < empty < 1.0, f"only {1 - empty:.0%} of the image is empty"
 
     def depth_sum(o: jax.Array, xy: jax.Array, cn: jax.Array, d: jax.Array) -> jax.Array:

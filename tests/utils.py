@@ -72,6 +72,11 @@ def scene_params(
     return means, log_scales, quats, sh_colors, logit_opacities, background
 
 
+def psnr(a: jax.Array, b: jax.Array) -> float:
+    """Return the PSNR of two images in dB, capped where they are identical."""
+    return -10 * np.log10(max(np.mean((a - b) ** 2), 1e-10))  # Avoid -inf if identical
+
+
 def camera(H: int, W: int) -> dict:
     """Build the intrinsics keyword arguments for an ``H x W`` image, focal H, centered."""
     return {"img_shape": (H, W), "f": (float(H), float(H)), "c": (W // 2, H // 2)}

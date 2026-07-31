@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import warp as wp
-from utils import VIEWMAT, camera, projected, rasterize_both_keymodes, scene, scene_params
+from utils import VIEWMAT, camera, projected, psnr, rasterize_both_keymodes, scene, scene_params
 
 import splax
 import splax._cache as _cache
@@ -50,11 +50,9 @@ def test_scratch_released_on_signature_change():
 def test_packed_key_matches_64bit():
     """Compare renders from the packed 32-bit sort key to renders from the 64-bit key."""
     packed, wide = rasterize_both_keymodes(projected(1_000, 32, 32, seed=1), 32, 32)
-    d = np.abs(packed - wide)
-    mse = float(np.mean((packed - wide) ** 2))
-    psnr = 99.0 if mse == 0 else -10 * np.log10(mse)
-    assert d.max() < 0.05, f"packed vs 64-bit max abs diff {d.max():.2e}"
-    assert psnr > 65, f"packed vs 64-bit PSNR only {psnr:.1f} dB"
+    deviation, quality = np.abs(packed - wide).max(), psnr(packed, wide)
+    assert deviation < 0.05, f"packed vs 64-bit max abs diff {deviation:.2e}"
+    assert quality > 65, f"packed vs 64-bit PSNR only {quality:.1f} dB"
 
 
 def test_packed_key_falls_back_when_bits_dont_fit():

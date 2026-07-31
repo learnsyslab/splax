@@ -39,7 +39,7 @@ def test_compute_relocation_saturates_at_n_max(gsplat_shim: ModuleType):
     rng = np.random.default_rng(7)
     opacities = rng.uniform(0.05, 0.95, n).astype(np.float32)
     scales = rng.uniform(0.02, 0.4, (n, 3)).astype(np.float32)
-    ratios = np.full(n, float(N_MAX + 10), np.float32)
+    ratios = np.full(n, N_MAX + 10, np.float32)
     binoms = mcmc.make_binoms(N_MAX)
 
     new_opacities, new_scales = mcmc.compute_relocation(opacities, scales, ratios, binoms)
