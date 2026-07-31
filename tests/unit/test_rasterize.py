@@ -267,7 +267,7 @@ def test_rasterize_grad():
     colors, opacities, background, xys, depths, radii, conics, cum = projected(
         n, H, W, seed=7, dense=False
     )
-    w = jax.random.uniform(jax.random.key(5), (H, W, 3))
+    w = jax.random.uniform(jax.random.key(5), (H, W, 3), minval=-1.0)
 
     def loss(c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array) -> jax.Array:
         img, _alpha = splax.rasterize(
@@ -282,7 +282,7 @@ def test_rasterize_grad():
     for a, b in zip(grads, jax.jit(grad)(*args)):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
-    assert_finite_difference(loss, args, grads)
+    assert_finite_difference(loss, args, grads, eps=1e-3)
 
 
 def test_rasterize_alpha_grad():

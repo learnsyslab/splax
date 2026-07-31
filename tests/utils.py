@@ -123,6 +123,9 @@ def assert_finite_difference(
 ):
     """Match the analytic directional derivative of a loss against central finite differences.
 
+    Each argument is stepped on its own with the others held fixed, so a mismatch in one gradient
+    is not diluted by the derivatives of the rest.
+
     Args:
         loss: Scalar loss of ``args``.
         args: The arguments the loss is differentiated with respect to.
@@ -131,14 +134,16 @@ def assert_finite_difference(
         rtol: Relative bound on the mismatch between the analytic and the numeric derivative.
         name: Prefix identifying the check in the assertion message.
     """
-    # Step along the unit gradient direction of each argument to maximize accuracy.
-    directions = [g / (jnp.linalg.norm(g) + 1e-12) for g in grads]
-    analytic = sum(float(jnp.vdot(g, d)) for g, d in zip(grads, directions))
-    plus = float(loss(*(a + eps * d for a, d in zip(args, directions))))
-    minus = float(loss(*(a - eps * d for a, d in zip(args, directions))))
-    numeric = (plus - minus) / (2 * eps)
-    rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
-    assert rel < rtol, f"{name}FD mismatch: {analytic=:.6e} vs {numeric=:.6e} ({rel=:.2e})"
+    for i, (arg, grad) in enumerate(zip(args, grads)):
+        # Step along the unit gradient direction to maximize accuracy.
+        direction = grad / (jnp.linalg.norm(grad) + 1e-12)
+        analytic = jnp.vdot(grad, direction)
+        plus = loss(*args[:i], arg + eps * direction, *args[i + 1 :])
+        minus = loss(*args[:i], arg - eps * direction, *args[i + 1 :])
+        numeric = (plus - minus) / (2 * eps)
+        rel = abs(analytic - numeric) / (abs(numeric) + 1e-12)
+        msg = f"{name}argument {i} FD mismatch: {analytic=:.6e} vs {numeric=:.6e} ({rel=:.2e})"
+        assert rel < rtol, msg
 
 
 def rasterize_both_keymodes(args: tuple[jax.Array, ...], H: int, W: int) -> tuple[np.ndarray, ...]:

@@ -94,6 +94,7 @@ def project(
     )
 
 
+@jax.jit
 def opacity_compensation(conics: jax.Array, radii: jax.Array, eps: float = 0.3) -> jax.Array:
     """Compute the Mip-Splatting anti-aliased opacity compensation factor per gaussian.
 
