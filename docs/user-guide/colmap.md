@@ -1,13 +1,18 @@
 # COLMAP Workflow
 
-This guide uses the dedicated Pixi `colmap` environment and the three task
-wrappers:
+This guide uses the dedicated pixi `colmap` environment and the three task wrappers:
 
 - `colmap-features`
 - `colmap-match`
 - `colmap-map`
 
-Each task takes exactly one input: the scene folder.
+Each task takes exactly one input, the scene folder.
+
+Mapping runs bundle adjustment on the GPU through
+[CasPAR](https://radiancefields.com/colmap-4.1.0-ships-caspar-gpu-bundle-adjustment-and-native-360-reconstruction),
+the backend COLMAP 4.1 added as an alternative to the Ceres solver. It is experimental and disabled
+in the official binary, so the `colmap` environment compiles COLMAP from source with it enabled. The
+first task you run triggers that build, and later runs reuse it.
 
 ## 1. Prepare a workspace with images
 

@@ -80,7 +80,7 @@ properdocs = ">=1.5.0"
 mkdocs-material = ">=9.5.0"
 
 [tool.pixi.feature.docs]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-64-cuda"]
 
 [tool.pixi.feature.docs.pypi-dependencies]
 mkdocstrings = { extras = ["python"], version = ">=0.26.0" }

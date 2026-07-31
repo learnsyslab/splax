@@ -33,8 +33,7 @@ import splax
 
 splats = splax.io.load_ply("scene.ply")  # means, log_scales, quats, sh_colors, logit_opacities
 img, _ = splax.render(
-    *splats, viewmat=viewmat,
-    background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
+    *splats, viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy)
 )  # (H, W, 3)
 ```
 
@@ -43,9 +42,11 @@ Batch over a stack of camera poses with `jax.vmap`, rendered in one go rather th
 ```python
 import jax
 
-frames = jax.vmap(lambda vm: splax.render(
-    *splats, viewmat=vm, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
-)[0])(viewmats)  # (B, H, W, 3)
+frames = jax.vmap(
+    lambda vm: splax.render(
+        *splats, viewmat=vm, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy)
+    )[0]
+)(viewmats)  # (B, H, W, 3)
 ```
 
 Take gradients through the renderer with `jax.grad`. `splax.render` differentiates with respect to means, log scales, quats, SH colors, logit opacities, the camera pose, and per-object rigid transforms.
@@ -53,12 +54,21 @@ Take gradients through the renderer with `jax.grad`. `splax.render` differentiat
 ```python
 import jax
 
+
 def loss(means, log_scales, quats, sh_colors, logit_opacities):
     img, _ = splax.render(
-        means, log_scales, quats, sh_colors, logit_opacities,
-        viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy),
+        means,
+        log_scales,
+        quats,
+        sh_colors,
+        logit_opacities,
+        viewmat=viewmat,
+        background=jnp.ones(3),
+        img_shape=(H, W),
+        f=(fx, fy),
     )
     return jnp.mean((img - target) ** 2)
+
 
 grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splats)
 ```
@@ -102,7 +112,7 @@ Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the paper
 
 ## Installation
 
-Requires an NVIDIA GPU and a CUDA-enabled JAX (`jax[cuda12]`, pulled in as a dependency).
+Requires an NVIDIA GPU and a CUDA-enabled JAX (`jax[cuda]`, pulled in as a dependency).
 
 ```sh
 uv pip install "git+https://github.com/learnsyslab/splax"

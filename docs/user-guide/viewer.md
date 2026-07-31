@@ -1,6 +1,6 @@
 # Viewer
 
-`splax.viewer` serves splats to a web client using [viser](https://viser.studio). It requires the optional `viser` dependency:
+[`splax.viewer`][splax.viewer] serves splats to a web client using [viser](https://viser.studio). It requires the optional `viser` dependency:
 
 ```bash
 pip install splax[viewer]
@@ -10,7 +10,7 @@ pip install splax[viewer]
 ## Rigid objects
 
 The viewer holds a set of named rigid objects, each with its own gaussians and world
-pose. `add_splats` uploads an object's gaussians once and `update_pose` moves it
+pose. [`add_splats`][splax.viewer.Viewer.add_splats] uploads an object's gaussians once and [`update_pose`][splax.viewer.Viewer.update_pose] moves it
 afterwards.
 
 ```python
@@ -25,8 +25,8 @@ for pos, wxyz in trajectory:  # e.g. from a simulator
     viewer.update_pose("drone", pos, wxyz)
 ```
 
-Open `http://localhost:8080` in a browser to view the scene. `remove` deletes an
-object and `close` stops the server. The server runs in a background thread, so keep
+Open `http://localhost:8080` in a browser to view the scene. [`remove`][splax.viewer.Viewer.remove] deletes an
+object and [`close`][splax.viewer.Viewer.close] stops the server. The server runs in a background thread, so keep
 the process alive for as long as the viewer should stay reachable.
 
 ## Beyond splats

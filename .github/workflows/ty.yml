@@ -15,5 +15,5 @@ jobs:
           environments: lint
           activate-environment: false
           locked: true
-      # Type check the library with the lint Pixi environment.
+      # Type check the library with the lint pixi environment.
       - run: pixi run -e lint ty

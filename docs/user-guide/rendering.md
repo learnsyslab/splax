@@ -1,7 +1,7 @@
 # Rendering
 
-`splax.render` is the rendering entry point. The call returns an `(image, alpha)` pair,
-where `image` is the `(H, W, 3)` render and `alpha` the `(H, W)` accumulated coverage.
+[`splax.render`][splax.render] is the rendering entry point. The call returns an `(image, alpha)`
+pair, where `image` is the `(H, W, 3)` render and `alpha` the `(H, W)` accumulated coverage.
 Gradients are covered under [Training](training.md).
 
 ```python
@@ -20,7 +20,7 @@ img, _ = splax.render(
 
 ## Inputs
 
-`render` takes unconstrained parameters, so an optimizer can update them directly.
+[`render`][splax.render] takes unconstrained parameters, so an optimizer can update them directly.
 
 | Argument | Shape | Meaning |
 |---|---|---|
@@ -30,45 +30,43 @@ img, _ = splax.render(
 | `sh_colors` | `(N, 3)` | Degree-0 SH color coefficients, `0` is mid grey |
 | `logit_opacities` | `(N,)` | Opacity logits |
 
-`splax.io.apply_activations` and `splax.io.invert_activations` convert to and from
-linear scales, RGB colors, and `[0, 1]` opacities, see [IO](io.md#activated-arrays).
+[`splax.io.apply_activations`][splax.io.apply_activations] and
+[`splax.io.invert_activations`][splax.io.invert_activations] convert to and from linear scales, RGB
+colors, and `[0, 1]` opacities, see [IO](io.md#activated-arrays).
 
 ## Camera conventions
 
-`viewmat` is a `(4, 4)` world-to-camera matrix in the OpenCV convention (+z
-forward, +y down, +x right). This is what COLMAP stores directly. NeRF and
-OpenGL poses (-z forward) must be converted first, which
-`splax.utils.nerf_camera` does.
+`viewmat` is a `(4, 4)` world-to-camera matrix in the OpenCV convention (+z forward, +y down, +x
+right), consistent with COLMAP's output files. NeRF and OpenGL poses (-z forward) must be converted
+ first with [`splax.utils.nerf_camera`][splax.utils.nerf_camera].
 
-`f` is the focal length `(fx, fy)` in pixels and `c` is the principal point
-`(cx, cy)` in pixels, where the optical axis meets the image plane. It defaults
-to the image center `(W / 2, H / 2)`, which is exact for synthetic cameras.
-Calibrated real cameras (COLMAP intrinsics) provide their own off-center values.
-`img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian scale, and
-`clip_thresh` is the near-plane depth cutoff.
+`f` is the focal length `(fx, fy)` in pixels and `c` is the principal point `(cx, cy)` in pixels,
+where the optical axis meets the image plane. It defaults to the image center `(W / 2, H / 2)`.
+Calibrated real cameras, e.g. with COLMAP intrinsics, provide their own off-center values.
+`img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian scale, and `clip_thresh` is the
+near-plane depth cutoff.
 
 `img_shape`, `f`, and `c` size the kernel launch, so they are static under `jax.jit`, see
 [Jitting](#jitting).
 
 ## Backgrounds
 
-`background` is a 3-dimensional RGB color composited behind the splat where
-transmittance remains. It is a constant and is not differentiated.
+`background` is a 3-dimensional RGB color composited behind the splat where transmittance remains.
+It is a constant and is not differentiated.
 
 ## Antialiased mode
 
-`antialiased=True` applies the Mip-Splatting opacity compensation, cancelling the
-area inflation that thin gaussians gain from the projection. Use the same setting at
-inference that a model was trained with.
+`antialiased=True` applies the
+[Mip-Splatting opacity compensation](https://arxiv.org/abs/2311.16493), cancelling the area
+inflation that thin gaussians gain from the projection. Use the same setting at inference that a
+model was trained with.
 
 ## Dynamic scene composition
 
-Composed scenes can move whole sections of gaussians with rigid transforms, for
-example a drone splat concatenated onto a room splat. `gaussian_transforms` is a
-`(K, 4, 4)` stack of world-space transforms and `gaussian_slices` the `K`
-matching non-overlapping `(start, stop)` index ranges. The gaussians in slice `k`
-move by `gaussian_transforms[k]` and everything outside the slices stays static.
-The splat is never copied.
+Composed scenes can move whole sections of gaussians with rigid transforms to immitate moving
+objects without copying the splats. `gaussian_transforms` is a `(K, 4, 4)` stack of world-space
+transforms and `gaussian_slices` the `K` matching, non-overlapping `(start, stop)` index ranges. The
+gaussians in slice `k` move by `gaussian_transforms[k]`. Everything outside the slices stays static.
 
 ```python
 img, _ = splax.render(
@@ -86,8 +84,8 @@ img, _ = splax.render(
 )
 ```
 
-Batched dynamics work through `jax.vmap` over the transform stack. Every batch
-element renders the same shared splat with its objects at different poses.
+Batched dynamics work through `jax.vmap` over the transform stack. Every batch element renders the
+same shared splat with its objects at different poses.
 
 ```python
 move = partial(
@@ -106,15 +104,13 @@ move = partial(
 imgs, _ = jax.vmap(move)(gaussian_transforms=pose_batch)  # (B, K, 4, 4) -> (B, H, W, 3)
 ```
 
-Omitting both arguments renders the splat as one static scene. The transforms are
-differentiable, see
-[object pose gradients](training.md#camera-pose-and-object-pose-gradients).
+Omitting both arguments renders the splat as one static scene. The transforms are differentiable,
+see [object pose gradients](training.md#camera-pose-and-object-pose-gradients).
 
 ## Jitting
 
-`img_shape`, `f`, and `c` size the kernel launch and `gaussian_slices` indexes it, so all
-four are static. Under `jax.jit` either declare them or close over them, otherwise the call
-raises.
+`img_shape`, `f`, and `c` size the kernel launch and `gaussian_slices` indexes it, so all four are
+static. Under `jax.jit` either declare them or close over them, otherwise the call raises.
 
 ```python
 render_jit = jax.jit(splax.render, static_argnames=("img_shape", "f", "c"))
@@ -131,8 +127,8 @@ img, _ = render_jit(
 )
 ```
 
-Closing over them with `functools.partial` leaves the batched argument as the only input,
-which is what `jax.vmap` maps over. Keyword arguments map along their leading axis.
+Closing over them with `functools.partial` leaves the batched argument as the only input, which is
+what `jax.vmap` maps over. Keyword arguments map along their leading axis.
 
 ```python
 render_at = partial(
@@ -149,21 +145,27 @@ render_at = partial(
 imgs, _ = jax.jit(jax.vmap(render_at))(viewmat=viewmats)  # (B, H, W, 3)
 ```
 
-A static value is baked into the compiled kernel, so a resolution sweep or a change of the
-slice layout compiles once per distinct value.
+A static value is baked into the compiled kernel, so a resolution sweep or a change of the slice
+layout compiles once per distinct value.
 
 ## Low-level primitives
 
-`splax.render` composes two primitives that are public in their own right. They
-consume activated arrays rather than parameters.
+[`splax.render`][splax.render] composes two primitives that are public in their own right.
 
-- `splax.project` maps gaussians to screen-space `(xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit)`.
-- `splax.rasterize` blends the projected gaussians into a `(H, W, 3)` image and its `(H, W)` alpha.
-- `splax.rasterize_depth` blends into a `(H, W, 4)` image whose fourth channel is the expected depth, plus the same `(H, W)` alpha.
+..Warning:: All low-level primitives consume **activated** arrays, not unconstrained parameters. Use
+[`splax.io.apply_activations`][splax.io.apply_activations]/
+[`splax.io.invert_activations`][splax.io.invert_activations] to convert the parameters.
 
-Both take the opacities `splax.project` ran on. The tile assignment is derived from
-them, so `cum_tiles_hit` only describes the rasterization that uses the same array. They
-take `antialiased` as well, so the compensation needs no separate call.
+- [`splax.project`][splax.project] maps gaussians to the 2D screen-space.
+- [`splax.rasterize`][splax.rasterize] blends the projected gaussians into a `(H, W, 3)` image and
+  its `(H, W)` alpha.
+- [`splax.rasterize_depth`][splax.rasterize_depth] blends into a `(H, W, 4)` image whose fourth
+  channel is the expected depth, plus the same `(H, W)` alpha.
 
-`splax.clear_cache` releases the scratch memory the backend holds between renders,
-for example before switching to a very different workload size.
+Both rasterization primitives must be passed the same opacities [`splax.project`][splax.project] ran
+on. Failing to do so will result in crashes or incorrect renderings. Rasterization takes an
+`antialiased` keyword, so the compensation needs no separate call.
+
+splax maintains a scratch memory pool for intermediate arrays used by the backend.
+[`splax.clear_cache`][splax.clear_cache] releases this memory, for example before switching to a
+different workload size.

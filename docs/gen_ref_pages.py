@@ -1,9 +1,8 @@
 """Generate the API reference pages and navigation.
 
-Run by the mkdocs-gen-files plugin during ``properdocs build`` / ``properdocs serve``. It
-is not meant to be run or imported directly. Only the public modules are
-documented: private modules (``_project``, ``_rasterize``) and ``distillation``
-are skipped.
+Run by the mkdocs-gen-files plugin during ``properdocs build`` / ``properdocs serve``. It is not
+meant to be run or imported directly. Only the public modules are documented: private modules are
+skipped.
 """
 
 from pathlib import Path
@@ -13,9 +12,8 @@ try:
 except ImportError:
     pass  # not running in a docs environment, nothing to generate
 else:
-    # Modules kept out of the reference: private internals and the unstable
-    # distillation module.
-    SKIP_STEMS = {"distillation", "__main__", "__pycache__"}
+    # Modules kept out of the reference: private internals
+    SKIP_STEMS = {"__main__", "__pycache__"}
 
     def skip(stem: str) -> bool:
         """Return True for modules excluded from generated docs."""

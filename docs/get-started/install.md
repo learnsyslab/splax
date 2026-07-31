@@ -2,7 +2,8 @@
 
 ## Requirements
 
-splax needs an NVIDIA GPU and a CUDA-enabled JAX. The `jax[cuda12]` wheel is pulled in as a dependency, so no system CUDA toolchain is required. Python 3.12 is required.
+splax needs an NVIDIA GPU and a CUDA-enabled JAX. The `jax[cuda]` wheel is pulled in as a
+dependency, so no system CUDA toolchain is required. Python 3.11 is required.
 
 ## Install with pip
 
@@ -18,7 +19,8 @@ python -c "import splax; print(splax.__all__)"
 
 ## Developer setup
 
-[pixi](https://pixi.sh/) installs splax editable with the developer tooling into a managed environment.
+[pixi](https://pixi.sh/) installs splax editable with the developer tooling into a managed
+environment.
 
 === "pixi"
 
@@ -36,11 +38,12 @@ python -c "import splax; print(splax.__all__)"
     pixi shell -e docs
     ```
 
-Use the Pixi environments above for tooling and docs tasks.
+Use the pixi environments above for tooling and docs tasks.
 
 ## Building the documentation
 
-The docs are built with [ProperDocs](https://properdocs.org/) and the Material theme. Set `JAX_PLATFORMS=cpu` so the API reference imports splax without a GPU:
+The docs are built with [ProperDocs](https://properdocs.org/) and the Material theme. Set
+`JAX_PLATFORMS=cpu` so the API reference imports splax without a GPU:
 
 ```bash
 JAX_PLATFORMS=cpu pixi run -e docs docs-build
