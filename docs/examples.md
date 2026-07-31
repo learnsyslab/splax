@@ -9,7 +9,8 @@ script works for any scene in the dataset without per-scene metadata.
 python examples/render_scene.py --scene lego --res 800
 ```
 
-```python
+<!-- notest: the example is run by tests/integration/test_examples.py -->
+```{ .python notest }
 --8<--
 examples/render_scene.py
 --8<--
@@ -26,7 +27,8 @@ transform, writing a GIF of the orbit. Both copies share every kernel launch, an
 python examples/compose_splats.py --frames 60
 ```
 
-```python
+<!-- notest: the example is run by tests/integration/test_examples.py -->
+```{ .python notest }
 --8<--
 examples/compose_splats.py
 --8<--
@@ -41,7 +43,8 @@ re-uploading its gaussians. See [Viewer](user-guide/viewer.md).
 python examples/viewer_demo.py
 ```
 
-```python
+<!-- notest: the example is run by tests/integration/test_examples.py -->
+```{ .python notest }
 --8<--
 examples/viewer_demo.py
 --8<--

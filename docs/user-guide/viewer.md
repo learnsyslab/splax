@@ -13,7 +13,8 @@ The viewer holds a set of named rigid objects, each with its own gaussians and w
 pose. [`add_splats`][splax.viewer.Viewer.add_splats] uploads an object's gaussians once and [`update_pose`][splax.viewer.Viewer.update_pose] moves it
 afterwards.
 
-```python
+<!-- notest: serves a viewer and needs a simulator trajectory -->
+```{ .python notest }
 import splax
 from splax.viewer import Viewer
 

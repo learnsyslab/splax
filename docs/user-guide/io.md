@@ -7,10 +7,19 @@ parameters described under [Rendering](rendering.md#inputs).
 
 [`splax.io.load_ply`][splax.io.load_ply] reads the vertex fields without additional processing and
 returns `(means, log_scales, quats, sh_colors, logit_opacities)` as float32 JAX arrays with shapes
-`(N, 3)`, `(N, 3)`, `(N, 4)`, `(N, 3)`, `(N,)`.
+`(N, 3)`, `(N, 3)`, `(N, 4)`, `(N, 3)`, `(N,)`. It takes a path, so remote splats go through
+[`splax.io.fetch`][splax.io.fetch] first, which downloads into a local cache and revalidates
+it against the remote on later calls.
 
 ```python
-splats = splax.io.load_ply("scene.ply")
+import jax.numpy as jnp
+import splax
+
+SCENE = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main/scenes/lego.ply"
+splats = splax.io.load_ply(splax.io.fetch(SCENE))
+means, log_scales, quats, sh_colors, logit_opacities = splats
+H, W, fx, fy = 400, 400, 400.0, 400.0
+viewmat = splax.utils.look_at(jnp.array((0.0, -3.0, 1.0)), jnp.zeros(3), up=(0.0, 0.0, 1.0))
 img, _ = splax.render(
     *splats, viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy)
 )
@@ -29,7 +38,8 @@ img, _ = splax.render(
 [`splax.io.write_ply`][splax.io.write_ply] stores the same five arrays without additional
 processing.
 
-```python
+<!-- notest: writes a .ply to disk -->
+```{ .python notest }
 splax.io.write_ply("out.ply", *splats)
 ```
 
@@ -41,7 +51,7 @@ written as zeros and the higher-order SH field `f_rest` is omitted.
 [`splax.project`][splax.project] and [`splax.rasterize`][splax.rasterize] consume activated arrays,
 the linear scales, RGB colors, and `[0, 1]` opacities of [Rendering](rendering.md#inputs).
 
-```python
+```{ .python continuation }
 scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
 log_scales, sh_colors, logit_opacities = splax.io.invert_activations(scales, colors, opacities)
 ```

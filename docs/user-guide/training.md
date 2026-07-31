@@ -5,7 +5,25 @@ means, log scales, quats, SH colors, and logit opacities. The viewmat, backgroun
 transforms are constants by default. Both returned outputs, the image and the alpha, are
 differentiable.
 
+We again first have to load a splat and prepare a view matrix:
+
 ```python
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import splax
+
+SCENE = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main/scenes/lego.ply"
+splats = splax.io.load_ply(splax.io.fetch(SCENE))
+means, log_scales, quats, sh_colors, logit_opacities = splats
+H, W, fx, fy = 400, 400, 400.0, 400.0
+viewmat = splax.utils.look_at(jnp.array((0.0, -3.0, 1.0)), jnp.zeros(3), up=(0.0, 0.0, 1.0))
+target = jnp.zeros((H, W, 3))  # your ground truth image
+bg, cam = jnp.ones(3), {"img_shape": (H, W), "f": (fx, fy)}
+```
+
+```{ .python continuation }
 def loss(means, log_scales, quats, sh_colors, logit_opacities):
     img, _ = splax.render(
         means,
@@ -41,10 +59,10 @@ are differentiable too, so object poses can be optimized directly.
 Because `viewmat` is a keyword argument of [`render`][splax.render], take its gradient by closing
 over it in the differentiated position, for example:
 
-```python
+```{ .python continuation }
 def loss(viewmat):
     img, _ = splax.render(*splats, viewmat=viewmat, background=bg, **cam)
-    return photometric(img, target)
+    return jnp.mean((img - target) ** 2)
 
 
 pose_grad = jax.grad(loss)(viewmat)
@@ -66,7 +84,7 @@ Normalizing by coverage means a pixel grazed by one faint gaussian still reports
 depth, and an uncovered pixel reads `0`. Mask with `alpha` before supervising on depth or exporting
 a point cloud. Do not scale the depth by `alpha`, the values are already normalized.
 
-```python
+```{ .python continuation }
 rgbd, alpha = splax.render(
     means,
     log_scales,

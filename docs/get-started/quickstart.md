@@ -15,7 +15,10 @@ unconstrained as stored in a `.ply`, and an optimizer can update them without co
 import jax.numpy as jnp
 import splax
 
-splats = splax.io.load_ply("scene.ply")  # means, log_scales, quats, sh_colors, logit_opacities
+SCENE = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main/scenes/lego.ply"
+splats = splax.io.load_ply(splax.io.fetch(SCENE))
+H, W, fx, fy = 400, 400, 400.0, 400.0
+viewmat = splax.utils.look_at(jnp.array((0.0, -3.0, 1.0)), jnp.zeros(3), up=(0.0, 0.0, 1.0))
 img, _ = splax.render(
     *splats, viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy)
 )  # (H, W, 3)
@@ -28,9 +31,12 @@ focal length `(fx, fy)` and `c` is the principal point `(cx, cy)`.
 
 `jax.vmap` renders a stack of view matrices in one batch.
 
-```python
+```{ .python continuation }
 import jax
 from functools import partial
+
+eyes = jnp.array([(0.0, -3.0, 1.0), (3.0, 0.0, 1.0)])
+viewmats = splax.utils.look_at(eyes, jnp.zeros(3), up=(0.0, 0.0, 1.0))
 
 render_at = partial(splax.render, *splats, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy))
 frames, _ = jax.vmap(render_at)(viewmat=viewmats)  # (B, H, W, 3)
@@ -40,8 +46,10 @@ frames, _ = jax.vmap(render_at)(viewmat=viewmats)  # (B, H, W, 3)
 
 [`splax.render`][splax.render] differentiates with respect to all five parameter arrays.
 
-```python
+```{ .python continuation }
 import jax
+
+target = jnp.zeros((H, W, 3))  # your ground truth image
 
 
 def loss(means, log_scales, quats, sh_colors, logit_opacities):

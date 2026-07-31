@@ -5,10 +5,28 @@ Python, for both the forward and the backward pass.
 
 ## Batched inference
 
+We first prepare a batch of view matrices:
+
+```python
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import splax
+
+SCENE = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main/scenes/lego.ply"
+splats = splax.io.load_ply(splax.io.fetch(SCENE))
+means, log_scales, quats, sh_colors, logit_opacities = splats
+H, W, fx, fy = 400, 400, 400.0, 400.0
+viewmat = splax.utils.look_at(jnp.array((0.0, -3.0, 1.0)), jnp.zeros(3), up=(0.0, 0.0, 1.0))
+eyes = jnp.array([(0.0, -3.0, 1.0), (3.0, 0.0, 1.0)])
+viewmats = splax.utils.look_at(eyes, jnp.zeros(3), up=(0.0, 0.0, 1.0))
+```
+
 Wrap [`splax.render`][splax.render] in `jax.vmap` over any batched argument. Mapping over a stack of
 view matrices renders one image per camera.
 
-```python
+```{ .python continuation }
 render_at = partial(
     splax.render,
     means,

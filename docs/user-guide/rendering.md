@@ -4,7 +4,28 @@
 pair, where `image` is the `(H, W, 3)` render and `alpha` the `(H, W)` accumulated coverage.
 Gradients are covered under [Training](training.md).
 
+We first load a splat and prepare a view matrix:
+
 ```python
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import splax
+
+SCENE = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main/scenes/lego.ply"
+splats = splax.io.load_ply(splax.io.fetch(SCENE))
+means, log_scales, quats, sh_colors, logit_opacities = splats
+H, W, fx, fy = 400, 400, 400.0, 400.0
+viewmat = splax.utils.look_at(jnp.array((0.0, -3.0, 1.0)), jnp.zeros(3), up=(0.0, 0.0, 1.0))
+eyes = jnp.array([(0.0, -3.0, 1.0), (3.0, 0.0, 1.0)])
+viewmats = splax.utils.look_at(eyes, jnp.zeros(3), up=(0.0, 0.0, 1.0))
+slices = ((100, 1000), (1000, 1500))
+poses = jnp.broadcast_to(jnp.eye(4), (len(slices), 4, 4))
+pose_batch = jnp.broadcast_to(poses, (len(viewmats), len(slices), 4, 4))
+```
+
+```{ .python continuation }
 img, _ = splax.render(
     means,
     log_scales,
@@ -68,7 +89,7 @@ objects without copying the splats. `gaussian_transforms` is a `(K, 4, 4)` stack
 transforms and `gaussian_slices` the `K` matching, non-overlapping `(start, stop)` index ranges. The
 gaussians in slice `k` move by `gaussian_transforms[k]`. Everything outside the slices stays static.
 
-```python
+```{ .python continuation }
 img, _ = splax.render(
     means,
     log_scales,
@@ -87,7 +108,7 @@ img, _ = splax.render(
 Batched dynamics work through `jax.vmap` over the transform stack. Every batch element renders the
 same shared splat with its objects at different poses.
 
-```python
+```{ .python continuation }
 move = partial(
     splax.render,
     means,
@@ -115,7 +136,7 @@ see [object pose gradients](training.md#camera-pose-and-object-pose-gradients).
 `img_shape`, `f`, and `c` size the kernel launch and `gaussian_slices` indexes it, so all four are
 static. Under `jax.jit` either declare them or close over them, otherwise the call raises.
 
-```python
+```{ .python continuation }
 render_jit = jax.jit(splax.render, static_argnames=("img_shape", "f", "c"))
 img, _ = render_jit(
     means,
@@ -133,7 +154,7 @@ img, _ = render_jit(
 Closing over them with `functools.partial` leaves the batched argument as the only input, which is
 what `jax.vmap` maps over. Keyword arguments map along their leading axis.
 
-```python
+```{ .python continuation }
 render_at = partial(
     splax.render,
     means,

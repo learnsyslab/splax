@@ -16,7 +16,10 @@ and `jax.jit`. No system CUDA toolchain is required.
 import jax.numpy as jnp
 import splax
 
-splats = splax.io.load_ply("scene.ply")  # means, log_scales, quats, sh_colors, logit_opacities
+SCENE = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main/scenes/lego.ply"
+splats = splax.io.load_ply(splax.io.fetch(SCENE))
+H, W, fx, fy = 400, 400, 400.0, 400.0
+viewmat = splax.utils.look_at(jnp.array((0.0, -3.0, 1.0)), jnp.zeros(3), up=(0.0, 0.0, 1.0))
 img, _ = splax.render(
     *splats, viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W), f=(fx, fy)
 )  # (H, W, 3)
