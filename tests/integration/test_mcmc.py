@@ -1,16 +1,9 @@
-"""Parity of ``splax.mcmc.compute_relocation`` against gsplat's CUDA relocation kernel.
-
-Both implement Eq. 9 of the MCMC paper. They agree to a tolerance rather than exactly, bounded by
-gsplat's cancellation error in ``1 - (1 - o) ** (1 / n)``, which grows as opacity falls and
-multiplicity rises. Ratios are integral, as both callers produce, and would diverge otherwise since
-splax rounds where gsplat truncates.
-"""
+"""Test the MCMC relocation against gsplat's relocation kernel."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import jax
 import numpy as np
 import pytest
 
@@ -33,11 +26,11 @@ def test_compute_relocation_vs_gsplat(gsplat_shim: ModuleType):
     ratios = rng.integers(1, 12, n).astype(np.float32)
     binoms = mcmc.make_binoms(N_MAX)
 
-    new_opacities, new_scales = jax.jit(mcmc.compute_relocation)(opacities, scales, ratios, binoms)
+    new_opacities, new_scales = mcmc.compute_relocation(opacities, scales, ratios, binoms)
     ref_opacities, ref_scales = gsplat_shim.relocation(opacities, scales, ratios, binoms)
 
-    np.testing.assert_allclose(np.asarray(new_opacities), ref_opacities, rtol=2e-4, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(new_scales), ref_scales, rtol=2e-4, atol=1e-6)
+    np.testing.assert_allclose(new_opacities, ref_opacities, rtol=2e-4, atol=1e-6)
+    np.testing.assert_allclose(new_scales, ref_scales, rtol=2e-4, atol=1e-6)
 
 
 def test_compute_relocation_saturates_at_n_max(gsplat_shim: ModuleType):
@@ -49,8 +42,8 @@ def test_compute_relocation_saturates_at_n_max(gsplat_shim: ModuleType):
     ratios = np.full(n, float(N_MAX + 10), np.float32)
     binoms = mcmc.make_binoms(N_MAX)
 
-    new_opacities, new_scales = jax.jit(mcmc.compute_relocation)(opacities, scales, ratios, binoms)
+    new_opacities, new_scales = mcmc.compute_relocation(opacities, scales, ratios, binoms)
     ref_opacities, ref_scales = gsplat_shim.relocation(opacities, scales, ratios, binoms)
 
-    np.testing.assert_allclose(np.asarray(new_opacities), ref_opacities, rtol=2e-4, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(new_scales), ref_scales, rtol=2e-4, atol=1e-6)
+    np.testing.assert_allclose(new_opacities, ref_opacities, rtol=2e-4, atol=1e-6)
+    np.testing.assert_allclose(new_scales, ref_scales, rtol=2e-4, atol=1e-6)
