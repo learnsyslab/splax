@@ -161,5 +161,9 @@ consume activated arrays rather than parameters.
 - `splax.rasterize` blends the projected gaussians into a `(H, W, 3)` image and its `(H, W)` alpha.
 - `splax.rasterize_depth` blends into a `(H, W, 4)` image whose fourth channel is the expected depth, plus the same `(H, W)` alpha.
 
+Both take the opacities `splax.project` ran on. The tile assignment is derived from
+them, so `cum_tiles_hit` only describes the rasterization that uses the same array. They
+take `antialiased` as well, so the compensation needs no separate call.
+
 `splax.clear_cache` releases the scratch memory the backend holds between renders,
 for example before switching to a very different workload size.

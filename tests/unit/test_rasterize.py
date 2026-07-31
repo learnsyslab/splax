@@ -39,12 +39,6 @@ def _project_geoms(
     return xys, depths, radii, conics, cum
 
 
-def _appearances(colors: jax.Array, opacities: jax.Array) -> tuple[jax.Array, jax.Array]:
-    """Scale one splat's colors and opacities into the B appearances of a shared projection."""
-    factors = 0.4 + 0.6 * jnp.arange(B) / (B - 1)
-    return colors * factors[:, None, None], opacities * factors[:, None]
-
-
 # region regular invocation
 
 
@@ -83,6 +77,22 @@ def test_rasterize_alpha():
     # White gaussians over a black background composite to the coverage itself.
     coverage = jnp.broadcast_to(alpha[..., None], (H, W, 3))
     np.testing.assert_allclose(img, coverage, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("rasterize", [splax.rasterize, splax.rasterize_depth])
+def test_rasterize_antialiased_dims_the_coverage(
+    rasterize: Callable[..., tuple[jax.Array, jax.Array]],
+):
+    """Scale the coverage down everywhere by the Mip-Splatting compensation."""
+    n, H, W = 4000, 96, 96
+    colors, opacities, background, *geoms = projected(n, H, W, seed=9)
+    rasterize = jax.jit(partial(rasterize, img_shape=(H, W)), static_argnames="antialiased")
+
+    _, alpha = rasterize(colors, opacities, background, *geoms)
+    _, compensated = rasterize(colors, opacities, background, *geoms, antialiased=True)
+    # The compensation is bounded by 1, so it can only ever take coverage away.
+    assert (compensated <= alpha + 1e-6).all(), "the compensation raised the coverage"
+    assert compensated.max() < alpha.max(), "the compensation left the coverage untouched"
 
 
 def test_rasterize_depth():
@@ -182,15 +192,16 @@ def test_rasterize_broadcast_geometry(
     n, H, W = 4000, 96, 96
     means, scales, quats, colors, opacities, background = scene(n, seed=3, dense=True)
     geoms = _project_geoms(means, scales, quats, opacities, VIEWMAT, H=H, W=W)
-    batch_colors, batch_opacities = _appearances(colors, opacities)
-    rasterize = jax.jit(partial(rasterize, img_shape=(H, W), map_opacities=opacities))
+    batch_colors = colors * jnp.linspace(0.4, 1.0, B)[:, None, None]
+    rasterize = jax.jit(partial(rasterize, img_shape=(H, W)))
 
-    broadcast = jax.jit(jax.vmap(rasterize, in_axes=(0, 0, None, None, None, None, None, None)))
-    img, alpha = broadcast(batch_colors, batch_opacities, background, *geoms)
-    refs = [rasterize(c, o, background, *geoms) for c, o in zip(batch_colors, batch_opacities)]
+    broadcast = jax.jit(jax.vmap(rasterize, in_axes=(0, None, None, None, None, None, None, None)))
+    img, alpha = broadcast(batch_colors, opacities, background, *geoms)
+    refs = [rasterize(c, opacities, background, *geoms) for c in batch_colors]
     r_img, r_alpha = (jnp.stack(outs) for outs in zip(*refs))
     assert img.shape == (B, H, W, channels) and alpha.shape == (B, H, W)
-    assert alpha.std(axis=0).max() > 0.0, "the batch renders the same alpha B times"
+    assert img.std(axis=0).max() > 0.0, "the batch renders the same image B times"
+    assert (alpha == alpha[0]).all(), "the appearance changed the coverage"
     np.testing.assert_array_equal(img, r_img)
     np.testing.assert_array_equal(alpha, r_alpha)
 
@@ -403,13 +414,13 @@ def test_rasterize_grad_broadcast_geometry():
     xys, depths, radii, conics, cum = _project_geoms(
         means, scales, quats, opacities, VIEWMAT, H=H, W=W
     )
-    batch_colors, batch_opacities = _appearances(colors, opacities)
-    rasterize = jax.jit(partial(splax.rasterize, img_shape=(H, W), map_opacities=opacities))
+    batch_colors = colors * jnp.linspace(0.4, 1.0, B)[:, None, None]
+    rasterize = jax.jit(partial(splax.rasterize, img_shape=(H, W)))
     w = jax.random.uniform(jax.random.key(13), (B, H, W, 3))
     wa = jax.random.uniform(jax.random.key(14), (B, H, W))
 
     def loss(c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array) -> jax.Array:
-        imgs, alphas = jax.vmap(rasterize, in_axes=(0, 0, None, None, None, None, None, None))(
+        imgs, alphas = jax.vmap(rasterize, in_axes=(0, None, None, None, None, None, None, None))(
             c, o, background, xy, depths, radii, cn, cum
         )
         return jnp.sum(w * imgs) + jnp.sum(wa * alphas)
@@ -420,19 +431,18 @@ def test_rasterize_grad_broadcast_geometry():
         img, alpha = rasterize(c, o, background, xy, depths, radii, cn, cum)
         return jnp.sum(wi * img) + jnp.sum(wai * alpha)
 
-    args = (batch_colors, batch_opacities, xys, conics)
+    args = (batch_colors, opacities, xys, conics)
     grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
     g_colors, g_opacities, g_xys, g_conics = grads
     view_grad = jax.jit(jax.grad(view_loss, argnums=(0, 1, 2, 3)))
     per_view = [
-        view_grad(c, o, xys, conics, wi, wai)
-        for c, o, wi, wai in zip(batch_colors, batch_opacities, w, wa)
+        view_grad(c, opacities, xys, conics, wi, wai) for c, wi, wai in zip(batch_colors, w, wa)
     ]
     r_colors, r_opacities, r_xys, r_conics = (jnp.stack(gs) for gs in zip(*per_view))
     assert all(jnp.linalg.norm(g) > 0.0 for g in grads), "the rasterize drops a gradient path"
     # Each appearance keeps its own gradient, the shared projection collects the sum over the batch.
     np.testing.assert_allclose(g_colors, r_colors, rtol=2e-3, atol=1e-4)
-    np.testing.assert_allclose(g_opacities, r_opacities, rtol=2e-3, atol=1e-4)
+    np.testing.assert_allclose(g_opacities, r_opacities.sum(axis=0), rtol=2e-3, atol=1e-4)
     np.testing.assert_allclose(g_xys, r_xys.sum(axis=0), rtol=2e-3, atol=1e-4)
     np.testing.assert_allclose(g_conics, r_conics.sum(axis=0), rtol=2e-3, atol=1e-4)
 
@@ -444,14 +454,12 @@ def test_rasterize_depth_grad_broadcast_geometry():
     xys, depths, radii, conics, cum = _project_geoms(
         means, scales, quats, opacities, VIEWMAT, H=H, W=W
     )
-    batch_colors, batch_opacities = _appearances(colors, opacities)
-    rasterize_depth = jax.jit(
-        partial(splax.rasterize_depth, img_shape=(H, W), map_opacities=opacities)
-    )
+    batch_colors = colors * jnp.linspace(0.4, 1.0, B)[:, None, None]
+    rasterize_depth = jax.jit(partial(splax.rasterize_depth, img_shape=(H, W)))
     w = jax.random.uniform(jax.random.key(15), (B, H, W, 4))
 
     def loss(c: jax.Array, o: jax.Array, xy: jax.Array, cn: jax.Array, d: jax.Array) -> jax.Array:
-        imgs, _ = jax.vmap(rasterize_depth, in_axes=(0, 0, None, None, None, None, None, None))(
+        imgs, _ = jax.vmap(rasterize_depth, in_axes=(0, None, None, None, None, None, None, None))(
             c, o, background, xy, d, radii, cn, cum
         )
         return jnp.sum(w * imgs)
@@ -462,18 +470,15 @@ def test_rasterize_depth_grad_broadcast_geometry():
         img, _ = rasterize_depth(c, o, background, xy, d, radii, cn, cum)
         return jnp.sum(wi * img)
 
-    args = (batch_colors, batch_opacities, xys, conics, depths)
+    args = (batch_colors, opacities, xys, conics, depths)
     grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4)))(*args)
     g_colors, g_opacities, g_xys, g_conics, g_depths = grads
     view_grad = jax.jit(jax.grad(view_loss, argnums=(0, 1, 2, 3, 4)))
-    per_view = [
-        view_grad(c, o, xys, conics, depths, wi)
-        for c, o, wi in zip(batch_colors, batch_opacities, w)
-    ]
+    per_view = [view_grad(c, opacities, xys, conics, depths, wi) for c, wi in zip(batch_colors, w)]
     r_colors, r_opacities, r_xys, r_conics, r_depths = (jnp.stack(gs) for gs in zip(*per_view))
     assert all(jnp.linalg.norm(g) > 0.0 for g in grads), "the rasterize_depth_depth drops a path"
     np.testing.assert_allclose(g_colors, r_colors, rtol=2e-3, atol=1e-4)
-    np.testing.assert_allclose(g_opacities, r_opacities, rtol=2e-3, atol=1e-4)
+    np.testing.assert_allclose(g_opacities, r_opacities.sum(axis=0), rtol=2e-3, atol=1e-4)
     np.testing.assert_allclose(g_xys, r_xys.sum(axis=0), rtol=2e-3, atol=1e-4)
     np.testing.assert_allclose(g_conics, r_conics.sum(axis=0), rtol=2e-3, atol=1e-4)
     np.testing.assert_allclose(g_depths, r_depths.sum(axis=0), rtol=2e-3, atol=1e-4)

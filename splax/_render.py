@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from splax._project import opacity_compensation, project, transform_ids
+from splax._project import project, transform_ids
 from splax._rasterize import rasterize, rasterize_depth
 from splax.io import apply_activations
 
@@ -111,12 +111,7 @@ def render(
         transform_ids=tf_ids,
     )
 
-    blend_opacities = opacities
-    map_opacities = None
-    if antialiased:
-        blend_opacities = opacities * opacity_compensation(conics, radii)
-        map_opacities = opacities  # the tile intersection stays on the raw opacity
-
-    inputs = (colors, blend_opacities, background, xys, depths, radii, conics, cum_tiles_hit)
-    blend = rasterize_depth if render_depth else rasterize
-    return blend(*inputs, img_shape=img_shape, map_opacities=map_opacities)
+    inputs = (colors, opacities, background, xys, depths, radii, conics, cum_tiles_hit)
+    if render_depth:
+        return rasterize_depth(*inputs, img_shape=img_shape, antialiased=antialiased)
+    return rasterize(*inputs, img_shape=img_shape, antialiased=antialiased)

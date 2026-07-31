@@ -1,6 +1,6 @@
 """Warp rasterization kernels and their JAX FFI callables.
 
-Blend kernels are available with and without depth support, and their backward implementation.
+Kernels are available with and without depth support, and their backward implementation.
 
 Kernel launch functions are wrapped into JAX FFI callables that the API layer in
 ``splax._rasterize`` composes with ``jax.custom_vjp``.
@@ -62,7 +62,7 @@ def _rasterize_warp(
     sel_geom = B_geom > 1
     sel_bg = background.shape[0] > 1
 
-    # sorting must use the same map_opacities as the forward blend to reproduce the order and index
+    # sorting must use the same map_opacities as the forward kernel to reproduce the order and index
     gaussian_ids, tile_bins, _, tile_bounds_x, n_tiles = sort_and_bin(
         xys, depths, radii, conics, map_opacities, cum_tiles_hit, n, B_geom, img_h, img_w
     )
@@ -130,7 +130,7 @@ def _rasterize_kernel(
     final_idx: wp.array2d[wp.int32],
     out_img: wp.array2d[wp.vec3],
 ):
-    """Rasterization kernel with cooperative shared-memory blend."""
+    """Rasterization kernel with cooperative shared-memory blending."""
     tile_g, tr = wp.tid()  # launch_tiled: block index and thread rank
     image_id = tile_g // n_tiles
     tile_local = tile_g % n_tiles

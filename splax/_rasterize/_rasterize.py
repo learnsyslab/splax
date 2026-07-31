@@ -14,6 +14,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from splax._project import opacity_compensation
 from splax._rasterize._kernels import (
     rasterize_bwd_depth_ffi,
     rasterize_bwd_ffi,
@@ -35,12 +36,24 @@ def rasterize(
     cum_tiles_hit: jax.Array,
     *,
     img_shape: tuple[int, int],
-    map_opacities: jax.Array | None = None,
+    antialiased: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Blend projected gaussians into an image and an accumulated alpha map.
 
     Differentiable with respect to colors, opacities, xys, and conics. background, depths, radii,
     and cum_tiles_hit are non-differentiable.
+
+    Args:
+        colors: RGB colors, shape ``(N, 3)``.
+        opacities: Opacities in ``[0, 1]``, same as the projection ran on, shape ``(N,)``.
+        background: Constant background color, shape ``(3,)``.
+        xys: Gaussian centers in pixels, shape ``(N, 2)``.
+        depths: Camera-space z per gaussian, shape ``(N,)``.
+        radii: Screen-space radii, non-positive for culled gaussians, shape ``(N,)``.
+        conics: Inverse 2d covariances, shape ``(N, 3)``.
+        cum_tiles_hit: Cumulative tile counts from the projection, shape ``(N,)``.
+        img_shape: Image size as ``(height, width)`` in pixels.
+        antialiased: Enable the Mip-Splatting opacity compensation.
 
     Returns:
         The ``(H, W, 3)`` image and the ``(H, W)`` accumulated alpha, the coverage the gaussians
@@ -53,12 +66,13 @@ def rasterize(
         )
     n = colors.shape[0]
     H, W = img_shape
-    if map_opacities is None:
-        map_opacities = opacities
+    # The compensation scales the blended alpha only. Tile emission has to stay on the opacities the
+    # projection ran on, or it stops matching the cum_tiles_hit that sized the intersection buffers.
+    blend_opacities = opacities * opacity_compensation(conics, radii) if antialiased else opacities
     out_img, final_Ts, _ = _rasterize(
         colors,
+        blend_opacities,
         opacities,
-        map_opacities,
         background,
         xys,
         depths,
@@ -83,13 +97,25 @@ def rasterize_depth(
     cum_tiles_hit: jax.Array,
     *,
     img_shape: tuple[int, int],
-    map_opacities: jax.Array | None = None,
+    antialiased: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Blend gaussians into an RGB and depth image (H, W, 4) and an alpha map (H, W).
 
     The depth channel is the expected depth, the visibility-weighted mean of the gaussians'
     camera-space z normalized by the accumulated alpha. It is measured along the optical axis rather
     than as a Euclidean range, and pixels that no gaussian covers read 0.
+
+    Args:
+        colors: RGB colors, shape ``(N, 3)``.
+        opacities: Opacities in ``[0, 1]``, same as the projection ran on, shape ``(N,)``.
+        background: Constant background color, shape ``(3,)``.
+        xys: Gaussian centers in pixels, shape ``(N, 2)``.
+        depths: Camera-space z per gaussian, shape ``(N,)``.
+        radii: Screen-space radii, non-positive for culled gaussians, shape ``(N,)``.
+        conics: Inverse 2d covariances, shape ``(N, 3)``.
+        cum_tiles_hit: Cumulative tile counts from the projection, shape ``(N,)``.
+        img_shape: Image size as ``(height, width)`` in pixels.
+        antialiased: Enable the Mip-Splatting opacity compensation.
 
     Returns:
         The ``(H, W, 4)`` image, RGB in the first three channels and the expected depth in the
@@ -102,12 +128,11 @@ def rasterize_depth(
         )
     n = colors.shape[0]
     H, W = img_shape
-    if map_opacities is None:
-        map_opacities = opacities
+    blend_opacities = opacities * opacity_compensation(conics, radii) if antialiased else opacities
     out_img, out_depth, final_Ts, _ = _rasterize_depth(
         colors,
+        blend_opacities,
         opacities,
-        map_opacities,
         background,
         xys,
         depths,
@@ -148,8 +173,8 @@ def _rasterize(
 
     final_Ts is the per-pixel final transmittance the public rasterize turns into the alpha map, and
     final_idx is the last contributing gaussian, a backward residual the public rasterize discards.
-    JAX requires a rigid array signature for custom_vjps, so the None default of map_opacities is
-    resolved in the public rasterize before this is called.
+    opacities drive the blend, map_opacities the tile emission. The public rasterize keeps the two
+    consistent with the projection.
     """
     final_Ts, final_idx, out_img = rasterize_ffi(
         colors,
