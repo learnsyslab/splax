@@ -5,7 +5,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from utils import scene, scene_params
 
 from splax import mcmc
 
@@ -14,7 +13,7 @@ def test_compute_relocation_ratio_one_is_identity():
     opac = jnp.array([1e-4, 1e-3, 0.01, 0.1, 0.5, 0.9, 0.999], jnp.float32)
     scales = jnp.tile(jnp.array([0.05, 0.1, 0.3], jnp.float32), (opac.shape[0], 1))
     binoms = mcmc.make_binoms(51)
-    o, s = jax.jit(mcmc.compute_relocation)(opac, scales, jnp.ones_like(opac), binoms)
+    o, s = mcmc.compute_relocation(opac, scales, jnp.ones_like(opac), binoms)
     np.testing.assert_allclose(np.asarray(o), np.asarray(opac), rtol=1e-7)
     np.testing.assert_allclose(np.asarray(s), np.asarray(scales), rtol=1e-7)
 
@@ -30,7 +29,7 @@ def test_relocate_teleports_dead_onto_alive():
     opac_logit = jnp.concatenate([jnp.full((100,), -20.0), jnp.full((400,), 0.85)])
 
     binoms = mcmc.make_binoms(51)
-    (new_means, _, _, _, new_opac_logit), reset = jax.jit(mcmc.relocate)(
+    (new_means, _, _, _, new_opac_logit), reset = mcmc.relocate(
         k[3], means, log_scales, quats, sh_colors, opac_logit, binoms, min_opacity=0.005
     )
 
@@ -57,28 +56,8 @@ def test_inject_noise_respects_opacity():
     quats = jnp.tile(jnp.array([1.0, 0.0, 0.0, 0.0]), (n, 1))
     # half near-transparent, half near-opaque
     opac_logit = jnp.concatenate([jnp.full((200,), -5.0), jnp.full((200,), 8.0)])
-    moved = jax.jit(mcmc.inject_noise)(k[0], means, log_scales, quats, opac_logit, scaler=100.0)
+    moved = mcmc.inject_noise(k[0], means, log_scales, quats, opac_logit, scaler=100.0)
     disp = np.linalg.norm(np.asarray(moved), axis=1)
     # low-opacity gaussians move, high-opacity ones barely move
     assert disp[:200].mean() > 10 * disp[200:].mean() + 1e-6
     assert moved.shape == (n, 3)
-
-
-def test_compute_relocation_jit():
-    _, scales, _, _, opacities, _ = scene(16)
-    ratios = jnp.full((16,), 3.0, jnp.float32)
-    binoms = mcmc.make_binoms(51)
-    jax.block_until_ready(jax.jit(mcmc.compute_relocation)(opacities, scales, ratios, binoms))
-
-
-def test_relocate_jit():
-    *splats, _ = scene_params(16)
-    jax.block_until_ready(jax.jit(mcmc.relocate)(jax.random.key(3), *splats, mcmc.make_binoms(51)))
-
-
-def test_inject_noise_jit():
-    means, log_scales, quats, _, logit_opacities, _ = scene_params(16)
-    key = jax.random.key(4)
-    jax.block_until_ready(
-        jax.jit(mcmc.inject_noise)(key, means, log_scales, quats, logit_opacities, 100.0)
-    )

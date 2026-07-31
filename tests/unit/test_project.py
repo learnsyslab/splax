@@ -234,7 +234,7 @@ def test_project_grad():
     grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
     assert all(np.all(np.isfinite(g)) for g in grads), "a gradient has non-finite entries"
     assert all(np.linalg.norm(g) > 0 for g in grads), "a gradient is all zero"
-    assert np.allclose(grads[3][3], 0.0), "the viewmat bottom row is constant"
+    np.testing.assert_array_equal(grads[3][3], jnp.zeros(4), err_msg="bottom row is not constant")
 
     assert_finite_difference(loss, args, grads, eps=1e-3, rtol=5e-4)
 

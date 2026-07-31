@@ -29,16 +29,19 @@ from plyfile import PlyData, PlyElement
 _C0 = 0.5 / np.sqrt(np.pi)
 
 
+@jax.jit
 def sh_to_rgb(sh_colors: jax.Array | np.ndarray) -> jax.Array:
     """Map degree-0 SH coefficients to RGB in ``[0, 1]``, where ``0`` is mid grey."""
     return jnp.clip(sh_colors * _C0 + 0.5, 0.0, 1.0)  # files may store out-of-range coefficients
 
 
+@jax.jit
 def rgb_to_sh(colors: jax.Array | np.ndarray) -> jax.Array:
     """Map RGB in ``[0, 1]`` to degree-0 SH coefficients."""
     return (colors - 0.5) / _C0
 
 
+@jax.jit
 def apply_activations(
     log_scales: jax.Array | np.ndarray,
     sh_colors: jax.Array | np.ndarray,
@@ -57,6 +60,7 @@ def apply_activations(
     return jnp.exp(log_scales), sh_to_rgb(sh_colors), jax.nn.sigmoid(logit_opacities)
 
 
+@jax.jit
 def invert_activations(
     scales: jax.Array | np.ndarray,
     colors: jax.Array | np.ndarray,

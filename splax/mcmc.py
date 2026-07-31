@@ -41,6 +41,7 @@ def make_binoms(n: int) -> jax.Array:
     return jnp.array(b, jnp.float32)
 
 
+@jax.jit
 def compute_relocation(
     opacities: jax.Array, scales: jax.Array, ratios: jax.Array, binoms: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
@@ -72,6 +73,7 @@ def compute_relocation(
     return new_opac, coeff[:, None] * scales
 
 
+@jax.jit
 def relocate(
     key: jax.Array,
     means3d: jax.Array,
@@ -132,6 +134,7 @@ def relocate(
     return out, reset
 
 
+@jax.jit
 def inject_noise(
     key: jax.Array,
     means3d: jax.Array,

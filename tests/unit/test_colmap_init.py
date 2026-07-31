@@ -67,7 +67,7 @@ def test_colors_and_opacity_round_trip():
     _, index = KDTree(xyz).query(np.asarray(p["means"]), k=1)
     colors = expit(np.asarray(p["colors_logit"])) * 255.0
     assert np.abs(colors - rgb[index]).max() < 0.1, "colors do not follow their points"
-    assert np.allclose(expit(np.asarray(p["opac_logit"])), 0.37)
+    np.testing.assert_allclose(expit(p["opac_logit"]), 0.37, rtol=1e-6)
 
 
 def test_weights_bias_the_subsample():

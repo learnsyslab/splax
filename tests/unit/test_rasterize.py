@@ -18,10 +18,7 @@ if TYPE_CHECKING:
 
 B = len(VIEWS)
 # rasterize and rasterize_depth differ only in the channel count of the image they return
-RASTERIZERS = [
-    pytest.param(splax.rasterize, 3, id="rasterize"),
-    pytest.param(splax.rasterize_depth, 4, id="rasterize_depth"),
-]
+RASTERIZERS = [pytest.param(splax.rasterize, 3), pytest.param(splax.rasterize_depth, 4)]
 
 
 @partial(jax.jit, static_argnames=("H", "W"))
@@ -124,18 +121,12 @@ def test_rasterize_depth_image_byte_identical():
     np.testing.assert_array_equal(plain_alpha, alpha)
 
 
-def test_rasterize_jit():
-    """Test that rasterize runs under jit."""
-    args = projected(4000, 128, 128, seed=1)
-    rasterize = jax.jit(splax.rasterize, static_argnames="img_shape")
-    jax.block_until_ready(rasterize(*args, img_shape=(128, 128)))
-
-
-def test_rasterize_depth_jit():
-    """Test that rasterize_depth runs under jit."""
-    args = projected(4000, 128, 128, seed=1)
-    rasterize_depth = jax.jit(splax.rasterize_depth, static_argnames="img_shape")
-    jax.block_until_ready(rasterize_depth(*args, img_shape=(128, 128)))
+@pytest.mark.parametrize("rasterize", [splax.rasterize, splax.rasterize_depth])
+def test_rasterize_jit(rasterize: Callable[..., tuple[jax.Array, jax.Array]]):
+    """Test that the blend traces and runs with the image shape declared static."""
+    H = W = 128
+    args = projected(4000, H, W, seed=1)
+    jax.block_until_ready(jax.jit(rasterize, static_argnames="img_shape")(*args, img_shape=(H, W)))
 
 
 # region batching
@@ -206,8 +197,7 @@ def test_rasterize_broadcast_geometry(
 
 # region gradient
 
-# The finite-difference losses draw signed weights. Positive ones leave the loss far from zero,
-# where stepping a single operand moves it by a few float32 ulps and the difference is quantized.
+# The finite-difference losses draw signed weights to surface local changes
 
 
 def test_rasterize_grad():
