@@ -52,9 +52,9 @@ def render(
     ``exp`` on the scales, the SH map on the colors, and the ``sigmoid`` on the opacities, are
     applied here, and the quaternions are normalized inside the projection kernel.
 
-    The render is differentiable and aware of the arguments with respect to which gradients are
-    requested, so only the necessary backward kernels launch. Depth rendering additionally packs the
-    differentiable expected depth map into the image for sparse-point depth regularization.
+    The render is differentiable with respect to the parameters, the camera pose, and the
+    transforms. Depth rendering additionally packs the differentiable expected depth map into the
+    image for sparse-point depth regularization.
 
     Slices of the gaussians can follow rigid transforms for composed dynamic scenes. The gaussians
     in slice k move by ``gaussian_transforms[k]``, while all others stay static.  Transforms are

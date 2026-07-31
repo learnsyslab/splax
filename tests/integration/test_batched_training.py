@@ -102,12 +102,11 @@ def test_batch2_averages_the_single_view_updates():
 
     # Descent moves by minus the gradient, so the mean of the two updates is the update of the mean.
     mean = {key: 0.5 * (first[key] + second[key]) for key in params}
-    tol = {"rtol": 2e-3, "atol": 1e-5}
-    np.testing.assert_allclose(batched["means"], mean["means"], **tol)
-    np.testing.assert_allclose(batched["log_scales"], mean["log_scales"], **tol)
-    np.testing.assert_allclose(batched["quats"], mean["quats"], **tol)
-    np.testing.assert_allclose(batched["colors_logit"], mean["colors_logit"], **tol)
-    np.testing.assert_allclose(batched["opac_logit"], mean["opac_logit"], **tol)
+    np.testing.assert_allclose(batched["means"], mean["means"], rtol=2e-3, atol=1e-5)
+    np.testing.assert_allclose(batched["log_scales"], mean["log_scales"], rtol=2e-3, atol=1e-5)
+    np.testing.assert_allclose(batched["quats"], mean["quats"], rtol=2e-3, atol=1e-5)
+    np.testing.assert_allclose(batched["colors_logit"], mean["colors_logit"], rtol=2e-3, atol=1e-5)
+    np.testing.assert_allclose(batched["opac_logit"], mean["opac_logit"], rtol=2e-3, atol=1e-5)
 
 
 def test_regularizers_shrink_only_their_own_parameter():

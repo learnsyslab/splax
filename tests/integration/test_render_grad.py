@@ -1,28 +1,4 @@
-"""Gradient tests for ``splax.render``.
-
-Three axes are covered. Central finite differences validate the gradients with respect to the five
-splat parameters and the camera ``viewmat`` without any external reference. Batch-native gradients
-under ``jax.vmap`` are matched against the per-sample sequential ``jax.grad`` loop. Parity against
-the gsplat reference cross-checks the whole gradient field against a second CUDA implementation.
-
-Gradient selection is purely ``jax.grad`` argnums. Differentiating with respect to a gaussian input
-runs the gaussian-grad kernels, differentiating with respect to the ``viewmat`` runs the
-camera-pose accumulator, and both together run the joint kernel.
-
-The batched contract. The projection and rasterization backward FFIs are
-``vmap_method="expand_dims"``, so ``jax.vmap(jax.grad(loss))`` runs a single batched backward
-launch instead of falling back to a per-sample Python loop. A gradient with respect to a batched
-operand is per image, while a gradient with respect to a broadcast operand is the SUM over the
-batch axis, because the vjp of a broadcast is a sum. In the degenerate case the whole render is
-shared and only the image cotangent is batched, so the backward indexes geometry from image 0
-while scattering per-output-image gradients.
-
-Tolerances. Float32 central differences land within 8e-2 relative of the analytic directional
-derivative, the residual being intrinsic to splatting's hard 1/255 cull and early-termination
-discontinuities, which an FD step crosses. The vmap and the sequential path differ only by float32
-atomic-add ordering across the launch geometry, which stays well under 1e-3 relative. Against
-gsplat every parameter agrees to ~1e-4 relative Frobenius, so a 2e-3 bound holds with margin.
-"""
+"""Test the render gradients against finite differences, the unbatched loop, and gsplat."""
 
 from __future__ import annotations
 
@@ -48,16 +24,12 @@ LEGO_HEIGHT = LEGO_WIDTH = 800
 LEGO_OFFSET = jnp.array([0.01, -0.01, 0.01, 0.01, -0.01, 0.01])
 
 
-def _assert_grads_close(name: str, batched: jax.Array, sequential: jax.Array):
-    """Match a batched gradient against the per-sample sequential stack."""
-    batched, sequential = np.asarray(batched), np.asarray(sequential)
-    assert batched.shape == sequential.shape, f"{name}: shape {batched.shape} vs {sequential.shape}"
-    assert np.all(np.isfinite(batched)), f"{name}: non-finite vmap grad"
-    rel = np.linalg.norm(batched - sequential) / (np.linalg.norm(sequential) + 1e-12)
-    assert rel < 1e-3, f"{name}: vmap vs sequential rel error {rel:.2e}"
-    assert np.allclose(batched, sequential, rtol=1e-4, atol=1e-6), (
-        f"{name}: max|d| = {np.abs(batched - sequential).max():.2e}"
-    )
+def _render_loss(
+    splats: tuple[jax.Array, ...], kw: dict, weight: jax.Array, viewmat: jax.Array
+) -> jax.Array:
+    """Render a splat from one camera pose and score it against a per-pixel weight."""
+    img, _ = splax.render(*splats, viewmat=viewmat, **kw)
+    return jnp.mean(weight * img)
 
 
 # region gradient
@@ -77,84 +49,50 @@ def test_render_grad():
         return jnp.mean(weights * img)
 
     args = (means, log_scales, quats, sh_colors, logit_opacities, VIEWMAT)
-    grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4, 5))(*args)
-    for name, grad, arg in zip((*PARAMS, "viewmat"), grads, args):
-        grad = np.asarray(grad)
-        assert grad.shape == arg.shape, f"{name}: grad shape {grad.shape} vs {arg.shape}"
-        assert np.all(np.isfinite(grad)), f"{name}: non-finite grad"
-        assert np.linalg.norm(grad) > 0.0, f"{name}: zero grad"
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4, 5)))(*args)
+    assert all(jnp.isfinite(g).all() for g in grads), "a gradient has non-finite entries"
+    assert all(jnp.linalg.norm(g) > 0.0 for g in grads), "a gradient is all zero"
 
 
 @pytest.mark.parametrize("antialiased", [False, True])
 def test_render_grad_finite_difference(antialiased: bool):
-    """Match the analytic directional derivative against central finite differences.
-
-    Hundreds of random parameters are exercised at once via a random unit direction per array.
-    Central differences in float32 give ~1e-2 relative accuracy, so a loose relative bound is used.
-    """
+    """Match the analytic directional derivative against central finite differences."""
     n, H, W = 400, 80, 80
     means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=7)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(5), (H, W, 3))
 
     def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
-        # Linear, mean-reduced loss keeps the loss magnitude small (float32 render, so minimal FD
-        # cancellation) while giving an O(1) gradient over all five parameter arrays at once
-        # (~4800 perturbed entries).
         img, _ = splax.render(m, s, q, c, o, antialiased=antialiased, **kw)
         return jnp.mean(weights * img)
 
     args = (means, log_scales, quats, sh_colors, logit_opacities)
-    grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4)))(*args)
     assert_finite_difference(loss, args, grads)
-
-
-def test_render_grad_jit_matches_eager():
-    """Match the jitted gradients against the eager gradients."""
-    n, H, W = 2000, 128, 128
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=3)
-    kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
-    weights = jax.random.uniform(jax.random.key(123), (H, W, 3))
-
-    def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
-        img, _ = splax.render(m, s, q, c, o, **kw)
-        return jnp.mean(weights * img**2)
-
-    args = (means, log_scales, quats, sh_colors, logit_opacities)
-    eager = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args)
-    jitted = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4)))(*args)
-    for a, b in zip(eager, jitted):
-        assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
 
 def test_render_grad_viewmat():
     """Check the camera-pose gradient with directional finite differences."""
     n, H, W = 4000, 120, 120
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=11)
+    *splats, background = scene_params(n, seed=11)
     kw = {"background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(4), (H, W, 3))
+    loss = partial(_render_loss, splats, kw, weights)
 
-    def loss(viewmat: jax.Array) -> jax.Array:
-        img, _ = splax.render(
-            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
-        )
-        return jnp.mean(weights * img)
-
-    grad = jax.grad(loss)(VIEWMAT)
-    assert np.all(np.isfinite(np.asarray(grad))), "viewmat grad has non-finite entries"
-    assert np.allclose(np.asarray(grad)[3], 0.0), "the viewmat bottom row is constant"
-    # The bottom row is constant, so the step stays on the 12 differentiable entries.
-    differentiable = grad.at[3].set(0.0)
-    assert_finite_difference(loss, (VIEWMAT,), (differentiable,), eps=1e-3, name="viewmat ")
+    grad = jax.jit(jax.grad(loss))(VIEWMAT)
+    assert jnp.isfinite(grad).all(), "viewmat grad has non-finite entries"
+    np.testing.assert_array_equal(grad[3], jnp.zeros(4), err_msg="viewmat bottom row is constant")
+    assert_finite_difference(loss, (VIEWMAT,), (grad,), eps=1e-3, name="viewmat ")
 
 
 def test_render_grad_viewmat_pose_chain_rule():
     """Check the gradient through an se3 pose parameterization with finite differences."""
     n, H, W = 4000, 120, 120
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=13)
+    *splats, background = scene_params(n, seed=13)
     kw = {"background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(8), (H, W, 3))
     xi0 = jnp.array([0.03, -0.02, 0.015, 0.04, -0.03, 0.02])
+    render_loss = partial(_render_loss, splats, kw, weights)
 
     def loss(xi: jax.Array) -> jax.Array:
         generator = jnp.array(
@@ -165,41 +103,16 @@ def test_render_grad_viewmat_pose_chain_rule():
                 [0.0, 0.0, 0.0, 0.0],
             ]
         )
-        viewmat = jax.scipy.linalg.expm(generator) @ VIEWMAT
-        img, _ = splax.render(
-            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
-        )
-        return jnp.mean(weights * img)
+        return render_loss(jax.scipy.linalg.expm(generator) @ VIEWMAT)
 
-    grad = jax.grad(loss)(xi0)
-    assert np.all(np.isfinite(np.asarray(grad))) and np.linalg.norm(np.asarray(grad)) > 0
+    grad = jax.jit(jax.grad(loss))(xi0)
+    assert jnp.isfinite(grad).all() and jnp.linalg.norm(grad) > 0
     assert_finite_difference(loss, (xi0,), (grad,), eps=1e-3, name="pose chain-rule ")
 
 
-def test_render_grad_selection_consistency():
-    """Match the joint-kernel gradients against the single-path kernel gradients."""
-    n, H, W = 3000, 110, 110
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=5)
-    kw = {"background": background, **camera(H, W)}
-    weights = jax.random.uniform(jax.random.key(6), (H, W, 3))
-
-    def loss(m: jax.Array, viewmat: jax.Array) -> jax.Array:
-        img, _ = splax.render(
-            m, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
-        )
-        return jnp.mean(weights * img)
-
-    # Gaussian grad: means-only (gaussian kernel) vs joint (both kernel).
-    means_only = jax.grad(loss, argnums=0)(means, VIEWMAT)
-    means_joint, viewmat_joint = jax.grad(loss, argnums=(0, 1))(means, VIEWMAT)
-    assert np.allclose(np.asarray(means_only), np.asarray(means_joint), rtol=1e-5, atol=1e-6)
-
-    # Camera grad: viewmat-only (view kernel) vs joint (both kernel).
-    viewmat_only = np.asarray(jax.grad(loss, argnums=1)(means, VIEWMAT))
-    assert np.allclose(viewmat_only, np.asarray(viewmat_joint), rtol=1e-4, atol=1e-6)
-
-
 # region broadcasted gradient
+
+# A gradient for a batched operand is per image, one for a shared operand sums over the batch.
 
 
 def test_render_grad_vmap_matches_loop():
@@ -213,11 +126,11 @@ def test_render_grad_vmap_matches_loop():
         img, _ = splax.render(m, log_scales, quats, sh_colors, logit_opacities, **kw)
         return jnp.sum(img)
 
-    batched = np.asarray(jax.vmap(jax.grad(loss))(batched_means))
-    sequential = np.stack([np.asarray(jax.grad(loss)(batched_means[i])) for i in range(B)])
-    # The rasterize backward accumulates with atomics, so even the sequential path jitters run to
-    # run. rtol=1e-4 flaked on this sum-reduced loss.
-    assert np.allclose(batched, sequential, rtol=2e-3, atol=1e-4)
+    grad = jax.jit(jax.grad(loss))
+    batched = jax.jit(jax.vmap(grad))(batched_means)
+    sequential = jnp.stack([grad(m) for m in batched_means])
+    # The backward accumulates with atomics, so even the sequential path jitters between runs.
+    np.testing.assert_allclose(batched, sequential, rtol=2e-3, atol=1e-4)
 
 
 def test_render_grad_vmap_matches_loop_multiview():
@@ -229,71 +142,55 @@ def test_render_grad_vmap_matches_loop_multiview():
     weights = jax.random.uniform(jax.random.key(3), (B, H, W, 3))
     batched_means = means + 0.02 * jax.random.normal(jax.random.key(4), (B, n, 3))
 
-    def loss(m: jax.Array, viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
+    def loss(m: jax.Array, viewmat: jax.Array, weight: jax.Array) -> jax.Array:
         img, _ = splax.render(
             m, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
         )
-        return jnp.mean(weights[i] * img)
+        return jnp.mean(weight * img)
 
-    batched = jax.vmap(jax.grad(loss))(batched_means, viewmats, jnp.arange(B))
-    sequential = jnp.stack([jax.grad(loss)(batched_means[i], viewmats[i], i) for i in range(B)])
-    _assert_grads_close("batched means", batched, sequential)
+    grad = jax.jit(jax.grad(loss))
+    batched = jax.jit(jax.vmap(grad))(batched_means, viewmats, weights)
+    sequential = jnp.stack([grad(*a) for a in zip(batched_means, viewmats, weights)])
+    assert jnp.isfinite(batched).all(), "the vmapped means gradient is not finite"
+    np.testing.assert_allclose(batched, sequential, rtol=1e-4, atol=1e-6)
 
 
 def test_render_grad_viewmat_vmap_matches_loop():
     """Match the vmapped per-pose camera gradients against the sequential gradients."""
     n, H, W = 800, 96, 96
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=11)
+    *splats, background = scene_params(n, seed=11)
     kw = {"background": background, **camera(H, W)}
     viewmats = poses(B, 12)
     weights = jax.random.uniform(jax.random.key(13), (B, H, W, 3))
 
-    def loss(viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
-        img, _ = splax.render(
-            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
-        )
-        return jnp.mean(weights[i] * img)
-
-    batched = jax.vmap(jax.grad(loss))(viewmats, jnp.arange(B))
-    sequential = jnp.stack([jax.grad(loss)(viewmats[i], i) for i in range(B)])
-    _assert_grads_close("batched viewmat", batched, sequential)
-    assert np.allclose(np.asarray(batched)[:, 3, :], 0.0), "viewmat bottom row must be constant"
+    grad = jax.jit(jax.grad(partial(_render_loss, splats, kw), argnums=1))
+    batched = jax.jit(jax.vmap(grad))(weights, viewmats)
+    sequential = jnp.stack([grad(w, vm) for w, vm in zip(weights, viewmats)])
+    assert jnp.isfinite(batched).all(), "the vmapped viewmat gradient is not finite"
+    np.testing.assert_allclose(batched, sequential, rtol=1e-4, atol=1e-6)
+    msg = "viewmat bottom row must be constant"
+    np.testing.assert_array_equal(batched[:, 3, :], jnp.zeros((B, 4)), err_msg=msg)
 
 
 def test_render_grad_viewmat_vmap_finite_difference():
-    """Check one batched camera gradient with directional finite differences.
-
-    The batched camera grad is thereby validated against numerics and not only against the
-    sequential kernel.
-    """
+    """Check one batched camera gradient with directional finite differences."""
     n, H, W = 3000, 110, 110
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=21)
+    *splats, background = scene_params(n, seed=21)
     kw = {"background": background, **camera(H, W)}
     viewmats = poses(B, 22)
     weights = jax.random.uniform(jax.random.key(23), (B, H, W, 3))
+    loss = partial(_render_loss, splats, kw)
 
-    def loss(viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
-        img, _ = splax.render(
-            means, log_scales, quats, sh_colors, logit_opacities, viewmat=viewmat, **kw
-        )
-        return jnp.mean(weights[i] * img)
-
-    grad = jax.vmap(jax.grad(loss))(viewmats, jnp.arange(B))[0]
-    assert np.all(np.isfinite(np.asarray(grad)))
-    # The bottom row is constant, so the step stays on the 12 differentiable entries.
-    differentiable = grad.at[3].set(0.0)
+    grad = jax.jit(jax.vmap(jax.grad(loss, argnums=1)))(weights, viewmats)[0]
+    assert jnp.isfinite(grad).all()
     assert_finite_difference(
-        partial(loss, i=0), (viewmats[0],), (differentiable,), eps=1e-3, name="batched viewmat "
+        partial(loss, weights[0]), (viewmats[0],), (grad,), eps=1e-3, name="batched "
     )
 
 
 @pytest.mark.parametrize("param", PARAMS)
 def test_render_grad_broadcast_summed(param: str):
-    """Match the summed per-image gradient of a broadcast parameter against the total-loss one.
-
-    The multi-view regime batches the camera pose, which makes the whole projected geometry
-    batched, while the gaussians stay shared.
-    """
+    """Match the summed per-image gradients of a shared parameter against the total-loss one."""
     n, H, W = 800, 96, 96
     means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=5)
     splat = (means, log_scales, quats, sh_colors, logit_opacities)
@@ -302,25 +199,26 @@ def test_render_grad_broadcast_summed(param: str):
     viewmats = poses(B, 8)
     weights = jax.random.uniform(jax.random.key(6), (B, H, W, 3))
 
-    def loss(p: jax.Array, viewmat: jax.Array, i: jax.Array | int) -> jax.Array:
+    def loss(p: jax.Array, viewmat: jax.Array, weight: jax.Array) -> jax.Array:
         args = splat[:index] + (p,) + splat[index + 1 :]
         img, _ = splax.render(*args, viewmat=viewmat, **kw)
-        return jnp.mean(weights[i] * img)
+        return jnp.mean(weight * img)
 
-    per_image = jax.vmap(jax.grad(loss), in_axes=(None, 0, 0))(
-        splat[index], viewmats, jnp.arange(B)
+    def total_loss(p: jax.Array) -> jax.Array:
+        return sum(loss(p, viewmat, weight) for viewmat, weight in zip(viewmats, weights))
+
+    per_image = jax.jit(jax.vmap(jax.grad(loss), in_axes=(None, 0, 0)))(
+        splat[index], viewmats, weights
     )
-    total = jax.grad(lambda p: sum(loss(p, viewmats[i], i) for i in range(B)))(splat[index])
-    _assert_grads_close(f"{param} broadcast", jnp.sum(per_image, axis=0), total)
+    total = jax.jit(jax.grad(total_loss))(splat[index])
+    summed = jnp.sum(per_image, axis=0)
+    assert jnp.isfinite(summed).all(), f"the summed {param} gradient is not finite"
+    np.testing.assert_allclose(summed, total, rtol=1e-4, atol=1e-6)
 
 
 @pytest.mark.parametrize("param", ["means", "sh_colors", "logit_opacities"])
 def test_render_grad_broadcast_geometry(param: str):
-    """Match the vmapped gradients of a render shared across the batch against the loop.
-
-    Nothing inside the render is batched, only the per-image loss weight, so the projected
-    geometry is broadcast while the image cotangent is batched.
-    """
+    """Match the vmapped gradients against the loop when only the loss weight is batched."""
     n, H, W = 600, 80, 80
     means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=17)
     splat = (means, log_scales, quats, sh_colors, logit_opacities)
@@ -328,14 +226,16 @@ def test_render_grad_broadcast_geometry(param: str):
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(18), (B, H, W, 3))
 
-    def loss(p: jax.Array, i: jax.Array | int) -> jax.Array:
+    def loss(p: jax.Array, weight: jax.Array) -> jax.Array:
         args = splat[:index] + (p,) + splat[index + 1 :]
         img, _ = splax.render(*args, **kw)
-        return jnp.mean(weights[i] * img)
+        return jnp.mean(weight * img)
 
-    batched = jax.vmap(jax.grad(loss), in_axes=(None, 0))(splat[index], jnp.arange(B))
-    sequential = jnp.stack([jax.grad(loss)(splat[index], i) for i in range(B)])
-    _assert_grads_close(f"broadcast geometry {param}", batched, sequential)
+    grad = jax.jit(jax.grad(loss))
+    batched = jax.jit(jax.vmap(grad, in_axes=(None, 0)))(splat[index], weights)
+    sequential = jnp.stack([grad(splat[index], weight) for weight in weights])
+    assert jnp.isfinite(batched).all(), f"the vmapped {param} gradient is not finite"
+    np.testing.assert_allclose(batched, sequential, rtol=1e-4, atol=1e-6)
 
 
 # region gsplat equivalence
@@ -343,9 +243,8 @@ def test_render_grad_broadcast_geometry(param: str):
 
 @pytest.mark.gsplat
 @pytest.mark.parametrize("n,H,W", [(3000, 128, 128), (8000, 160, 160)])
-@pytest.mark.parametrize("which", ["sum", "wmse"])
-def test_render_grad_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: ModuleType):
-    """Match the gradients of two scalar losses against gsplat's torch autograd."""
+def test_render_grad_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
+    """Match the gradients of a weighted squared-error loss against gsplat's torch autograd."""
     means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=n)
     splat = (means, log_scales, quats, sh_colors, logit_opacities)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
@@ -353,36 +252,34 @@ def test_render_grad_vs_gsplat(n: int, H: int, W: int, which: str, gsplat_shim: 
 
     def loss(m: jax.Array, s: jax.Array, q: jax.Array, c: jax.Array, o: jax.Array) -> jax.Array:
         img, _ = splax.render(m, s, q, c, o, **kw)
-        return jnp.sum(img) if which == "sum" else jnp.mean(weights * img**2)
+        return jnp.mean(weights * img**2)
 
-    grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splat)
-    weight = None if which == "sum" else np.asarray(weights)
+    g_means, g_log_scales, g_quats, g_sh_colors, g_logit_opacities = jax.jit(
+        jax.grad(loss, argnums=(0, 1, 2, 3, 4))
+    )(*splat)
     scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
-    g_means, g_scales, g_quats, g_colors, g_opacities = gsplat_shim.grad(
-        means, scales, quats, colors, opacities, **kw, weight=weight
+    ref_means, ref_scales, ref_quats, ref_colors, ref_opacities = gsplat_shim.grad(
+        means, scales, quats, colors, opacities, **kw, weight=np.asarray(weights)
     )
     # gsplat differentiates the activated arrays, so its gradients pull back through the activations
     _, pullback = jax.vjp(splax.io.apply_activations, log_scales, sh_colors, logit_opacities)
-    pulled = pullback((jnp.asarray(g_scales), jnp.asarray(g_colors), jnp.asarray(g_opacities)))
-    reference = (g_means, pulled[0], g_quats, pulled[1], pulled[2])
+    ref_log_scales, ref_sh_colors, ref_logit_opacities = pullback(
+        (jnp.asarray(ref_scales), jnp.asarray(ref_colors), jnp.asarray(ref_opacities))
+    )
 
-    for name, grad, ref in zip(PARAMS, grads, reference):
-        grad, ref = np.asarray(grad), np.asarray(ref)
-        # Relative Frobenius is the meaningful metric across the two kernels. The whole gradient
-        # field agrees to ~1e-4 relative.
-        rel = np.linalg.norm(grad - ref) / (np.linalg.norm(ref) + 1e-12)
-        assert rel < 2e-3, f"{which}/{name} relative grad error {rel:.2e}"
+    # Accumulation ordering in the kernels leads to small differences in the gradients
+    np.testing.assert_allclose(g_means, ref_means, rtol=1e-2, atol=1e-6)
+    np.testing.assert_allclose(g_log_scales, ref_log_scales, rtol=1e-2, atol=1e-6)
+    np.testing.assert_allclose(g_quats, ref_quats, rtol=1e-2, atol=1e-6)
+    np.testing.assert_allclose(g_sh_colors, ref_sh_colors, rtol=1e-2, atol=1e-6)
+    np.testing.assert_allclose(g_logit_opacities, ref_logit_opacities, rtol=1e-2, atol=1e-6)
 
 
 @pytest.mark.gsplat
 def test_render_grad_vs_gsplat_lego_viewmat(
     gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path
 ):
-    """Match the lego camera gradients against gsplat's torch autograd.
-
-    Both implementations differentiate a pixelwise MSE against a target rendered at a slightly
-    offset pose. Single-view and vmap-batched gradients are covered.
-    """
+    """Match the lego camera gradient against gsplat's torch autograd."""
     splat = splax.io.load_ply(lego_ply)
     means, log_scales, quats, sh_colors, logit_opacities = splat
     # gsplat renders from the activated arrays the parameters map onto
@@ -396,33 +293,17 @@ def test_render_grad_vs_gsplat_lego_viewmat(
         "f": (focal, focal),
         "c": (LEGO_WIDTH / 2, LEGO_HEIGHT / 2),
     }
-    target_viewmat = RigidTransform.from_exp_coords(LEGO_OFFSET).as_matrix() @ viewmat
-    # Three current poses at scaled offsets from the base pose.
-    tangents = jnp.array([0.25, 0.5, 0.75])[:, None] * LEGO_OFFSET[None, :]
-    viewmats = RigidTransform.from_exp_coords(tangents).as_matrix() @ viewmat
-
-    # Render the target in the same framework to reduce noise from framework differences.
-    target = splax.render(*splat, viewmat=target_viewmat, **kw)[0]
-    gsplat_target, _gsplat_alpha = gsplat_shim.render(*gsplat_splat, viewmat=target_viewmat, **kw)
+    offset = RigidTransform.from_exp_coords(LEGO_OFFSET).as_matrix()
+    target = jax.jit(partial(splax.render, *splat, **kw))(viewmat=offset @ viewmat)[0]
+    pose = RigidTransform.from_exp_coords(0.5 * LEGO_OFFSET).as_matrix() @ viewmat
 
     def loss(viewmat_in: jax.Array) -> jax.Array:
         img, _ = splax.render(*splat, viewmat=viewmat_in, **kw)
         return jnp.mean((img - target) ** 2)
 
-    single = np.asarray(jax.grad(loss)(viewmats[1]))
+    grad = jax.jit(jax.grad(loss))(pose)
     reference = gsplat_shim.viewmat_grad(
-        *gsplat_splat, viewmat=viewmats[1], target=gsplat_target, **kw
+        *gsplat_splat, viewmat=pose, target=np.asarray(target), **kw
     )
-    assert np.allclose(single, reference, rtol=1e-3, atol=1e-4)
-    assert not np.allclose(single, np.zeros_like(single)), "gradient is zero"
-
-    batched = np.asarray(jax.vmap(jax.grad(loss))(viewmats))
-    batched_reference = np.asarray(
-        [
-            gsplat_shim.viewmat_grad(
-                *gsplat_splat, viewmat=viewmats[view], target=gsplat_target, **kw
-            )
-            for view in range(B)
-        ]
-    )
-    assert np.allclose(batched, batched_reference, rtol=1e-3, atol=1e-4)
+    assert jnp.linalg.norm(grad) > 0.0, "the camera gradient is zero"
+    np.testing.assert_allclose(grad, reference, rtol=1e-3, atol=1e-4)

@@ -8,11 +8,18 @@ the alpha, are differentiable.
 ```python
 def loss(means, log_scales, quats, sh_colors, logit_opacities):
     img, _ = splax.render(
-        means, log_scales, quats, sh_colors, logit_opacities,
-        viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W),
+        means,
+        log_scales,
+        quats,
+        sh_colors,
+        logit_opacities,
+        viewmat=viewmat,
+        background=jnp.ones(3),
+        img_shape=(H, W),
         f=(fx, fy),
     )
     return jnp.mean((img - target) ** 2)
+
 
 grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splats)
 ```
@@ -25,10 +32,8 @@ from a checkpoint and `splax.io.write_ply` saves one, see [IO](io.md).
 
 ## Camera pose and object pose gradients
 
-Gradient selection happens purely through `jax.grad` and its `argnums`, and only
-the gradients actually requested are computed. Differentiating the `viewmat` alone,
-as a pose optimizer does, costs only the camera gradient, and the gaussian gradients
-are the same whether requested alone or together with it.
+Gradient selection happens purely through `jax.grad` and its `argnums`. One backward
+pass computes every gradient and hands back the ones that were asked for.
 
 With [rigid transforms](rendering.md#dynamic-scene-composition) active, the `(K, 4, 4)`
 transforms are differentiable too, so object poses can be optimized directly.
@@ -41,7 +46,8 @@ def loss(viewmat):
     img, _ = splax.render(*splats, viewmat=viewmat, background=bg, **cam)
     return photometric(img, target)
 
-pose_grad = jax.grad(loss)(viewmat)  # runs the camera-pose accumulator only
+
+pose_grad = jax.grad(loss)(viewmat)
 ```
 
 ## Depth channel
@@ -56,9 +62,16 @@ regularization.
 
 ```python
 rgbd, alpha = splax.render(
-    means, log_scales, quats, sh_colors, logit_opacities,
-    viewmat=viewmat, background=jnp.ones(3), img_shape=(H, W),
-    f=(fx, fy), render_depth=True,
+    means,
+    log_scales,
+    quats,
+    sh_colors,
+    logit_opacities,
+    viewmat=viewmat,
+    background=jnp.ones(3),
+    img_shape=(H, W),
+    f=(fx, fy),
+    render_depth=True,
 )
 img, depth = rgbd[..., :3], rgbd[..., 3]
 confident_depth = depth * (alpha > 0.5)
