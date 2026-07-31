@@ -26,7 +26,7 @@ dependencies = [
 viewer = ["viser>=1.0"]
 # pycolmap loads a sparse reconstruction for the training toolkit. torch stays below 2.11 because
 # newer versions target CUDA 13, while jax and the nvcc that compiles gsplat run on CUDA 12.8.
-tests = ["splax[viewer]", "pytest", "pytest-markdown-docs", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5", "pycolmap>=4.1"]
+tests = ["splax[viewer]", "pytest", "pytest-markdown-docs", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5", "pycolmap>=4.1", "matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/learnsyslab/splax"
