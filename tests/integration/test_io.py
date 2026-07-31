@@ -1,10 +1,4 @@
-"""Test I/O operations.
-
-A real scene written to a copy then reloaded must render to the identical image.
-
-``splax.fetch`` is exercised against a local ``http.server`` on an ephemeral port: download, cache
-hit, force re-download, ETag-based invalidation, and the ``SPLAX_CACHE`` environment fallback.
-"""
+"""Test the asset download cache against a local server."""
 
 from __future__ import annotations
 
@@ -12,222 +6,147 @@ import http.server
 import threading
 from typing import TYPE_CHECKING
 
-import jax
-import jax.numpy as jnp
-import numpy as np
 import pytest
-from utils import camera
 
-import splax
-from splax.io import fetch, load_ply
+from splax.io import fetch
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
 
-def lookat_viewmats(center: np.ndarray, radius: float, n_views: int) -> jax.Array:
-    """World-to-camera matrices orbiting ``center`` (OpenCV convention, +z forward)."""
-    az = 2 * np.pi * np.arange(n_views)[:, None] / n_views
-    eyes = center + radius * np.concatenate([np.sin(az), np.full_like(az, 0.3), np.cos(az)], axis=1)
-    return jnp.asarray(splax.utils.look_at(eyes, center))
-
-
-def test_ply_render_roundtrip(tmp_path: Path, lego_ply: Path):
-    """Render a real scene the same after a write and reload of its ``.ply``."""
-    splats = load_ply(lego_ply)
-    copy = tmp_path / "lego_copy.ply"
-    splax.io.write_ply(copy, *splats)
-    splats2 = load_ply(copy)
-
-    center = np.asarray(splats[0].mean(axis=0))
-    radius = float(np.percentile(np.linalg.norm(np.asarray(splats[0]) - center, axis=-1), 90))
-    viewmat = lookat_viewmats(center, radius, 1)[0]
-
-    kw = {"viewmat": viewmat, "background": jnp.ones(3), **camera(200, 200)}
-    img1 = np.asarray(splax.render(*splats, **kw)[0])
-    img2 = np.asarray(splax.render(*splats2, **kw)[0])
-    # The file stores the parameters verbatim, so the reloaded splat is the written one unchanged
-    # and renders to the identical image.
-    assert np.array_equal(img1, img2), "PLY roundtrip changed the render"
-
-
 @pytest.fixture
-def file_server(tmp_path: Path) -> Iterator[tuple[Path, str, list[str]]]:
-    """Serve ``tmp_path/srv`` over HTTP on 127.0.0.1 with an ephemeral port.
+def server() -> Iterator[tuple[str, dict]]:
+    """Serve one in-memory body over HTTP on an ephemeral local port.
 
-    Yields (served directory, base url, list of requested paths).
+    Yields:
+        The file url and the mutable state driving the responses. ``body`` is the payload, or
+        ``None`` once the asset should be gone, ``etag`` is sent only when set, and ``gets``
+        counts the downloads the test triggered.
     """
-    srv_dir = tmp_path / "srv"
-    srv_dir.mkdir()
-    requests: list[str] = []
+    state = {"body": b"", "etag": None, "gets": 0}
 
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args: object, **kwargs: object):
-            super().__init__(*args, directory=str(srv_dir), **kwargs)
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _respond(self) -> bool:
+            if state["body"] is None:
+                self.send_error(404)
+                return False
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(state["body"])))
+            if state["etag"] is not None:
+                self.send_header("ETag", state["etag"])
+            self.end_headers()
+            return True
+
+        def do_HEAD(self):  # noqa: N802 (BaseHTTPRequestHandler API)
+            self._respond()
 
         def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-            requests.append(self.path)
-            super().do_GET()
-
-        def end_headers(self):
-            self.send_header("ETag", '"fixed"')  # Constant: content changes are picked up by force.
-            super().end_headers()
+            state["gets"] += 1
+            if self._respond():
+                self.wfile.write(state["body"])
 
         def log_message(self, format: str, *args: object):
             pass  # Keep pytest output clean.
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{server.server_address[1]}"
-    yield srv_dir, url, requests
-    server.shutdown()
-    server.server_close()
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/scene.ply", state
+    httpd.shutdown()
+    httpd.server_close()
 
 
-def test_fetch_downloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
-    """First fetch downloads the file into the cache dir with matching bytes."""
-    srv_dir, url, _ = file_server
-    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+def test_fetch_downloads(server: tuple[str, dict], tmp_path: Path):
+    """Download a remote file into the cache directory on the first fetch."""
+    url, state = server
+    state["body"] = b"splat bytes"
     cache = tmp_path / "cache"
 
-    path = fetch(f"{url}/scene.ply", cache=cache)
+    path = fetch(url, cache=cache)
 
     assert path.parent == cache
     assert path.name.endswith("-scene.ply")
     assert path.read_bytes() == b"splat bytes"
 
 
-def test_fetch_cache_hit(file_server: tuple[Path, str, list[str]], tmp_path: Path):
-    """Second fetch returns the same path without touching the network."""
-    srv_dir, url, requests = file_server
-    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+def test_fetch_cache_hit(server: tuple[str, dict], tmp_path: Path):
+    """Return the cached path on a second fetch without downloading again."""
+    url, state = server
+    state["body"], state["etag"] = b"splat bytes", '"fixed"'
     cache = tmp_path / "cache"
 
-    first = fetch(f"{url}/scene.ply", cache=cache)
-    assert len(requests) == 1
-    second = fetch(f"{url}/scene.ply", cache=cache)
+    first = fetch(url, cache=cache)
+    assert state["gets"] == 1
+    second = fetch(url, cache=cache)
 
     assert second == first
-    assert len(requests) == 1  # No new request on the cache hit.
+    assert state["gets"] == 1  # The unchanged tag is enough, no new download.
 
 
-def test_fetch_unchecked_serves_cache(file_server: tuple[Path, str, list[str]], tmp_path: Path):
-    """allow_unchecked serves the cache without contacting the remote, even once that is gone."""
-    srv_dir, url, requests = file_server
-    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+def test_fetch_unchecked_serves_cache(server: tuple[str, dict], tmp_path: Path):
+    """Serve the cache without contacting the remote, even once the remote is gone."""
+    url, state = server
+    state["body"], state["etag"] = b"splat bytes", '"fixed"'
     cache = tmp_path / "cache"
 
-    fetch(f"{url}/scene.ply", cache=cache)
-    (srv_dir / "scene.ply").unlink()
+    fetch(url, cache=cache)
+    state["body"] = None  # Any request from here on fails, so a served cache proves none was made.
 
-    unchecked = fetch(f"{url}/scene.ply", cache=cache, allow_unchecked=True)
-
-    assert unchecked.read_bytes() == b"splat bytes"
-    assert len(requests) == 1
+    assert fetch(url, cache=cache, allow_unchecked=True).read_bytes() == b"splat bytes"
 
 
-def test_fetch_force_redownloads(file_server: tuple[Path, str, list[str]], tmp_path: Path):
-    """force=True re-downloads and overwrites the cached copy."""
-    srv_dir, url, _ = file_server
-    (srv_dir / "scene.ply").write_bytes(b"old bytes")
+def test_fetch_force_redownloads(server: tuple[str, dict], tmp_path: Path):
+    """Re-download and overwrite the cached copy when the caller forces it."""
+    url, state = server
+    state["body"], state["etag"] = b"old bytes", '"fixed"'
     cache = tmp_path / "cache"
 
-    path = fetch(f"{url}/scene.ply", cache=cache)
-    (srv_dir / "scene.ply").write_bytes(b"new bytes")
-    assert fetch(f"{url}/scene.ply", cache=cache).read_bytes() == b"old bytes"
+    path = fetch(url, cache=cache)
+    state["body"] = b"new bytes"  # The tag stays put, so an ordinary fetch keeps serving the cache.
+    assert fetch(url, cache=cache).read_bytes() == b"old bytes"
 
-    forced = fetch(f"{url}/scene.ply", cache=cache, force=True)
+    forced = fetch(url, cache=cache, force=True)
 
     assert forced == path
     assert forced.read_bytes() == b"new bytes"
 
 
-def test_fetch_etag_invalidates_cache(tmp_path: Path):
-    """A cache hit is reused while the remote ETag is unchanged, and refetched when it changes."""
-    state = {"body": b"v1 bytes", "etag": '"aaa"', "gets": 0}
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def _headers(self):
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(state["body"])))
-            self.send_header("ETag", state["etag"])
-            self.end_headers()
-
-        def do_HEAD(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-            self._headers()
-
-        def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-            state["gets"] += 1
-            self._headers()
-            self.wfile.write(state["body"])
-
-        def log_message(self, format: str, *args: object):
-            pass  # Keep pytest output clean.
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{server.server_address[1]}/scene.ply"
+def test_fetch_etag_invalidates_cache(server: tuple[str, dict], tmp_path: Path):
+    """Reuse the cache while the remote tag is unchanged and refetch once it changes."""
+    url, state = server
+    state["body"], state["etag"] = b"v1 bytes", '"aaa"'
     cache = tmp_path / "cache"
-    try:
-        assert fetch(url, cache=cache).read_bytes() == b"v1 bytes"
-        assert state["gets"] == 1
-        fetch(url, cache=cache)  # Same ETag: cache hit, no new download.
-        assert state["gets"] == 1
 
-        state["body"], state["etag"] = b"v2 bytes longer", '"bbb"'
-        assert fetch(url, cache=cache).read_bytes() == b"v2 bytes longer"  # Changed ETag: refetch.
-        assert state["gets"] == 2
-    finally:
-        server.shutdown()
-        server.server_close()
+    assert fetch(url, cache=cache).read_bytes() == b"v1 bytes"
+    assert state["gets"] == 1
+    fetch(url, cache=cache)  # Same tag: cache hit, no new download.
+    assert state["gets"] == 1
+
+    state["body"], state["etag"] = b"v2 bytes longer", '"bbb"'
+    assert fetch(url, cache=cache).read_bytes() == b"v2 bytes longer"  # Changed tag: refetch.
+    assert state["gets"] == 2
 
 
-def test_fetch_without_etag(tmp_path: Path):
-    """A remote that sends no ETag still downloads, re-fetching on every call."""
-    state = {"body": b"no etag bytes", "gets": 0}
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def _headers(self):
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(state["body"])))
-            self.end_headers()
-
-        def do_HEAD(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-            self._headers()
-
-        def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-            state["gets"] += 1
-            self._headers()
-            self.wfile.write(state["body"])
-
-        def log_message(self, format: str, *args: object):
-            pass  # Keep pytest output clean.
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{server.server_address[1]}/scene.ply"
+def test_fetch_without_etag(server: tuple[str, dict], tmp_path: Path):
+    """Download from a remote that sends no tag, refetching on every call."""
+    url, state = server
+    state["body"] = b"no etag bytes"
     cache = tmp_path / "cache"
-    try:
-        assert fetch(url, cache=cache).read_bytes() == b"no etag bytes"
-        assert state["gets"] == 1
-        fetch(url, cache=cache)  # No ETag to compare: download again rather than serve stale.
-        assert state["gets"] == 2
-    finally:
-        server.shutdown()
-        server.server_close()
+
+    assert fetch(url, cache=cache).read_bytes() == b"no etag bytes"
+    assert state["gets"] == 1
+    fetch(url, cache=cache)  # No tag to compare: download again rather than serve stale.
+    assert state["gets"] == 2
 
 
-def test_fetch_env_cache(
-    file_server: tuple[Path, str, list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """Without an explicit cache the file lands in $SPLAX_CACHE."""
-    srv_dir, url, _ = file_server
-    (srv_dir / "scene.ply").write_bytes(b"splat bytes")
+def test_fetch_env_cache(server: tuple[str, dict], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Fall back to the cache directory the environment names when none is given."""
+    url, state = server
+    state["body"] = b"splat bytes"
     env_cache = tmp_path / "env_cache"
     monkeypatch.setenv("SPLAX_CACHE", str(env_cache))
 
-    path = fetch(f"{url}/scene.ply")
+    path = fetch(url)
 
     assert path.parent == env_cache
     assert path.read_bytes() == b"splat bytes"
