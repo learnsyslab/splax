@@ -148,20 +148,13 @@ def _loss_kernel(
 
 
 def _loss_reference(
-    means: jax.Array,
-    log_scales: jax.Array,
-    quats: jax.Array,
-    rotvecs: jax.Array,
-    trans: jax.Array,
-    *,
-    extras: tuple,
+    means: jax.Array, log_scales: jax.Array, quats: jax.Array, tfs: jax.Array, *, extras: tuple
 ) -> jax.Array:
     """Render the same transform applied to the splat arrays in jax and score it on a target."""
-    # Parameterized by rotvec and translation rather than the 4x4 matrix, because scipy's
-    # matrix-to-quaternion conversion NaNs under jax.grad (branchy ``where`` gradients).
     sh_colors, logit_opac, kw, target = extras
-    rot = R.from_rotvec(rotvecs)[IDS]
-    moved = rot.apply(means) + trans[IDS]
+    # assume_valid skips the orthonormalization, whose branchy gradient is NaN under jax.grad
+    rot = R.from_matrix(tfs[:, :3, :3], assume_valid=True)[IDS]
+    moved = rot.apply(means) + tfs[:, :3, 3][IDS]
     composed = rot * R.from_quat(quats, scalar_first=True)
     means_ref = jnp.where(MOVED[:, None], moved, means)
     quats_ref = jnp.where(MOVED[:, None], composed.as_quat(scalar_first=True), quats)
@@ -205,7 +198,7 @@ def test_gaussian_grads_match_jax_reference():
     kernel_grad = jax.jit(partial(jax.grad(_loss_kernel, argnums=(0, 1, 2)), extras=extras))
     reference_grad = jax.jit(partial(jax.grad(_loss_reference, argnums=(0, 1, 2)), extras=extras))
     k_means, k_log_scales, k_quats = kernel_grad(means, log_scales, quats, tfs)
-    r_means, r_log_scales, r_quats = reference_grad(means, log_scales, quats, ROTVECS, TRANS)
+    r_means, r_log_scales, r_quats = reference_grad(means, log_scales, quats, tfs)
 
     np.testing.assert_allclose(k_means, r_means, rtol=5e-3, atol=2e-6)
     np.testing.assert_allclose(k_log_scales, r_log_scales, rtol=5e-3, atol=2e-6)
@@ -219,16 +212,18 @@ def test_pose_grads_match_jax_reference():
     """Match the transform gradients contracted to rotvec and translation coordinates."""
     means, log_scales, quats, extras = _setup(seed=4)
 
-    def kernel_pose_loss(rotvecs: jax.Array, trans: jax.Array) -> jax.Array:
+    def transforms(rotvecs: jax.Array, trans: jax.Array) -> jax.Array:
         # RigidTransform holds its rotation as a quaternion, and the round trip out to a matrix
         # does not carry the gradient back to the rotation vector, so the matrix is built directly.
         eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (K, 4, 4))
         rotation = R.from_rotvec(rotvecs).as_matrix()
-        tfs = eye.at[:, :3, :3].set(rotation).at[:, :3, 3].set(trans)
-        return _loss_kernel(means, log_scales, quats, tfs, extras=extras)
+        return eye.at[:, :3, :3].set(rotation).at[:, :3, 3].set(trans)
+
+    def kernel_pose_loss(rotvecs: jax.Array, trans: jax.Array) -> jax.Array:
+        return _loss_kernel(means, log_scales, quats, transforms(rotvecs, trans), extras=extras)
 
     def reference_pose_loss(rotvecs: jax.Array, trans: jax.Array) -> jax.Array:
-        return _loss_reference(means, log_scales, quats, rotvecs, trans, extras=extras)
+        return _loss_reference(means, log_scales, quats, transforms(rotvecs, trans), extras=extras)
 
     k_rotvecs, k_trans = jax.jit(jax.grad(kernel_pose_loss, argnums=(0, 1)))(ROTVECS, TRANS)
     r_rotvecs, r_trans = jax.jit(jax.grad(reference_pose_loss, argnums=(0, 1)))(ROTVECS, TRANS)
