@@ -21,7 +21,12 @@ SERVE = 1.0
 
 TEST_DATA = "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main"
 SPLATS = "https://huggingface.co/datasets/amacati/splats/resolve/main"
-SOURCES = {"render_scene.py": TEST_DATA, "compose_splats.py": TEST_DATA, "viewer_demo.py": SPLATS}
+SOURCES = {
+    "render_scene.py": TEST_DATA,
+    "compose_splats.py": TEST_DATA,
+    "distortion.py": TEST_DATA,
+    "viewer_demo.py": SPLATS,
+}
 ASSETS = (f"{TEST_DATA}/scenes/lego.ply", f"{SPLATS}/robot_hall.ply", f"{SPLATS}/cf21B_500.ply")
 
 
@@ -64,6 +69,21 @@ def test_compose_splats_example(tmp_path: Path):
     # which the GIF writer collapses into a single frame.
     assert frames.shape[0] == 3, "the moved slice never left its start pose"
     assert np.abs(frames[1] - frames[0]).max() > 0, "consecutive frames are identical"
+    out.unlink()
+
+
+def test_distortion_example(tmp_path: Path):
+    """Render the lego scene twice through the example, pinhole beside barrel distortion."""
+    out = tmp_path / "distortion.png"
+    proc = _run("distortion.py", "--out", str(out))
+
+    assert proc.returncode == 0, proc.stderr
+    img = iio.imread(out)
+    height, width, _ = img.shape
+    assert width == 2 * height, "the example writes the two renders side by side"
+    pinhole, distorted = img[:, :height], img[:, height:]
+    assert distorted.std() > 0.0, "the example wrote a blank distorted image"
+    assert np.abs(distorted.astype(int) - pinhole).max() > 0, "the lens left the render untouched"
     out.unlink()
 
 

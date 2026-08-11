@@ -239,6 +239,42 @@ def test_project_grad():
     assert_finite_difference(loss, args, grads, eps=1e-3, rtol=5e-4)
 
 
+def test_project_grad_distorted():
+    """Match the gradient through a distorted projection against finite differences."""
+    n, H, W = 400, 96, 96
+    dist = (-0.3, 0.08, 2e-3, -1e-3, 0.0)
+    means, scales, quats, _, opacities, _ = scene(n, seed=5)
+    args = (means, scales, quats, VIEWMAT)
+    project = jax.jit(partial(splax.project, opacities=opacities, **camera(H, W), dist=dist))
+    xys, depths, _, conics, _, _ = project(*args)
+    loss = partial(_loss, project, *_target(xys, depths, conics, seed=1))
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+    assert all(np.linalg.norm(g) > 0 for g in grads), "a gradient is all zero"
+    assert_finite_difference(loss, args, grads, eps=1e-3, rtol=5e-4)
+
+
+def test_project_grad_distorted_differs_from_pinhole():
+    """The lens must move the gradient, not only the forward projection."""
+    n, H, W = 400, 96, 96
+    dist = (-0.3, 0.08, 2e-3, -1e-3, 0.0)
+    means, scales, quats, _, opacities, _ = scene(n, seed=1)
+    args = (means, scales, quats, VIEWMAT)
+    project = jax.jit(partial(splax.project, opacities=opacities, **camera(H, W)))
+    loss = partial(_loss, project, *_target(*project(*args)[:2], project(*args)[3], seed=6))
+    pinhole = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+
+    distorted_project = jax.jit(
+        partial(splax.project, opacities=opacities, **camera(H, W), dist=dist)
+    )
+    distorted_loss = partial(
+        _loss, distorted_project, *_target(*project(*args)[:2], project(*args)[3], seed=6)
+    )
+    distorted = jax.jit(jax.grad(distorted_loss, argnums=(0, 1, 2, 3)))(*args)
+    assert not np.allclose(pinhole[0], distorted[0]), "the lens left the mean gradient untouched"
+    assert not np.allclose(pinhole[3], distorted[3]), "the lens left the viewmat gradient untouched"
+
+
 def test_project_quat_scale():
     """Test that scaling the quaternions leaves the projection unchanged and scales its gradient."""
     n, H, W = 400, 96, 96

@@ -34,6 +34,7 @@ def project(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float] | None = None,
+    dist: tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0),
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
     gaussian_transforms: jax.Array | None = None,
@@ -56,6 +57,7 @@ def project(
         img_shape: Image size as ``(height, width)`` in pixels.
         f: Focal lengths ``(fx, fy)`` in pixels.
         c: Principal point ``(cx, cy)`` in pixels, defaulting to the image center.
+        dist: Brown-Conrady coefficients ``(k1, k2, p1, p2, k3)``, zero for an ideal pinhole.
         glob_scale: Global factor applied to all scales.
         clip_thresh: Near-plane clipping threshold.
         gaussian_transforms: Rigid world-space transforms, shape ``(K, 4, 4)``.
@@ -88,6 +90,7 @@ def project(
         img_shape,
         f,
         c,
+        dist,
         glob_scale,
         clip_thresh,
         has_transforms,
@@ -141,7 +144,7 @@ def transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
 # region custom vjp
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14))
 def _project(
     mean3ds: jax.Array,
     scales: jax.Array,
@@ -154,6 +157,7 @@ def _project(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
+    dist: tuple[float, float, float, float, float],
     glob_scale: float,
     clip_thresh: float,
     has_transforms: bool,
@@ -185,6 +189,11 @@ def _project(
         f[1],
         c[0],
         c[1],
+        dist[0],
+        dist[1],
+        dist[2],
+        dist[3],
+        dist[4],
         glob_scale,
         clip_thresh,
         output_dims=n,
@@ -204,6 +213,7 @@ def _project_fwd(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
+    dist: tuple[float, float, float, float, float],
     glob_scale: float,
     clip_thresh: float,
     has_transforms: bool,
@@ -223,6 +233,7 @@ def _project_fwd(
         img_shape,
         f,
         c,
+        dist,
         glob_scale,
         clip_thresh,
         has_transforms,
@@ -236,6 +247,7 @@ def _project_bwd(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float],
+    dist: tuple[float, float, float, float, float],
     glob_scale: float,
     clip_thresh: float,
     has_transforms: bool,
@@ -266,6 +278,11 @@ def _project_bwd(
         has_transforms,
         f[0],
         f[1],
+        dist[0],
+        dist[1],
+        dist[2],
+        dist[3],
+        dist[4],
         glob_scale,
         output_dims=dims,
     )

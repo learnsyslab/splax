@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import warp as wp
-from utils import VIEWMAT, VIEWS, camera, psnr, scene_params
+from utils import VIEWMAT, VIEWS, assert_finite_difference, camera, psnr, scene_params
 
 import splax
 import splax._cache as _cache
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 N = 8_000
 B = len(VIEWS)
 KW = {"background": jnp.zeros(3), **camera(128, 128)}
+DIST = (-0.3, 0.08, 2e-3, -1e-3, 0.0)
 
 
 # region single render
@@ -88,6 +89,58 @@ def test_render_jit():
     render = jax.jit(splax.render, static_argnames=("img_shape", "f", "c", "gaussian_slices"))
     image, alpha = jax.block_until_ready(render(*splats, viewmat=VIEWMAT, **KW))
     assert image.shape == (128, 128, 3) and alpha.shape == (128, 128)
+
+
+def test_render_distortion():
+    """Pull the image inward with barrel coefficients."""
+    splats = scene_params(20_000, seed=1, dense=True)[:5]
+    render = jax.jit(partial(splax.render, viewmat=VIEWMAT, **KW), static_argnames="dist")
+    ideal, barrel = render(*splats)[0], render(*splats, dist=DIST)[0]
+
+    # Brown-Conrady leaves the optical axis fixed and displaces by more further out, so barrel
+    # coefficients move image mass inward. The radius is measured about the principal point.
+    rows, cols = np.indices(ideal.shape[:2]) + 0.5
+    cx, cy = KW["c"]
+    radius = np.hypot(rows - cy, cols - cx)
+    weights = [np.asarray(img.sum(axis=-1)) for img in (ideal, barrel)]
+    mean_radius = [float((radius * w).sum() / w.sum()) for w in weights]
+    assert mean_radius[1] < mean_radius[0], "barrel distortion did not pull the image inward"
+
+
+def test_render_distortion_grad():
+    """Differentiate a distorted render against finite differences, end to end through the blend."""
+    *splats, background = scene_params(2_000, seed=4, dense=True)
+    kw = {**camera(96, 96), "dist": DIST}
+    render = jax.jit(partial(splax.render, viewmat=VIEWMAT, background=background, **kw))
+    target = render(*splats)[0]
+
+    def loss(
+        means: jax.Array, log_scales: jax.Array, quats: jax.Array, viewmat: jax.Array
+    ) -> jax.Array:
+        rest = (splats[3], splats[4])
+        image = splax.render(
+            means, log_scales, quats, *rest, viewmat=viewmat, background=background, **kw
+        )[0]
+        return jnp.sum((image - 0.9 * target) ** 2)
+
+    args = (splats[0], splats[1], splats[2], VIEWMAT)
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+    assert all(np.isfinite(g).all() for g in grads), "a gradient has non-finite entries"
+    assert all(np.linalg.norm(g) > 0 for g in grads), "a gradient is all zero"
+    assert_finite_difference(loss, args, grads, eps=1e-3, rtol=2e-2, name="distorted render ")
+
+
+def test_render_distortion_grad_vmap():
+    """Batch the distorted gradient and match it against the per-sample loop."""
+    splats = scene_params(1_500, seed=6)[:5]
+    kw = {**camera(64, 64), "dist": DIST}
+
+    def loss(viewmat: jax.Array) -> jax.Array:
+        return splax.render(*splats, viewmat=viewmat, background=jnp.zeros(3), **kw)[0].sum()
+
+    batched = jax.jit(jax.vmap(jax.grad(loss)))(VIEWS)
+    single = jnp.stack([jax.jit(jax.grad(loss))(view) for view in VIEWS])
+    np.testing.assert_allclose(batched, single, rtol=1e-5, atol=1e-5)
 
 
 # region batched render

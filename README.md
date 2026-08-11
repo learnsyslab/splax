@@ -106,6 +106,7 @@ Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the paper
 - Per-parameter Adam learning-rate schedules (gsplat, 3DGS)
 - L1 plus D-SSIM photometric loss (3DGS, gsplat, via dm-pix)
 - Camera pose gradients (gsplat projection backward)
+- Brown-Conrady lens distortion applied inside the projection
 - Batch-native backward passes under `jax.vmap(jax.grad(render))` (gsplat)
 - Batched training steps with sqrt-batch learning-rate scaling (gsplat `batch_size` and `steps_scaler`)
 - Anti-aliased opacity compensation (Mip-Splatting, gsplat), depth regularization from COLMAP points (gsplat `depth_loss`), per-image exposure correction (gsplat appearance optimization), all opt-in

@@ -25,7 +25,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import optax
-from colmap import init_from_points, read_reconstruction
+from colmap import init_from_points, read_camera, read_reconstruction
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
 
@@ -120,6 +120,7 @@ def make_step(
     H: int,
     W: int,
     intr: tuple[float, float, float, float],
+    dist: tuple[float, float, float, float, float],
     ssim_lambda: float,
     opacity_reg: float,
     scale_reg: float,
@@ -141,6 +142,7 @@ def make_step(
         H: Image height in pixels.
         W: Image width in pixels.
         intr: Camera intrinsics ``(fx, fy, cx, cy)`` in pixels.
+        dist: Brown-Conrady coefficients ``(k1, k2, p1, p2, k3)`` of the lens.
         ssim_lambda: Weight of the DSSIM term in the photometric loss.
         opacity_reg: Weight of the mean-opacity regularizer.
         scale_reg: Weight of the mean-scale regularizer.
@@ -163,7 +165,8 @@ def make_step(
         The jitted step function. It takes a per-step render-side background color ``bg`` and
         returns the updated parameters, optimizer states, and the batch-mean L1.
     """
-    camera: dict = {"img_shape": (H, W), "f": intr[:2], "c": intr[2:], "antialiased": antialiased}
+    camera: dict = {"img_shape": (H, W), "f": intr[:2], "c": intr[2:], "dist": dist}
+    camera |= {"antialiased": antialiased}
 
     def per_view(
         p: dict[str, jax.Array],
@@ -429,20 +432,10 @@ def load_scene(
 
     # intrinsics
     cam_name, W0, H0, params = cams[images[0]["camera_id"]]
-    if cam_name in (
-        "SIMPLE_PINHOLE",
-        "SIMPLE_RADIAL",
-        "RADIAL",
-        "SIMPLE_RADIAL_FISHEYE",
-        "RADIAL_FISHEYE",
-        "FOV",
-    ):
-        fx = fy = params[0]
-        cx, cy = params[1], params[2]
-    else:  # PINHOLE, OPENCV, OPENCV_FISHEYE, FULL_OPENCV, THIN_PRISM_FISHEYE
-        fx, fy, cx, cy = params[0], params[1], params[2], params[3]
+    (fx, fy, cx, cy), dist = read_camera(cam_name, params)
     W, H = W0 // downscale, H0 // downscale
     r = W / W0
+    # Distortion coefficients live on normalized coordinates and survive the downscale untouched.
     intr = (fx * r, fy * r, cx * r, cy * r)
 
     def _load_view(im: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -501,6 +494,7 @@ def load_scene(
         "H": H,
         "W": W,
         "intr": intr,
+        "dist": dist,
         "pts_xyz": pts_xyz,
         "pts_rgb": pts_rgb,
         "pts_track_lens": pts_track_lens,
@@ -569,7 +563,7 @@ def train(args: argparse.Namespace) -> dict:
         frame_step=args.frame_step,
         adaptive_views=args.adaptive_views,
     )
-    H, W, intr = scene["H"], scene["W"], scene["intr"]
+    H, W, intr, dist = scene["H"], scene["W"], scene["intr"], scene["dist"]
     ntr = scene["train_imgs"].shape[0]
     logger.info(f"{ntr} train / {len(scene['eval_names'])} eval views")
     logger.info(f"{scene['pts_xyz'].shape[0]} sparse points -> {args.n} gaussians")
@@ -597,7 +591,7 @@ def train(args: argparse.Namespace) -> dict:
     eval_imgs = [scene["eval_imgs"][i] for i in range(len(scene["eval_names"]))]
     eval_vms = [jnp.asarray(scene["eval_vms"][i]) for i in range(len(eval_imgs))]
 
-    camera: dict = {"img_shape": (H, W), "f": intr[:2], "c": intr[2:]}
+    camera: dict = {"img_shape": (H, W), "f": intr[:2], "c": intr[2:], "dist": dist}
     camera |= {"background": jnp.ones(3), "antialiased": args.antialiased}
 
     def eval_psnr(idxs: list[int]) -> list[float]:
@@ -689,6 +683,7 @@ def train(args: argparse.Namespace) -> dict:
         H,
         W,
         intr,
+        dist,
         args.ssim_lambda,
         args.opacity_reg,
         args.scale_reg,

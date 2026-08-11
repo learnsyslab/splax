@@ -70,6 +70,41 @@ def read_reconstruction(
     return cams, images, points
 
 
+# We only support camera models that can be expressed with the Brown-Conrady distortion model
+SUPPORTED_CAMERAS = frozenset(
+    ("SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL", "OPENCV", "FULL_OPENCV")
+)
+
+
+def read_camera(
+    model: str, params: tuple[float, ...]
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Split a COLMAP camera into intrinsics and lens coefficients.
+
+    Args:
+        model: COLMAP camera model name, e.g. ``OPENCV``.
+        params: The model's parameter array, in COLMAP's order.
+
+    Returns:
+        Intrinsics ``(fx, fy, cx, cy)`` in pixels, and Brown-Conrady coefficients
+        ``(k1, k2, p1, p2, k3)``.
+    """
+    if model not in SUPPORTED_CAMERAS:
+        raise ValueError(f"camera model {model} is not supported, undistort first")
+    names = pycolmap.Camera(model=model, width=1, height=1, params=params).params_info
+    cam = dict.fromkeys(("k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6"), 0.0)
+    cam |= dict(zip(names.split(", "), params))
+    # COLMAP names the shared focal length "f" and the lone SIMPLE_RADIAL coefficient "k"
+    if "f" in cam:
+        cam["fx"] = cam["fy"] = cam["f"]
+    if "k" in cam:
+        cam["k1"] = cam["k"]
+    if cam["k4"] or cam["k5"] or cam["k6"]:
+        raise ValueError(f"{model} uses the terms k4 to k6, which the renderer omits")
+    intrinsics = (cam["fx"], cam["fy"], cam["cx"], cam["cy"])
+    return intrinsics, (cam["k1"], cam["k2"], cam["p1"], cam["p2"], cam["k3"])
+
+
 def knn_scales(xyz: np.ndarray, cap: float, k: int = 3) -> np.ndarray:
     """Log-scale init from the mean distance to the k nearest neighbours.
 

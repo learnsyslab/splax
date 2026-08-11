@@ -19,6 +19,7 @@ pytestmark = pytest.mark.colmap
 
 H = W = 48
 INTRINSICS = (48.0, 48.0, 24.0, 24.0)
+DIST = (0.0, 0.0, 0.0, 0.0, 0.0)
 SSIM_LAMBDA, OPACITY_REG, SCALE_REG = 0.2, 0.01, 0.01
 
 
@@ -79,6 +80,7 @@ def _updated(
         H,
         W,
         INTRINSICS,
+        DIST,
         SSIM_LAMBDA,
         opacity_reg,
         scale_reg,
@@ -167,7 +169,7 @@ def test_step_drives_the_loss_down():
     gt1, vm1 = _view(2)
     gts, vms = jnp.stack([gt0, gt1]), jnp.stack([vm0, vm1])
     opt = _optimizer(params, optax.adam(3e-3))
-    step = make_step(opt, H, W, INTRINSICS, SSIM_LAMBDA, OPACITY_REG, SCALE_REG, batch=2)
+    step = make_step(opt, H, W, INTRINSICS, DIST, SSIM_LAMBDA, OPACITY_REG, SCALE_REG, batch=2)
 
     state, bg = opt.init(params), jnp.broadcast_to(jnp.ones(3), (2, 3))
     losses = []
@@ -193,6 +195,7 @@ def test_exposure_updates_only_the_referenced_views():
         H,
         W,
         INTRINSICS,
+        DIST,
         SSIM_LAMBDA,
         OPACITY_REG,
         SCALE_REG,

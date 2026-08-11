@@ -45,6 +45,11 @@ def _project_warp(
     fy: float,
     cx: float,
     cy: float,
+    k1: float,
+    k2: float,
+    p1: float,
+    p2: float,
+    k3: float,
     glob_scale: float,
     clip_thresh: float,
     # outputs
@@ -96,6 +101,11 @@ def _project_warp(
         fy,
         cx,
         cy,
+        k1,
+        k2,
+        p1,
+        p2,
+        k3,
         glob_scale,
         clip_thresh,
     ]
@@ -143,6 +153,11 @@ def _project_kernel(
     fy: wp.float32,
     cx: wp.float32,
     cy: wp.float32,
+    k1: wp.float32,
+    k2: wp.float32,
+    p1: wp.float32,
+    p2: wp.float32,
+    k3: wp.float32,
     glob_scale: wp.float32,
     clip_thresh: wp.float32,
     # outputs
@@ -194,9 +209,7 @@ def _project_kernel(
     tz = p_view[2]
     tx = tz * wp.min(lim_x, wp.max(-lim_x, tx / tz))
     ty = tz * wp.min(lim_y, wp.max(-lim_y, ty / tz))
-    rz = 1.0 / tz
-    rz2 = rz * rz
-    J = wp.mat33(fx * rz, 0.0, -fx * tx * rz2, 0.0, fy * rz, -fy * ty * rz2, 0.0, 0.0, 0.0)
+    J = _ewa_jacobian(tx, ty, tz, fx, fy, k1, k2, p1, p2, k3)
     T = J * W
     cov = T * V3 * wp.transpose(T)
     # 0.3 px screen-space dilation, the standard 3DGS low-pass guard
@@ -210,10 +223,14 @@ def _project_kernel(
     inv_det = 1.0 / det
     conic = wp.vec3(cyy * inv_det, -cxy * inv_det, cxx * inv_det)
 
-    # pixel center from the unclamped p_view
+    # pixel center from the unclamped p_view, pushed through the lens
     rw = 1.0 / (p_view[2] + 1e-6)
-    center_x = (p_view[0] * rw) * fx + cx
-    center_y = (p_view[1] * rw) * fy + cy
+    ux = p_view[0] * rw
+    uy = p_view[1] * rw
+    ur2 = ux * ux + uy * uy
+    uradial = 1.0 + ur2 * (k1 + ur2 * (k2 + ur2 * k3))
+    center_x = (ux * uradial + 2.0 * p1 * ux * uy + p2 * (ur2 + 2.0 * ux * ux)) * fx + cx
+    center_y = (uy * uradial + p1 * (ur2 + 2.0 * uy * uy) + 2.0 * p2 * ux * uy) * fy + cy
 
     tb_x = (img_w + BLOCK_WIDTH - 1) / BLOCK_WIDTH
     tb_y = (img_h + BLOCK_WIDTH - 1) / BLOCK_WIDTH
@@ -270,6 +287,11 @@ def _project_bwd_warp(
     has_transforms: bool,
     fx: float,
     fy: float,
+    k1: float,
+    k2: float,
+    p1: float,
+    p2: float,
+    k3: float,
     glob_scale: float,
     v_mean3d: wp.array[wp.vec3],
     v_scale: wp.array[wp.vec3],
@@ -332,6 +354,11 @@ def _project_bwd_warp(
             sel_transforms,
             fx,
             fy,
+            k1,
+            k2,
+            p1,
+            p2,
+            k3,
             glob_scale,
         ],
         outputs=[v_mean3d, v_scale, v_quat, v_viewmat, v_transforms],
@@ -381,6 +408,11 @@ def _project_bwd_kernel(
     sel_transforms: wp.bool,
     fx: wp.float32,
     fy: wp.float32,
+    k1: wp.float32,
+    k2: wp.float32,
+    p1: wp.float32,
+    p2: wp.float32,
+    k3: wp.float32,
     glob_scale: wp.float32,
     # outputs
     v_mean3d: wp.array[wp.vec3],
@@ -423,10 +455,8 @@ def _project_bwd_kernel(
         V = M * wp.transpose(M)
         R = wp.quat_to_matrix(quat)
         s = glob_scale * scales[s_idx]
-        rz = 1.0 / p[2]
-        rz2 = rz * rz
         # Note that J is rebuilt from the unclamped p (the gsplat approximation)
-        J = wp.mat33(fx * rz, 0.0, -fx * p[0] * rz2, 0.0, fy * rz, -fy * p[1] * rz2, 0.0, 0.0, 0.0)
+        J = _ewa_jacobian(p[0], p[1], p[2], fx, fy, k1, k2, p1, p2, k3)
         T = J * W
         # Gradient computation, starting with the projection
         conic = conics[c_idx]
@@ -435,7 +465,9 @@ def _project_bwd_kernel(
         G = wp.mat22(v_conic[0], 0.5 * v_conic[1], 0.5 * v_conic[1], v_conic[2])
         S = X * G * X
         vcov2d = wp.vec3(-S[0, 0], -(S[0, 1] + S[1, 0]), -S[1, 1])
-        v_p, v_T, v_V = _proj_vjp(p, T, W, V, fx, fy, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d)
+        v_p, v_T, v_V = _proj_vjp(
+            p, T, W, V, fx, fy, k1, k2, p1, p2, k3, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d
+        )
         v_mean_world = wp.transpose(W) * v_p  # world-space mean cotangent
         v_M_world = (v_V + wp.transpose(v_V)) * M  # covariance-factor cotangent
         v_mean_out, v_M, v_R_tf, v_t_tf = _transform_vjp(
@@ -490,11 +522,19 @@ def _proj_vjp(
     V: wp.mat33,
     fx: wp.float32,
     fy: wp.float32,
+    k1: wp.float32,
+    k2: wp.float32,
+    p1: wp.float32,
+    p2: wp.float32,
+    k3: wp.float32,
     v_xy: wp.vec2,
     v_depth: wp.float32,
     vcov2d: wp.vec3,
 ) -> tuple[wp.vec3, wp.mat33, wp.mat33]:
     """Gradient wrt the camera-space position, the EWA Jacobian, and the world covariance.
+
+    The lens enters twice, once between the screen cotangent and the perspective divide, and once
+    through its own variation with the normalized coordinates.
 
     Note:
         p is the unclamped camera-space position
@@ -506,27 +546,60 @@ def _proj_vjp(
     rz2 = rz * rz
     rz3 = rz2 * rz
     rw = 1.0 / (tz + 1e-6)
+    nx = tx * rz
+    ny = ty * rz
+    r2 = nx * nx + ny * ny
+    d = _lens_jacobian(nx, ny, k1, k2, p1, p2, k3)
+    a11 = fx * d[0]
+    a12 = fx * d[1]
+    a21 = fy * d[1]
+    a22 = fy * d[2]
+
+    # center path, the screen cotangent crosses the lens before the divide
     vpx = fx * v_xy[0]
     vpy = fy * v_xy[1]
-    vvx = vpx * rw
-    vvy = vpy * rw
-    vvz = -(vpx * tx + vpy * ty) * rw * rw
+    qx = d[0] * vpx + d[1] * vpy
+    qy = d[1] * vpx + d[2] * vpy
+    vvx = qx * rw
+    vvy = qy * rw
+    vvz = -(qx * tx + qy * ty) * rw * rw
     # the depth cotangent adds onto the z component of the position grad
     vvz = vvz + v_depth
+
     v_cov = wp.mat33(
         vcov2d[0], 0.5 * vcov2d[1], 0.0, 0.5 * vcov2d[1], vcov2d[2], 0.0, 0.0, 0.0, 0.0
     )
     v_V = wp.transpose(T) * v_cov * T
     v_T = 2.0 * v_cov * T * V  # v_cov is symmetric, so v_cov T V + v_cov^T T V = 2 v_cov T V
     v_J = v_T * wp.transpose(W)
-    v_t_x = -fx * rz2 * v_J[0, 2]
-    v_t_y = -fy * rz2 * v_J[1, 2]
-    v_t_z = (
-        -fx * rz2 * v_J[0, 0]
-        + 2.0 * fx * tx * rz3 * v_J[0, 2]
-        - fy * rz2 * v_J[1, 1]
-        + 2.0 * fy * ty * rz3 * v_J[1, 2]
-    )
+
+    # covariance path, the perspective terms with the lens jacobian held fixed
+    v_t_x = -rz2 * (a11 * v_J[0, 2] + a21 * v_J[1, 2])
+    v_t_y = -rz2 * (a12 * v_J[0, 2] + a22 * v_J[1, 2])
+    v_t_z = -rz2 * (a11 * v_J[0, 0] + a12 * v_J[0, 1] + a21 * v_J[1, 0] + a22 * v_J[1, 1])
+    v_t_z += 2.0 * rz3 * ((a11 * tx + a12 * ty) * v_J[0, 2] + (a21 * tx + a22 * ty) * v_J[1, 2])
+
+    # covariance path, the lens jacobian itself moving with the normalized coordinates
+    va11 = v_J[0, 0] * rz - v_J[0, 2] * tx * rz2
+    va12 = v_J[0, 1] * rz - v_J[0, 2] * ty * rz2
+    va21 = v_J[1, 0] * rz - v_J[1, 2] * tx * rz2
+    va22 = v_J[1, 1] * rz - v_J[1, 2] * ty * rz2
+    vd11 = fx * va11
+    vd12 = fx * va12 + fy * va21
+    vd22 = fy * va22
+    g = k1 + r2 * (2.0 * k2 + 3.0 * k3 * r2)
+    h = 2.0 * k2 + 6.0 * k3 * r2  # d(g)/d(r2)
+    # d11 and d22 share their cross derivative with d12, so three terms cover all six partials
+    dxx = 6.0 * nx * g + 4.0 * nx * nx * nx * h + 6.0 * p2
+    dxy = 2.0 * ny * g + 4.0 * nx * nx * ny * h + 2.0 * p1
+    dyx = 2.0 * nx * g + 4.0 * nx * ny * ny * h + 2.0 * p2
+    dyy = 6.0 * ny * g + 4.0 * ny * ny * ny * h + 6.0 * p1
+    v_nx = vd11 * dxx + vd12 * dxy + vd22 * dyx
+    v_ny = vd11 * dxy + vd12 * dyx + vd22 * dyy
+    v_t_x += v_nx * rz
+    v_t_y += v_ny * rz
+    v_t_z -= (v_nx * tx + v_ny * ty) * rz2
+
     v_p = wp.vec3(vvx + v_t_x, vvy + v_t_y, vvz + v_t_z)
     return v_p, v_T, v_V
 
@@ -667,3 +740,66 @@ def _project_geom(
     if moved:
         M = R_tf * M
     return W, p, M
+
+
+@wp.func
+def _lens_jacobian(
+    nx: wp.float32,
+    ny: wp.float32,
+    k1: wp.float32,
+    k2: wp.float32,
+    p1: wp.float32,
+    p2: wp.float32,
+    k3: wp.float32,
+) -> wp.vec3:
+    """Brown-Conrady jacobian at normalized ideal coordinates, packed as ``(d11, d12, d22)``.
+
+    The matrix is symmetric because the tangential cross terms coincide, so three entries describe
+    it. It is the identity when every coefficient is zero.
+    """
+    r2 = nx * nx + ny * ny
+    radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+    g = k1 + r2 * (2.0 * k2 + 3.0 * k3 * r2)  # d(radial)/d(r2)
+    return wp.vec3(
+        radial + 2.0 * nx * nx * g + 2.0 * p1 * ny + 6.0 * p2 * nx,
+        2.0 * nx * ny * g + 2.0 * p1 * nx + 2.0 * p2 * ny,
+        radial + 2.0 * ny * ny * g + 6.0 * p1 * ny + 2.0 * p2 * nx,
+    )
+
+
+@wp.func
+def _ewa_jacobian(
+    tx: wp.float32,
+    ty: wp.float32,
+    tz: wp.float32,
+    fx: wp.float32,
+    fy: wp.float32,
+    k1: wp.float32,
+    k2: wp.float32,
+    p1: wp.float32,
+    p2: wp.float32,
+    k3: wp.float32,
+) -> wp.mat33:
+    """Affine map from camera space to pixel space, with the lens folded in.
+
+    Composing the lens jacobian into the EWA affine makes the conic and the tile extent follow the
+    distortion.
+    """
+    rz = 1.0 / tz
+    rz2 = rz * rz
+    d = _lens_jacobian(tx * rz, ty * rz, k1, k2, p1, p2, k3)
+    a11 = fx * d[0]
+    a12 = fx * d[1]
+    a21 = fy * d[1]
+    a22 = fy * d[2]
+    return wp.mat33(
+        a11 * rz,
+        a12 * rz,
+        -(a11 * tx + a12 * ty) * rz2,
+        a21 * rz,
+        a22 * rz,
+        -(a21 * tx + a22 * ty) * rz2,
+        0.0,
+        0.0,
+        0.0,
+    )

@@ -67,13 +67,42 @@ Calibrated real cameras, e.g. with COLMAP intrinsics, provide their own off-cent
 `img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian scale, and `clip_thresh` is the
 near-plane depth cutoff.
 
-`img_shape`, `f`, and `c` size the kernel launch, so they are static under `jax.jit`, see
+`dist` holds the Brown-Conrady coefficients `(k1, k2, p1, p2, k3)` that COLMAP writes for its
+`SIMPLE_RADIAL`, `RADIAL`, `OPENCV` and `FULL_OPENCV` cameras, and defaults to zero for an ideal
+lens, see [Lens distortion](#lens-distortion). Fisheye and other non-polynomial models are not
+covered.
+
+`img_shape`, `f`, `c`, and `dist` size the kernel launch, so they are static under `jax.jit`, see
 [Jitting](#jitting).
 
 ## Backgrounds
 
 `background` is a 3-dimensional RGB color composited behind the splat where transmittance remains.
 It is a constant and is not differentiated.
+
+## Lens distortion
+
+Real cameras are not ideal, and a reconstruction fitted to their photographs is only correct when
+the renderer reproduces the same lens. `dist` renders the scene through a Brown-Conrady lens.
+
+```{ .python continuation }
+render_dist = jax.jit(splax.render, static_argnames=("img_shape", "f", "c", "dist"))
+distorted, _ = render_dist(
+    means,
+    log_scales,
+    quats,
+    sh_colors,
+    logit_opacities,
+    viewmat=viewmat,
+    background=jnp.ones(3),
+    img_shape=(H, W),
+    f=(fx, fy),
+    dist=(-0.3, 0.08, 0.0, 0.0, 0.0),
+)
+```
+
+The coefficients are static and carry no gradient, so a scene can be fitted through its lens, but
+the lens itself cannot be calibrated this way.
 
 ## Antialiased mode
 
@@ -133,8 +162,8 @@ see [object pose gradients](training.md#camera-pose-and-object-pose-gradients).
 
 ## Jitting
 
-`img_shape`, `f`, and `c` size the kernel launch and `gaussian_slices` indexes it, so all four are
-static. Under `jax.jit` either declare them or close over them, otherwise the call raises.
+`img_shape`, `f`, `c`, and `dist` size the kernel launch and `gaussian_slices` indexes it, so all
+five are static. Under `jax.jit` either declare them or close over them, otherwise the call raises.
 
 ```{ .python continuation }
 render_jit = jax.jit(splax.render, static_argnames=("img_shape", "f", "c"))

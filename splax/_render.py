@@ -39,6 +39,7 @@ def render(
     img_shape: tuple[int, int],
     f: tuple[float, float],
     c: tuple[float, float] | None = None,
+    dist: tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0),
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
     antialiased: bool = False,
@@ -72,6 +73,8 @@ def render(
         img_shape: Image size as ``(height, width)`` in pixels.
         f: Focal lengths ``(fx, fy)`` in pixels.
         c: Principal point ``(cx, cy)`` in pixels, defaulting to the image center.
+        dist: Brown-Conrady coefficients ``(k1, k2, p1, p2, k3)``, zero for an ideal pinhole. The
+            coefficients are static and carry no gradient.
         glob_scale: Global factor applied to all scales.
         clip_thresh: Near-plane clipping threshold.
         antialiased: Enable the Mip-Splatting opacity compensation.
@@ -98,7 +101,7 @@ def render(
         tf_ids = transform_ids(means3d.shape[0], gaussian_slices)
 
     scales, colors, opacities = apply_activations(log_scales, sh_colors, logit_opacities)
-    camera: dict = {"img_shape": img_shape, "f": f, "c": c}
+    camera: dict = {"img_shape": img_shape, "f": f, "c": c, "dist": dist}
     camera |= {"glob_scale": glob_scale, "clip_thresh": clip_thresh}
     xys, depths, radii, conics, _, cum_tiles_hit = project(
         means3d,
