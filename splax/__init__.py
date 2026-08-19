@@ -11,7 +11,7 @@ opacities. The kernel-facing primitives splax.project and splax.rasterize take t
 instead, and splax.io.apply_activations and splax.io.invert_activations convert between the two.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 import os
 import sys
