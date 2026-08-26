@@ -13,7 +13,7 @@ the two, splax.io.sh_to_rgb and splax.io.rgb_to_sh the base color, and splax.sph
 evaluates the higher-order coefficients along a view direction.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 import os
 import sys

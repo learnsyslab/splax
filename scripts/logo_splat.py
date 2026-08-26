@@ -166,7 +166,7 @@ def init_params(n: int, H: int, W: int, seed: int = 0) -> dict[str, jax.Array]:
         "means": means,
         "log_scales": log_s,
         "quats": jax.random.normal(k[4], (n, 4)),
-        "sh_colors": jax.random.normal(k[5], (n, 3)) * 0.6,  # varied colours
+        "sh_colors": jax.random.normal(k[5], (n, 1, 3)) * 0.6,  # varied colours
         "opac_logit": jnp.full((n,), -2.0),  # sigmoid(-2) ~ 0.12: faint start
     }
 
