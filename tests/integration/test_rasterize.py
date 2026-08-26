@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 def test_rasterize_packed_vs_64bit_lego(lego_ply: Path):
     """Match the packed 32-bit sort key against the 64-bit key on the real lego scene."""
     means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(lego_ply)
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
+    colors = splax.io.sh_to_rgb(sh_colors[:, 0])
     H, W = 720, 1280
     project = jax.jit(partial(splax.project, opacities=opacities, **camera(H, W)))
     xys, depths, radii, conics, _, cum = project(means, scales, quats, VIEWMAT.at[2, 3].set(6.0))

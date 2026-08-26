@@ -2,7 +2,7 @@
 
 This page renders a scene, batches over cameras, and takes a gradient. All three share the same five
 gaussian arrays: `means` `(N, 3)`, `log_scales` `(N, 3)`, `quats` `(N, 4)` in wxyz order,
-`sh_colors` `(N, 3)` degree-0 spherical harmonics, and `logit_opacities` `(N,)`. These are
+`sh_colors` `(N, K, 3)` spherical harmonics coefficients, and `logit_opacities` `(N,)`. These are
 unconstrained as stored in a `.ply`, and an optimizer can update them without constraints.
 
 ## Render a scene
@@ -72,8 +72,8 @@ grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*splats)
 
 ## Next steps
 
-- [Rendering](../user-guide/rendering.md) covers camera conventions, backgrounds, and the
-  antialiased flag.
+- [Rendering](../user-guide/rendering.md) covers camera conventions, spherical harmonics,
+  backgrounds, and the antialiased flag.
 - [Training](../user-guide/training.md) covers camera-pose gradients, the depth channel, and the
   trainer scripts.
 - [Batching](../user-guide/batching.md) covers `vmap` semantics for inference and gradients.

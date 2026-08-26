@@ -28,6 +28,7 @@ import timeit
 from collections import namedtuple
 from datetime import datetime, timezone
 from functools import partial
+from math import isqrt
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -104,16 +105,18 @@ def build_synthetic() -> Scene:
     quats = quats / jnp.linalg.norm(quats, axis=-1, keepdims=True)
     colors = jax.random.uniform(k[5], (n, 3))
     opacities = jax.random.uniform(k[6], (n,))
-    log_scales, sh_colors, logit_opacities = splax.io.invert_activations(scales, colors, opacities)
+    log_scales, logit_opacities = splax.io.invert_activations(scales, opacities)
+    sh_colors = splax.io.rgb_to_sh(colors)[:, None]
     scene = (means, log_scales, quats, sh_colors, logit_opacities, jnp.ones(3))
     viewmats, focal = orbit(np.zeros(3), max(BATCHES), res, radius=9.0)
     description = f"Random Gaussian clusters, {n:,} splats in {SYN_CLUSTERS} compact blobs."
     return Scene("synthetic", description, scene, viewmats, res, focal)
 
 
-def build_lego() -> Scene:
+def build_lego(sh_degree: int = 0) -> Scene:
     """Trained lego splat rendered from the real NeRF-synthetic test cameras."""
     means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(LEGO_PLY)
+    sh_colors = sh_colors[:, : (sh_degree + 1) ** 2]
     scene = (means, log_scales, quats, sh_colors, logit_opacities, jnp.ones(3))
     tf = json.loads(LEGO_TF.read_text())
     focal = 0.5 * LEGO_RES / np.tan(0.5 * tf["camera_angle_x"])
@@ -121,7 +124,8 @@ def build_lego() -> Scene:
     viewmats = np.resize(viewmats, (max(BATCHES), 4, 4))  # repeat to max batch
     description = f"Trained lego splat ({means.shape[0]:,} splats), "
     description += f"{viewmats.shape[0]} real held-out test cameras."
-    return Scene("lego", description, scene, viewmats, LEGO_RES, float(focal))
+    name = "lego" if sh_degree == 0 else f"lego_sh{sh_degree}"
+    return Scene(name, description, scene, viewmats, LEGO_RES, float(focal))
 
 
 def build_hf() -> Scene:
@@ -154,16 +158,17 @@ def make_gsplat(sc: Scene, batch: int) -> Callable[[], object]:
     """Build a gsplat render over ``batch`` viewmats."""
     res, focal = sc.res, sc.focal
     means, log_scales, quats, sh_colors, logit_opacities, background = sc.scene
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    sh_degree = isqrt(sh_colors.shape[1]) - 1  # gsplat does not infer sh degree from shapes
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
     # Older torch versions crash for asarray from jax Arrays
-    arrays = (means, quats, scales, opacities, colors, background)
+    arrays = (means, quats, scales, opacities, sh_colors, background)
     *params, bg_t = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in arrays]
     k = np.array([[focal, 0.0, res / 2], [0.0, focal, res / 2], [0.0, 0.0, 1.0]], np.float32)
     ks_t = torch.as_tensor(k, device="cuda")[None].repeat(batch, 1, 1)
     views_t = torch.as_tensor(sc.viewmats[:batch], device="cuda")
 
     def run():
-        out, alpha, _ = gsplat.rasterization(*params, views_t, ks_t, res, res)
+        out, alpha, _ = gsplat.rasterization(*params, views_t, ks_t, res, res, sh_degree=sh_degree)
         _ = out + (1.0 - alpha) * bg_t
         torch.cuda.synchronize()
 
@@ -173,7 +178,7 @@ def make_gsplat(sc: Scene, batch: int) -> Callable[[], object]:
 def save_example_view(sc: Scene) -> str:
     """Render view 0 with splax and save a PNG thumbnail, return its relative path."""
     _, render = make_splax(sc, 1)
-    img = np.asarray(render(viewmat=jnp.asarray(sc.viewmats[:1]))[0])
+    img = np.clip(np.asarray(render(viewmat=jnp.asarray(sc.viewmats[:1]))[0]), 0.0, 1.0)
     img = (img * 255).astype(np.uint8)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     rel = f"benchmark_assets/{sc.name}.png"
@@ -237,7 +242,12 @@ def run_scene(name: str, framework: str) -> dict:
     }
 
 
-BUILDERS = {"synthetic": build_synthetic, "lego": build_lego, "hf": build_hf}
+BUILDERS = {
+    "synthetic": build_synthetic,
+    "lego": build_lego,
+    "lego_sh3": partial(build_lego, 3),
+    "hf": build_hf,
+}
 
 
 def main():

@@ -21,7 +21,7 @@ except ImportError as e:
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from splax.io import apply_activations
+from splax.io import apply_activations, sh_to_rgb
 
 if TYPE_CHECKING:
     import jax
@@ -66,12 +66,14 @@ class Viewer:
             means: (N, 3) float32 centers in the object frame.
             log_scales: (N, 3) log of the per-axis scales.
             quats: (N, 4) wxyz quaternions, normalized internally.
-            sh_colors: (N, 3) degree-0 SH color coefficients.
+            sh_colors: (N, K, 3) SH color coefficients. viser does not support harmonics, so we use
+                the base color.
             logit_opacities: (N,) opacity logits.
             position: Initial world position of the object.
             wxyz: Initial world orientation of the object as a wxyz quaternion.
         """
-        scales, colors, opacities = apply_activations(log_scales, sh_colors, logit_opacities)
+        scales, opacities = apply_activations(log_scales, logit_opacities)
+        colors = sh_to_rgb(sh_colors[:, 0])
         # Rotate covariances into the world frame
         scales = np.asarray(scales, np.float32)
         rot = R.from_quat(np.asarray(quats, np.float32), scalar_first=True).as_matrix()
@@ -80,7 +82,7 @@ class Viewer:
             f"/{name}",
             centers=np.asarray(means, np.float32),
             covariances=covariances,
-            rgbs=np.asarray(colors, np.float32),
+            rgbs=np.asarray(np.clip(colors, 0.0, 1.0), np.float32),  # viser wants displayable RGB
             opacities=np.asarray(opacities, np.float32)[:, None],  # viser requires (N, 1)
             position=np.asarray(position, np.float32),
             wxyz=np.asarray(wxyz, np.float32),

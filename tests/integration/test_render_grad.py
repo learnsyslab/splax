@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from math import isqrt
 from typing import TYPE_CHECKING
 
 import jax
@@ -10,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy.spatial.transform import RigidTransform
-from utils import VIEWMAT, assert_finite_difference, camera, poses, scene_params
+from utils import VIEWMAT, assert_finite_difference, camera, coeff_scene_params, poses, scene_params
 
 import splax
 
@@ -55,10 +56,12 @@ def test_render_grad():
 
 
 @pytest.mark.parametrize("antialiased", [False, True])
-def test_render_grad_finite_difference(antialiased: bool):
+@pytest.mark.parametrize("degree", [0, 3])
+def test_render_grad_finite_difference(degree: int, antialiased: bool):
     """Match the analytic directional derivative against central finite differences."""
     n, H, W = 400, 80, 80
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=7)
+    means, log_scales, quats, sh_colors, logit_opacities, background = coeff_scene_params(n, seed=7)
+    sh_colors = sh_colors[:, : (degree + 1) ** 2]
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(5), (H, W, 3))
 
@@ -68,7 +71,8 @@ def test_render_grad_finite_difference(antialiased: bool):
 
     args = (means, log_scales, quats, sh_colors, logit_opacities)
     grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3, 4)))(*args)
-    assert_finite_difference(loss, args, grads)
+    assert all(jnp.linalg.norm(g) > 0 for g in grads), "an argument has no gradient"
+    assert_finite_difference(loss, args, grads, eps=5e-3)
 
 
 def test_render_grad_viewmat():
@@ -242,10 +246,12 @@ def test_render_grad_broadcast_geometry(param: str):
 
 
 @pytest.mark.gsplat
+@pytest.mark.parametrize("degree", [0, 3])
 @pytest.mark.parametrize("n,H,W", [(3000, 128, 128), (8000, 160, 160)])
-def test_render_grad_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
+def test_render_grad_vs_gsplat(n: int, H: int, W: int, degree: int, gsplat_shim: ModuleType):
     """Match the gradients of a weighted squared-error loss against gsplat's torch autograd."""
-    means, log_scales, quats, sh_colors, logit_opacities, background = scene_params(n, seed=n)
+    means, log_scales, quats, sh_colors, logit_opacities, background = coeff_scene_params(n, seed=n)
+    sh_colors = sh_colors[:, : (degree + 1) ** 2]
     splat = (means, log_scales, quats, sh_colors, logit_opacities)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
     weights = jax.random.uniform(jax.random.key(123), (H, W, 3))
@@ -257,14 +263,21 @@ def test_render_grad_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
     g_means, g_log_scales, g_quats, g_sh_colors, g_logit_opacities = jax.jit(
         jax.grad(loss, argnums=(0, 1, 2, 3, 4))
     )(*splat)
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
-    ref_means, ref_scales, ref_quats, ref_colors, ref_opacities = gsplat_shim.grad(
-        means, scales, quats, colors, opacities, **kw, weight=np.asarray(weights)
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
+    ref_means, ref_scales, ref_quats, ref_sh_colors, ref_opacities = gsplat_shim.grad(
+        means,
+        scales,
+        quats,
+        sh_colors,
+        opacities,
+        **kw,
+        weight=np.asarray(weights),
+        sh_degree=degree,
     )
-    # gsplat differentiates the activated arrays, so its gradients pull back through the activations
-    _, pullback = jax.vjp(splax.io.apply_activations, log_scales, sh_colors, logit_opacities)
-    ref_log_scales, ref_sh_colors, ref_logit_opacities = pullback(
-        (jnp.asarray(ref_scales), jnp.asarray(ref_colors), jnp.asarray(ref_opacities))
+    # gsplat reads the coefficients directly, so only the geometry needs activations
+    _, geometry = jax.vjp(splax.io.apply_activations, log_scales, logit_opacities)
+    ref_log_scales, ref_logit_opacities = geometry(
+        (jnp.asarray(ref_scales), jnp.asarray(ref_opacities))
     )
 
     # Accumulation ordering in the kernels leads to small differences in the gradients
@@ -282,9 +295,10 @@ def test_render_grad_vs_gsplat_lego_viewmat(
     """Match the lego camera gradient against gsplat's torch autograd."""
     splat = splax.io.load_ply(lego_ply)
     means, log_scales, quats, sh_colors, logit_opacities = splat
-    # gsplat renders from the activated arrays the parameters map onto
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
-    gsplat_splat = (means, scales, quats, colors, opacities)
+    # gsplat renders from the activated geometry and reads the coefficients directly
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
+    gsplat_splat = (means, scales, quats, sh_colors, opacities)
+    degree = isqrt(sh_colors.shape[1]) - 1
     viewmat = splax.utils.nerf_camera(lego_meta["frames"][0]["transform_matrix"])
     focal = float(0.5 * LEGO_WIDTH / np.tan(0.5 * lego_meta["camera_angle_x"]))
     kw = {
@@ -303,7 +317,7 @@ def test_render_grad_vs_gsplat_lego_viewmat(
 
     grad = jax.jit(jax.grad(loss))(pose)
     reference = gsplat_shim.viewmat_grad(
-        *gsplat_splat, viewmat=pose, target=np.asarray(target), **kw
+        *gsplat_splat, viewmat=pose, target=np.asarray(target), sh_degree=degree, **kw
     )
     assert jnp.linalg.norm(grad) > 0.0, "the camera gradient is zero"
     np.testing.assert_allclose(grad, reference, rtol=1e-3, atol=1e-4)

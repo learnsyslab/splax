@@ -7,12 +7,14 @@ gsplat functions to return the same as ``splax.project`` / ``splax.render``.
 Convention differences:
 
   - Backend: gsplat uses torch.
-  - Parameterization: the shims take the activated arrays via ``splax.io.apply_activations``.
+  - Parameterization: the shims take activated arrays.
   - viewmat: gsplat always uses batched camera axes.
   - Intrinsics: gsplat takes a 3x3 K matrix rather than separate f and c values.
   - glob_scale: gsplat is missing a global scale.
   - Camera z clipping: gsplat uses `near_plane` instead of `clip_thresh`.
   - Alpha: gsplat returns the accumulated alpha with a trailing singleton channel, splax as (H, W).
+  - Colors: gsplat's spherical_harmonics returns the raw band sum, splax folds them into the render.
+  - Colors: with ``sh_degree`` set, ``colors`` holds the (N, K, 3) harmonics coefficients.
   - Depth: gsplat clamps the denominator at 1e-10, which lands on splax's depth 0.
 """
 
@@ -75,6 +77,14 @@ def project(
     return tuple(x[0].detach().cpu().numpy() for x in [radii, means2d, depths, conics])
 
 
+def spherical_harmonics(
+    coeffs: jax.Array | np.ndarray, directions: jax.Array | np.ndarray, sh_degree: int
+) -> np.ndarray:
+    """Gsplat ``spherical_harmonics`` in splax.spherical_harmonics' terms, as numpy (N, 3)."""
+    colors = gsplat.spherical_harmonics(sh_degree, cuda_tensor(directions), cuda_tensor(coeffs))
+    return torch.clamp_min(colors + 0.5, 0.0).detach().cpu().numpy()
+
+
 def render(
     means: jax.Array | np.ndarray,
     scales: jax.Array | np.ndarray,
@@ -89,6 +99,7 @@ def render(
     c: tuple[float, float],
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
+    sh_degree: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Gsplat ``rasterization`` in splax.render's terms.
 
@@ -109,6 +120,7 @@ def render(
         H,
         near_plane=float(clip_thresh),
         eps2d=0.3,
+        sh_degree=sh_degree,
         render_mode="RGB",
     )
     # gsplat returns colors composited over black plus the accumulated alpha. Put it on the
@@ -177,6 +189,7 @@ def viewmat_grad(
     c: tuple[float, float],
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
+    sh_degree: int | None = None,
 ) -> np.ndarray:
     """Gsplat gradient of ``mean((render(viewmat) - target) ** 2)`` wrt the viewmat.
 
@@ -196,6 +209,7 @@ def viewmat_grad(
         H,
         near_plane=float(clip_thresh),
         eps2d=0.3,
+        sh_degree=sh_degree,
         render_mode="RGB",
     )
     img = out[0] + (1.0 - alpha[0]) * cuda_tensor(background).reshape(3)
@@ -218,8 +232,12 @@ def grad(
     glob_scale: float = 1.0,
     clip_thresh: float = 0.01,
     weight: np.ndarray | None = None,
+    sh_degree: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Gsplat grads wrt (means, scales, quats, colors, opacities)."""
+    """Gsplat grads wrt (means, scales, quats, colors, opacities).
+
+    With ``sh_degree`` set the colors gradient is the harmonics coefficient gradient.
+    """
     H, W = img_shape
     means_t = cuda_tensor(means).requires_grad_(True)
     scales_t = cuda_tensor(scales).requires_grad_(True)
@@ -239,6 +257,7 @@ def grad(
         H,
         near_plane=float(clip_thresh),
         eps2d=0.3,
+        sh_degree=sh_degree,
         render_mode="RGB",
     )
     img = out[0] + (1.0 - alpha[0]) * cuda_tensor(background).reshape(3)

@@ -64,7 +64,7 @@ def init_params(n: int, init_scale: float, init_opa: float, seed: int = 0) -> di
         "means": jax.random.uniform(key_means, (n, 3), minval=-1.3, maxval=1.3),
         "log_scales": jnp.full((n, 3), jnp.log(init_scale)),
         "quats": jax.random.normal(key_quats, (n, 4)),
-        "colors_logit": jax.random.normal(key_colors, (n, 3)) * 0.1,
+        "colors_logit": jax.random.normal(key_colors, (n, 1, 3)) * 0.1,
         "opac_logit": jnp.full((n,), float(np.log(init_opa / (1 - init_opa)))),
     }
 
@@ -78,8 +78,7 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
 def render_args(params: dict[str, jax.Array]) -> tuple[jax.Array, ...]:
     """Map the trainer parameters onto the arguments ``splax.render`` takes.
 
-    The colour is optimized as a logit, so the rendered colour is always inside the displayable
-    range and the render's clip never binds.
+    The colour is optimized as a logit, so the rendered colour stays inside the displayable range.
     """
     sh_colors = splax.io.rgb_to_sh(jax.nn.sigmoid(params["colors_logit"]))
     return (params["means"], params["log_scales"], params["quats"], sh_colors, params["opac_logit"])
@@ -316,13 +315,13 @@ def train(args: argparse.Namespace) -> dict:
         rendered = np.clip(np.asarray(eval_render(viewmat)), 0, 1)
         iio.imwrite(
             f"results/train_lego_eval_f{frame_idx}.png",
-            (np.concatenate([rendered, gt], 1) * 255).astype(np.uint8),
+            (np.clip(np.concatenate([rendered, gt], 1), 0.0, 1.0) * 255).astype(np.uint8),
         )
 
     preview = np.clip(np.asarray(eval_render(eval_viewmats[0])), 0, 1)
     iio.imwrite(
         "results/train_lego_after.png",
-        (np.concatenate([preview, eval_imgs[0]], 1) * 255).astype(np.uint8),
+        (np.clip(np.concatenate([preview, eval_imgs[0]], 1), 0.0, 1.0) * 255).astype(np.uint8),
     )
 
     out = {

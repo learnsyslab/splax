@@ -1,15 +1,10 @@
 # IO
 
-[`splax.io`][splax.io] reads and writes 3DGS `.ply` files. The stored fields are the unconstrained
-parameters described under [Rendering](rendering.md#inputs).
+[`splax.io`][splax.io] reads and writes 3DGS `.ply` files. The stored fields are the unconstrained parameters described under [Rendering](rendering.md#inputs).
 
 ## Loading
 
-[`splax.io.load_ply`][splax.io.load_ply] reads the vertex fields without additional processing and
-returns `(means, log_scales, quats, sh_colors, logit_opacities)` as float32 JAX arrays with shapes
-`(N, 3)`, `(N, 3)`, `(N, 4)`, `(N, 3)`, `(N,)`. It takes a path, so remote splats go through
-[`splax.io.fetch`][splax.io.fetch] first, which downloads into a local cache and revalidates
-it against the remote on later calls.
+[`splax.io.load_ply`][splax.io.load_ply] reads the vertex fields without additional processing and returns `(means, log_scales, quats, sh_colors, logit_opacities)` as float32 JAX arrays with shapes `(N, 3)`, `(N, 3)`, `(N, 4)`, `(N, K, 3)`, `(N,)`. It takes a path, so remote splats go through [`splax.io.fetch`][splax.io.fetch] first, which downloads into a local cache and revalidates it against the remote on later calls.
 
 ```python
 import jax.numpy as jnp
@@ -30,8 +25,10 @@ img, _ = splax.render(
 | `means` | `x`, `y`, `z` |
 | `log_scales` | `scale_0..2` |
 | `quats` | `rot_0..3` |
-| `sh_colors` | `f_dc_0..2` |
+| `sh_colors` | `f_dc_0..2` and `f_rest_*` |
 | `logit_opacities` | `opacity` |
+
+We always load the full SH coefficients. Render a lower degree by slicing, see [Spherical harmonics](rendering.md#spherical-harmonics).
 
 ## Writing
 
@@ -43,15 +40,19 @@ processing.
 splax.io.write_ply("out.ply", *splats)
 ```
 
-splax renders spherical harmonics of degree 0 only, a single per-gaussian color, so normals are
-written as zeros and the higher-order SH field `f_rest` is omitted.
-
 ## Activated arrays
 
 [`splax.project`][splax.project] and [`splax.rasterize`][splax.rasterize] consume activated arrays,
 the linear scales, RGB colors, and `[0, 1]` opacities of [Rendering](rendering.md#inputs).
+[`splax.io.apply_activations`][splax.io.apply_activations] and
+[`splax.io.invert_activations`][splax.io.invert_activations] convert the scales and opacities,
+[`splax.io.sh_to_rgb`][splax.io.sh_to_rgb] and [`splax.io.rgb_to_sh`][splax.io.rgb_to_sh] the base
+color. Higher-order coefficients need a view direction, so they go through
+[`splax.spherical_harmonics`][splax.spherical_harmonics].
 
 ```{ .python continuation }
-scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
-log_scales, sh_colors, logit_opacities = splax.io.invert_activations(scales, colors, opacities)
+scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
+colors = splax.io.sh_to_rgb(sh_colors[:, 0])
+log_scales, logit_opacities = splax.io.invert_activations(scales, opacities)
+band0 = splax.io.rgb_to_sh(colors)
 ```

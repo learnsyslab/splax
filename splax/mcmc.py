@@ -97,7 +97,7 @@ def relocate(
         means3d: Gaussian centers, shape ``(N, 3)``.
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, shape ``(N, 4)``.
-        sh_colors: Degree-0 SH color coefficients, shape ``(N, 3)``.
+        sh_colors: SH color coefficients, shape ``(N, K, 3)``.
         logit_opacities: Opacity logits, shape ``(N,)``.
         binoms: Binomial table from ``make_binoms``.
         min_opacity: Opacity threshold at or below which a gaussian counts as dead.
@@ -128,7 +128,7 @@ def relocate(
         jnp.where(m, means3d[source], means3d),
         jnp.where(m, new_log_scales, log_scales),
         jnp.where(m, quats[source], quats),
-        jnp.where(m, sh_colors[source], sh_colors),
+        jnp.where(m[:, None], sh_colors[source], sh_colors),  # Broadcast over SH coeffs
         jnp.where(reset, new_logit_opac, logit_opacities),
     )
     return out, reset

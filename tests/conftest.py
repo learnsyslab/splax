@@ -25,7 +25,7 @@ import splax._rasterize._sort._sort as _sort
 from splax.io import fetch
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
     from types import ModuleType
 
@@ -49,11 +49,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]):
 
 
 @pytest.fixture
-def gsplat_shim() -> ModuleType:
-    """Return the gsplat wrapper used by the parity tests."""
+def gsplat_shim() -> Iterator[ModuleType]:
+    """Return the gsplat wrapper used by the parity tests and release its memory after the test."""
     import _gsplat  # imported here so collection succeeds without gsplat installed
 
-    return _gsplat
+    yield _gsplat
+    _gsplat.torch.cuda.empty_cache()
 
 
 @pytest.fixture

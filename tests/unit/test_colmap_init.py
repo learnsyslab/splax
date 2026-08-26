@@ -65,7 +65,7 @@ def test_colors_and_opacity_round_trip():
     xyz, rgb = _cloud(4000)
     p = init_from_points(xyz, rgb, 500, 0.37)
     _, index = KDTree(xyz).query(np.asarray(p["means"]), k=1)
-    colors = expit(np.asarray(p["colors_logit"])) * 255.0
+    colors = expit(np.asarray(p["colors_logit"])[:, 0]) * 255.0
     assert np.abs(colors - rgb[index]).max() < 0.1, "colors do not follow their points"
     np.testing.assert_allclose(expit(p["opac_logit"]), 0.37, rtol=1e-6)
 

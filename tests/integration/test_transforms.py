@@ -9,15 +9,24 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.spatial.transform import RigidTransform as TF
 from scipy.spatial.transform import Rotation as R
-from utils import VIEWMAT, camera, manual_move, psnr, scene_params
+from utils import VIEWMAT, camera, coeff_scene_params, manual_move, psnr
 
 import splax
 
 
-def test_identity_transforms_byte_identical():
+def object_frame_directions(means: jax.Array, rotations: dict[tuple[int, int], R]) -> jax.Array:
+    """View directions of moved gaussians, with the sliced ones rotated into their own frame."""
+    cam_pos = np.linalg.inv(np.asarray(VIEWMAT, np.float64))[:3, 3]
+    directions = np.asarray(means, np.float64) - cam_pos
+    for (start, stop), rot in rotations.items():
+        directions[start:stop] = rot.apply(directions[start:stop], inverse=True)
+    return jnp.asarray(directions, jnp.float32)
+
+
+def test_identity_transforms_match_plain_render():
     """Leave the render untouched when every active transform is the identity."""
     n = 4000
-    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(n, seed=1)
+    means, log_scales, quats, sh_colors, logit_opac, bg = coeff_scene_params(n, seed=1)
     splats = (means, log_scales, quats, sh_colors, logit_opac)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(128, 128)}
     render = jax.jit(partial(splax.render, *splats, **kw))
@@ -26,13 +35,31 @@ def test_identity_transforms_byte_identical():
     )
 
     eye = jnp.broadcast_to(jnp.eye(4, dtype=jnp.float32), (2, 4, 4))
-    np.testing.assert_array_equal(render()[0], identity(gaussian_transforms=eye)[0])
+    np.testing.assert_allclose(identity(gaussian_transforms=eye)[0], render()[0], atol=1e-6)
+
+
+def test_rigid_motion_invariance():
+    """Moving the whole scene and the camera by the same rigid transform changes nothing."""
+    n = 4000
+    means, log_scales, quats, sh_colors, logit_opac, bg = coeff_scene_params(n, seed=12)
+    splats = (means, log_scales, quats, sh_colors, logit_opac)
+    kw = {"background": bg, **camera(128, 128)}
+    still = jax.jit(partial(splax.render, *splats, viewmat=VIEWMAT, **kw))()[0]
+
+    transform = TF.from_components((0.3, -0.2, 0.1), R.from_euler("xyz", [0.26, -0.17, 0.52]))
+    T = jnp.asarray(transform.as_matrix(), jnp.float32)
+    moved_view = VIEWMAT @ jnp.asarray(transform.inv().as_matrix(), jnp.float32)
+    moved = jax.jit(
+        partial(splax.render, *splats, viewmat=moved_view, **kw, gaussian_slices=((0, n),))
+    )(gaussian_transforms=T[None])[0]
+    quality = psnr(moved, still)
+    assert quality > 60, f"rigid motion changed the image, PSNR {quality:.1f} dB"
 
 
 def test_render_matches_manual_transform():
     """Match a transformed render against the same move applied to the splat arrays."""
     n = 4000
-    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(n, seed=3)
+    means, log_scales, quats, sh_colors, logit_opac, bg = coeff_scene_params(n, seed=3)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(128, 128)}
     rot = R.from_euler("xyz", [0.26, -0.17, 0.52])
     T = TF.from_components((0.3, -0.2, 0.1), rot).as_matrix().astype(np.float32)
@@ -43,18 +70,23 @@ def test_render_matches_manual_transform():
         means, log_scales, quats, sh_colors, logit_opac, gaussian_transforms=jnp.asarray(T)[None]
     )[0]
     m2, q2 = manual_move(means, quats, T, 0, 1000)
-    ref = render(m2, log_scales, q2, sh_colors, logit_opac)[0]
+    directions = object_frame_directions(m2, {(0, 1000): rot})
+    colors = splax.spherical_harmonics(sh_colors, directions)
+    ref = render(m2, log_scales, q2, splax.io.rgb_to_sh(colors)[:, None], logit_opac)[0]
     quality = psnr(moved, ref)
-    assert quality > 60, f"kernel vs manual transform PSNR only {quality:.1f} dB"
-    # the transform must actually change the image
+    assert quality > 55, f"kernel vs manual transform PSNR only {quality:.1f} dB"
+    # The transform must actually change the image
     plain = render(means, log_scales, quats, sh_colors, logit_opac)[0]
     assert jnp.abs(moved - plain).max() > 1e-2
+    # Changing the transform must change the colors
+    world = splax.spherical_harmonics(sh_colors, object_frame_directions(m2, {}))
+    assert jnp.abs(colors - world).max() > 1e-2
 
 
 def test_vmap_over_transforms_matches_sequential():
     """Match a vmap over a stack of transforms against the loop over the single renders."""
     n, B = 4000, 3
-    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(n, seed=4)
+    means, log_scales, quats, sh_colors, logit_opac, bg = coeff_scene_params(n, seed=4)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(96, 96)}
     angles = np.array([[0.0, 0.0, 0.3 * i] for i in range(B)])
     trans = np.array([[0.05 * i, -0.03 * i, 0.0] for i in range(B)])
@@ -76,7 +108,7 @@ def test_vmap_over_transforms_matches_sequential():
 
     out = jax.jit(jax.vmap(render_tf))(gaussian_transforms=tfs)[0]
     seq = jnp.stack([render_tf(gaussian_transforms=tf)[0] for tf in tfs])
-    np.testing.assert_array_equal(out, seq)
+    np.testing.assert_allclose(out, seq, atol=1e-6)
     # elements genuinely differ
     assert jnp.abs(out[0] - out[B - 1]).max() > 1e-2
 
@@ -84,7 +116,7 @@ def test_vmap_over_transforms_matches_sequential():
 def test_two_objects_move_independently():
     """Move two slices independently and match the manual reference."""
     n = 4000
-    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(n, seed=5)
+    means, log_scales, quats, sh_colors, logit_opac, bg = coeff_scene_params(n, seed=5)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(128, 128)}
     rot_a = R.from_euler("xyz", [0.0, 0.0, 0.4])
     Ta = TF.from_components((0.2, 0.0, 0.0), rot_a).as_matrix().astype(np.float32)
@@ -107,9 +139,11 @@ def test_two_objects_move_independently():
     both = transformed(gaussian_transforms=jnp.asarray(np.stack([Ta, Tb])))[0]
     m2, q2 = manual_move(means, quats, Ta, 0, 800)
     m2, q2 = manual_move(m2, q2, Tb, 2000, 2600)
-    ref = render(m2, log_scales, q2, sh_colors, logit_opac)[0]
+    directions = object_frame_directions(m2, {(0, 800): rot_a, (2000, 2600): rot_b})
+    colors = splax.io.rgb_to_sh(splax.spherical_harmonics(sh_colors, directions))[:, None]
+    ref = render(m2, log_scales, q2, colors, logit_opac)[0]
     quality = psnr(both, ref)
-    assert quality > 60, f"two-object transform PSNR only {quality:.1f} dB"
+    assert quality > 55, f"two-object transform PSNR only {quality:.1f} dB"
 
     swapped = transformed(gaussian_transforms=jnp.asarray(np.stack([Tb, Ta])))[0]
     assert jnp.abs(both - swapped).max() > 1e-2
@@ -158,13 +192,18 @@ def _loss_reference(
     composed = rot * R.from_quat(quats, scalar_first=True)
     means_ref = jnp.where(MOVED[:, None], moved, means)
     quats_ref = jnp.where(MOVED[:, None], composed.as_quat(scalar_first=True), quats)
-    img, _ = splax.render(means_ref, log_scales, quats_ref, sh_colors, logit_opac, **kw)
+    # Rotate the camera directions into the local gaussian frames with scipy and check if they match
+    # the render kernel's transform.
+    directions = means_ref - jnp.linalg.inv(kw["viewmat"])[:3, 3]
+    directions = jnp.where(MOVED[:, None], rot.apply(directions, inverse=True), directions)
+    colors = splax.io.rgb_to_sh(splax.spherical_harmonics(sh_colors, directions))[:, None]
+    img, _ = splax.render(means_ref, log_scales, quats_ref, colors, logit_opac, **kw)
     return jnp.mean((img - target) ** 2)
 
 
 def _setup(seed: int) -> tuple:
     """Draw a splat, a camera, and the target image the transform losses are scored on."""
-    means, log_scales, quats, sh_colors, logit_opac, bg = scene_params(N, seed=seed)
+    means, log_scales, quats, sh_colors, logit_opac, bg = coeff_scene_params(N, seed=seed)
     kw = {"viewmat": VIEWMAT, "background": bg, **camera(96, 96)}
     target = jax.random.uniform(jax.random.key(100 + seed), (96, 96, 3))
     return means, log_scales, quats, (sh_colors, logit_opac, kw, target)

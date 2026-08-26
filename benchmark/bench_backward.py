@@ -22,6 +22,7 @@ import json
 import multiprocessing
 from datetime import datetime, timezone
 from functools import partial
+from math import isqrt
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -68,9 +69,10 @@ def make_gsplat_step(sc: Scene, batch: int) -> Callable[[], object]:
     """Build a gsplat training step over ``batch`` viewmats."""
     res, focal = sc.res, sc.focal
     means, log_scales, quats, sh_colors, logit_opacities, background = sc.scene
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    sh_degree = isqrt(sh_colors.shape[1]) - 1  # gsplat does not infer sh degree from shapes
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
     # Older torch versions crash for asarray from jax Arrays
-    arrays = (means, quats, scales, opacities, colors, background)
+    arrays = (means, quats, scales, opacities, sh_colors, background)
     *params, bg_t = [torch.asarray(np.asarray(x, np.float32), device="cuda") for x in arrays]
     params = [p.requires_grad_() for p in params]
     k = np.array([[focal, 0.0, res / 2], [0.0, focal, res / 2], [0.0, 0.0, 1.0]], np.float32)
@@ -81,7 +83,7 @@ def make_gsplat_step(sc: Scene, batch: int) -> Callable[[], object]:
     def run():
         for p in params:
             p.grad = None
-        out, alpha, _ = gsplat.rasterization(*params, views_t, ks_t, res, res)
+        out, alpha, _ = gsplat.rasterization(*params, views_t, ks_t, res, res, sh_degree=sh_degree)
         img = out + (1.0 - alpha) * bg_t
         loss = ((img - target_t) ** 2).mean()
         loss.backward()

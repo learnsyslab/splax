@@ -1,8 +1,6 @@
 # Rendering
 
-[`splax.render`][splax.render] is the rendering entry point. The call returns an `(image, alpha)`
-pair, where `image` is the `(H, W, 3)` render and `alpha` the `(H, W)` accumulated coverage.
-Gradients are covered under [Training](training.md).
+[`splax.render`][splax.render] is the rendering entry point. The call returns an `(image, alpha)` pair, where `image` is the `(H, W, 3)` render and `alpha` the `(H, W)` accumulated coverage. Colors are non-negative without upper bound, i.e. an image can exceed 1 and has to be clipped. Gradients are covered under [Training](training.md).
 
 We first load a splat and prepare a view matrix:
 
@@ -48,37 +46,33 @@ img, _ = splax.render(
 | `means3d` | `(N, 3)` | World positions |
 | `log_scales` | `(N, 3)` | Log of the per-axis scales |
 | `quats` | `(N, 4)` | wxyz quaternions |
-| `sh_colors` | `(N, 3)` | Degree-0 SH color coefficients, `0` is mid grey |
+| `sh_colors` | `(N, K, 3)` | SH coefficients, see [Spherical harmonics](#spherical-harmonics) |
 | `logit_opacities` | `(N,)` | Opacity logits |
 
-[`splax.io.apply_activations`][splax.io.apply_activations] and
-[`splax.io.invert_activations`][splax.io.invert_activations] convert to and from linear scales, RGB
-colors, and `[0, 1]` opacities, see [IO](io.md#activated-arrays).
+[`splax.io.apply_activations`][splax.io.apply_activations] converts the geometry to linear scales and `[0, 1]` opacities, and [`splax.io.sh_to_rgb`][splax.io.sh_to_rgb] the base color, see [IO](io.md#activated-arrays).
 
 ## Camera conventions
 
-`viewmat` is a `(4, 4)` world-to-camera matrix in the OpenCV convention (+z forward, +y down, +x
-right), consistent with COLMAP's output files. NeRF and OpenGL poses (-z forward) must be converted
- first with [`splax.utils.nerf_camera`][splax.utils.nerf_camera].
-
-`f` is the focal length `(fx, fy)` in pixels and `c` is the principal point `(cx, cy)` in pixels,
-where the optical axis meets the image plane. It defaults to the image center `(W / 2, H / 2)`.
-Calibrated real cameras, e.g. with COLMAP intrinsics, provide their own off-center values.
-`img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian scale, and `clip_thresh` is the
-near-plane depth cutoff.
-
-`dist` holds the Brown-Conrady coefficients `(k1, k2, p1, p2, k3)` that COLMAP writes for its
-`SIMPLE_RADIAL`, `RADIAL`, `OPENCV` and `FULL_OPENCV` cameras, and defaults to zero for an ideal
-lens, see [Lens distortion](#lens-distortion). Fisheye and other non-polynomial models are not
-covered.
-
-`img_shape`, `f`, `c`, and `dist` size the kernel launch, so they are static under `jax.jit`, see
-[Jitting](#jitting).
+`viewmat` is a `(4, 4)` world-to-camera matrix in the OpenCV convention (+z forward, +y down, +x right), consistent with COLMAP's output files. NeRF and OpenGL poses (-z forward) must be converted first with [`splax.utils.nerf_camera`][splax.utils.nerf_camera]. `f` is the focal length `(fx, fy)` in pixels and `c` is the principal point `(cx, cy)` in pixels, where the optical axis meets the image plane. It defaults to the image center `(W / 2, H / 2)`. Calibrated real cameras, e.g. with COLMAP intrinsics, provide their own off-center values. `img_shape` is `(H, W)`. `glob_scale` multiplies every gaussian scale, and `clip_thresh` is the near-plane depth cutoff. `dist` holds the Brown-Conrady coefficients `(k1, k2, p1, p2, k3)` that COLMAP writes for its `SIMPLE_RADIAL`, `RADIAL`, `OPENCV` and `FULL_OPENCV` cameras, and defaults to zero for an ideal lens, see [Lens distortion](#lens-distortion). Fisheye and other non-polynomial models are not covered. `img_shape`, `f`, `c`, and `dist` size the kernel launch, so they are static under `jax.jit`, see [Jitting](#jitting).
 
 ## Backgrounds
 
-`background` is a 3-dimensional RGB color composited behind the splat where transmittance remains.
-It is a constant and is not differentiated.
+`background` is a 3-dimensional RGB color composited behind the splat where transmittance remains. It is a constant and is not differentiated.
+
+## Spherical harmonics
+
+Colors are spherical harmonics coefficients. The first coefficient is a fixed color. Higher-order coefficients make the color depend on the viewing angle of the camera center to each gaussian. The degree follows from the number of coefficients:
+
+| degree | bands added | coefficients `K` | `f_rest` fields on disk |
+|---|---|---|---|
+| 0 | 1 | 1 | 0 |
+| 1 | +3 | 4 | 9 |
+| 2 | +5 | 9 | 24 |
+| 3 | +7 | 16 | 45 |
+
+Each band `l` contributes `2l + 1` basis functions. We only support degrees 0 to 3 with `K = (degree + 1) ** 2`.
+
+Render a lower degree by slicing the coefficients down to that degree's count, `sh_colors[:, :4]` for degree 1 or `sh_colors[:, :1]` for a fixed color. Rendering is differentiable with respect to the coefficients and, through the view direction, to the means, the camera pose, and the object transforms.
 
 ## Lens distortion
 
@@ -114,9 +108,7 @@ model was trained with.
 ## Dynamic scene composition
 
 Composed scenes can move whole sections of gaussians with rigid transforms to immitate moving
-objects without copying the splats. `gaussian_transforms` is a `(K, 4, 4)` stack of world-space
-transforms and `gaussian_slices` the `K` matching, non-overlapping `(start, stop)` index ranges. The
-gaussians in slice `k` move by `gaussian_transforms[k]`. Everything outside the slices stays static.
+objects without copying the splats. `gaussian_transforms` is a `(K, 4, 4)` stack of world-space transforms and `gaussian_slices` the `K` matching, non-overlapping `(start, stop)` index ranges. The gaussians in slice `k` move by `gaussian_transforms[k]`. Everything outside the slices stays static.
 
 ```{ .python continuation }
 img, _ = splax.render(
@@ -203,17 +195,16 @@ layout compiles once per distinct value.
 
 ## Low-level primitives
 
-[`splax.render`][splax.render] composes two primitives that are public in their own right.
+[`splax.render`][splax.render] composes lower-level primitives.
 
-..Warning:: All low-level primitives consume **activated** arrays, not unconstrained parameters. Use
-[`splax.io.apply_activations`][splax.io.apply_activations]/
-[`splax.io.invert_activations`][splax.io.invert_activations] to convert the parameters.
+..Warning:: All low-level primitives consume **activated** arrays, not unconstrained parameters. Use [`splax.io.apply_activations`][splax.io.apply_activations]/[`splax.io.invert_activations`][splax.io.invert_activations] for the scales and opacities and [`splax.io.sh_to_rgb`][splax.io.sh_to_rgb]/[`splax.io.rgb_to_sh`][splax.io.rgb_to_sh] for the base color. Higher-order coefficients need a view direction, so they go through [`splax.spherical_harmonics`][splax.spherical_harmonics].
 
 - [`splax.project`][splax.project] maps gaussians to the 2D screen-space.
 - [`splax.rasterize`][splax.rasterize] blends the projected gaussians into a `(H, W, 3)` image and
   its `(H, W)` alpha.
 - [`splax.rasterize_depth`][splax.rasterize_depth] blends into a `(H, W, 4)` image whose fourth
   channel is the expected depth, plus the same `(H, W)` alpha.
+- [`splax.spherical_harmonics`][splax.spherical_harmonics] evaluates `(N, K, 3)` coefficients along `(N, 3)` view directions into the `(N, 3)` colors the rasterizers take.
 
 Both rasterization primitives must be passed the same opacities [`splax.project`][splax.project] ran
 on. Failing to do so will result in crashes or incorrect renderings. Rasterization takes an

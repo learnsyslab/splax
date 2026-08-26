@@ -24,7 +24,7 @@ def test_relocate_teleports_dead_onto_alive():
     means = jax.random.uniform(k[0], (n, 3), minval=-1, maxval=1)
     log_scales = jnp.full((n, 3), jnp.log(0.05))
     quats = jax.random.normal(k[1], (n, 4))
-    sh_colors = jax.random.normal(k[2], (n, 3))
+    sh_colors = jax.random.normal(k[2], (n, 1, 3))
     # first 100 dead (opacity ~0), rest alive (opacity ~0.7)
     opac_logit = jnp.concatenate([jnp.full((100,), -20.0), jnp.full((400,), 0.85)])
 

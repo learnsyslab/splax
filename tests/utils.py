@@ -64,11 +64,23 @@ def scene_params(
         dense: Select the regime as in ``scene``.
 
     Returns:
-        means ``(n, 3)``, log_scales ``(n, 3)``, quats ``(n, 4)``, sh_colors ``(n, 3)``,
+        means ``(n, 3)``, log_scales ``(n, 3)``, quats ``(n, 4)``, sh_colors ``(n, 1, 3)``,
         logit_opacities ``(n,)``, and a background color ``(3,)``.
     """
     means, scales, quats, colors, opacities, background = scene(n, seed, dense=dense)
-    log_scales, sh_colors, logit_opacities = splax.io.invert_activations(scales, colors, opacities)
+    log_scales, logit_opacities = splax.io.invert_activations(scales, opacities)
+    sh_colors = splax.io.rgb_to_sh(colors)[:, None]
+    return means, log_scales, quats, sh_colors, logit_opacities, background
+
+
+def coeff_scene_params(
+    n: int, seed: int = 0, degree: int = 3, *, dense: bool = False
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Draw a random splat whose sh_colors carry the harmonics bands up to ``degree``."""
+    means, log_scales, quats, sh0, logit_opacities, background = scene_params(n, seed, dense=dense)
+    key = jax.random.key(seed + 50)
+    higher = jax.random.normal(key, (n, (degree + 1) ** 2 - 1, 3)) * 0.25
+    sh_colors = jnp.concatenate([sh0, higher], axis=1)
     return means, log_scales, quats, sh_colors, logit_opacities, background
 
 

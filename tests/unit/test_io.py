@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from utils import scene_params
+import pytest
+from utils import coeff_scene_params
 
 import splax
 from splax.io import load_ply
@@ -14,9 +15,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_write_ply_is_load_ply_inverse(tmp_path: Path):
+@pytest.mark.parametrize("degree", [0, 3])
+def test_write_ply_is_load_ply_inverse(degree: int, tmp_path: Path):
     """Random splats through write_ply then load_ply reproduce the parameters exactly."""
-    means, log_scales, quats, sh_colors, logit_opacities = scene_params(5000)[:5]
+    means, log_scales, quats, sh_colors, logit_opacities = coeff_scene_params(5000, degree=degree)[
+        :5
+    ]
     out = tmp_path / "rand.ply"
     splax.io.write_ply(out, means, log_scales, quats, sh_colors, logit_opacities)
 
@@ -29,9 +33,10 @@ def test_write_ply_is_load_ply_inverse(tmp_path: Path):
     np.testing.assert_array_equal(lo, logit_opacities)
 
 
-def test_repeated_ply_cycles_are_stable(tmp_path: Path):
+@pytest.mark.parametrize("degree", [0, 3])
+def test_repeated_ply_cycles_are_stable(degree: int, tmp_path: Path):
     """A second load and write cycle writes the identical bytes."""
-    splats = scene_params(5000, seed=1)[:5]
+    splats = coeff_scene_params(5000, seed=1, degree=degree)[:5]
     first, second = tmp_path / "first.ply", tmp_path / "second.ply"
     splax.io.write_ply(first, *splats)
     splax.io.write_ply(second, *load_ply(first))

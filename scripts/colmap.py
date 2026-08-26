@@ -143,8 +143,8 @@ def init_from_points(
         weights: Positive per-point sampling weights such as track lengths, shape ``(M,)``.
 
     Returns:
-        Parameter dict with the arrays ``means``, ``log_scales``, ``quats``, ``colors_logit``, and
-        ``opac_logit``.
+        Parameter dict with the arrays ``means`` (n, 3), ``log_scales`` (n, 3), ``quats`` (n, 4),
+        ``colors_logit`` (n, 1, 3), and ``opac_logit`` (n,).
     """
     rng = np.random.default_rng(seed)
     m = xyz.shape[0]
@@ -180,6 +180,6 @@ def init_from_points(
         "means": jnp.asarray(xyz_n, jnp.float32),
         "log_scales": jnp.asarray(log_scales[:, None].repeat(3, 1)),
         "quats": jnp.asarray(rng.normal(size=(n, 4)), jnp.float32),
-        "colors_logit": jnp.asarray(colors_logit, jnp.float32),
+        "colors_logit": jnp.asarray(colors_logit, jnp.float32)[:, None],
         "opac_logit": jnp.full((n,), logit(opacity), jnp.float32),
     }

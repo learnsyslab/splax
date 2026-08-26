@@ -9,22 +9,24 @@ launch and matches per-sample sequential gradients. Inputs shared across the bat
 gradients summed over the batch axis, while per-image inputs such as a batch of camera poses get
 per-image gradients.
 
-``render`` takes the unconstrained parameters, i.e. log scales, degree-0 SH colors, and logit
-opacities, and applies their activations before the projection.
+``render`` takes the unconstrained parameters, i.e. log scales, SH colors, and logit opacities, and
+applies their activations before the projection.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import jax
+import jax.numpy as jnp
+
+from splax._harmonics import spherical_harmonics
 from splax._project import project, transform_ids
 from splax._rasterize import rasterize, rasterize_depth
 from splax.io import apply_activations
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import jax
 
 
 def render(
@@ -53,6 +55,9 @@ def render(
     ``exp`` on the scales, the SH map on the colors, and the ``sigmoid`` on the opacities, are
     applied here, and the quaternions are normalized inside the projection kernel.
 
+    Colors are spherical harmonics coefficients. A single coefficient per gaussian is a fixed color,
+    and the higher bands make the color change with the viewing angle.
+
     The render is differentiable with respect to the parameters, the camera pose, and the
     transforms. Depth rendering additionally packs the differentiable expected depth map into the
     image for sparse-point depth regularization.
@@ -66,7 +71,8 @@ def render(
         means3d: Gaussian centers, shape ``(N, 3)``.
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: Rotations as wxyz quaternions, not necessarily normalized, shape ``(N, 4)``.
-        sh_colors: Degree-0 SH color coefficients, shape ``(N, 3)``.
+        sh_colors: SH color coefficients, shape ``(N, K, 3)`` with ``K`` one of 1, 4, 9, or 16,
+            corresponding to degrees 0 to 3.
         logit_opacities: Opacity logits, shape ``(N,)``.
         viewmat: World-to-camera matrix, shape ``(4, 4)``.
         background: Constant background color, shape ``(3,)``.
@@ -87,7 +93,8 @@ def render(
         contribute, which is 0 on pixels no gaussian covers. The image is ``(H, W, 3)`` RGB, or
         ``(H, W, 4)`` with the expected depth in the fourth channel if ``render_depth`` is True.
         Depth is the expected camera-space z along the optical axis, not a Euclidean range, and
-        reads 0 on pixels no gaussian covers.
+        reads 0 on pixels no gaussian covers. Colors are non-negative without upper bound, so the
+        image can exceed 1 and has to be clipped.
     """
     if (gaussian_transforms is None) != (gaussian_slices is None):
         raise ValueError("gaussian_transforms and gaussian_slices must be passed together")
@@ -100,7 +107,19 @@ def render(
             )
         tf_ids = transform_ids(means3d.shape[0], gaussian_slices)
 
-    scales, colors, opacities = apply_activations(log_scales, sh_colors, logit_opacities)
+    scales, opacities = apply_activations(log_scales, logit_opacities)
+    # -R.T @ t assumes R is valid, and the gradient would be wrong for off-manifold viewmats. inv()
+    # does not have the same issue
+    cam_pos = jnp.linalg.inv(viewmat)[:3, 3]
+    directions = means3d - cam_pos
+    if gaussian_transforms is not None:
+        assert tf_ids is not None, "transform ids accompany the transforms"
+        # Compute the directions in the local gaussian frame after transforms for correct SH colors
+        rot, offset = gaussian_transforms[:, :3, :3], gaussian_transforms[:, :3, 3]
+        shift = (rot.mT @ (offset - cam_pos)[..., None])[..., 0]
+        shift = jnp.concatenate([shift, -cam_pos[None]])  # Append one row for identity transforms
+        directions = means3d + shift[jnp.where(tf_ids < 0, len(rot), tf_ids)]
+    colors = spherical_harmonics(sh_colors, directions)
     camera: dict = {"img_shape": img_shape, "f": f, "c": c, "dist": dist}
     camera |= {"glob_scale": glob_scale, "clip_thresh": clip_thresh}
     xys, depths, radii, conics, _, cum_tiles_hit = project(

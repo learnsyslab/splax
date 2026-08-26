@@ -55,8 +55,8 @@ def test_project_vs_gsplat(gsplat_shim: ModuleType):
 @pytest.mark.gsplat
 def test_project_vs_gsplat_lego(gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path):
     """Match a projected lego scene against the gsplat projection of the same scene."""
-    means, log_scales, quats, sh_colors, logit_opacities = splax.io.load_ply(lego_ply)
-    scales, _, _ = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    means, log_scales, quats, _, _ = splax.io.load_ply(lego_ply)
+    scales = jnp.exp(log_scales)
     means, scales, quats = means[:50_000], scales[:50_000], quats[:50_000]
     H = W = 800
     focal = float(0.5 * W / np.tan(0.5 * lego_meta["camera_angle_x"]))

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 # Frame index to the reference PSNR in dB at that held-out test pose.
-KNOWN_PSNR = {0: 30.89, 25: 31.43, 50: 32.08}
+KNOWN_PSNR = {0: 34.68, 25: 35.92, 50: 38.24}
 SLACK = 0.05
 
 

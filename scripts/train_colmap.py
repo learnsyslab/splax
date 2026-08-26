@@ -514,8 +514,7 @@ def load_scene(
 def render_args(params: dict[str, jax.Array]) -> tuple[jax.Array, ...]:
     """Map the trainer parameters onto the arguments ``render`` takes.
 
-    The colour is optimized as a logit, so the rendered colour stays inside the displayable range
-    and the render's colour clip never binds.
+    The colour is optimized as a logit, so the rendered colour stays inside the displayable range.
     """
     sh_colors = splax.io.rgb_to_sh(jax.nn.sigmoid(params["colors_logit"]))
     return (params["means"], params["log_scales"], params["quats"], sh_colors, params["opac_logit"])

@@ -2,9 +2,8 @@
 
 ``load_ply`` and ``write_ply`` load and save the unconstrained parameters.
 
-``apply_activations`` and ``invert_activations`` map between those parameters and the activated
-arrays, the linear scales, RGB colors, and ``[0, 1]`` opacities the primitives consume.
-``sh_to_rgb`` and ``rgb_to_sh`` map the colors on their own.
+``apply_activations`` and ``invert_activations`` map the scales and opacities to and from the arrays
+the primitives consume, ``sh_to_rgb`` and ``rgb_to_sh`` the color.
 
 ``fetch`` downloads remote assets into a local cache and returns the cached path, so examples and
 tests can pull scenes on demand.
@@ -25,63 +24,55 @@ import jax.numpy as jnp
 import numpy as np
 from plyfile import PlyData, PlyElement
 
-# Value of the degree-0 SH basis function Y00, the constant term of the expansion splax renders.
-_C0 = 0.5 / np.sqrt(np.pi)
+from splax._harmonics import C0, COEFFICIENTS
 
 
 @jax.jit
-def sh_to_rgb(sh_colors: jax.Array | np.ndarray) -> jax.Array:
-    """Map degree-0 SH coefficients to RGB in ``[0, 1]``, where ``0`` is mid grey."""
-    return jnp.clip(sh_colors * _C0 + 0.5, 0.0, 1.0)  # files may store out-of-range coefficients
+def sh_to_rgb(base: jax.Array | np.ndarray) -> jax.Array:
+    """Map the base color coefficient ``(N, 3)`` to unclamped RGB, where ``0`` is mid grey."""
+    return jnp.maximum(base * C0 + 0.5, 0.0)
 
 
 @jax.jit
 def rgb_to_sh(colors: jax.Array | np.ndarray) -> jax.Array:
-    """Map RGB in ``[0, 1]`` to degree-0 SH coefficients."""
-    return (colors - 0.5) / _C0
+    """Map RGB in ``[0, 1]`` to the base color coefficient ``(N, 3)``."""
+    return (colors - 0.5) / C0
 
 
 @jax.jit
 def apply_activations(
-    log_scales: jax.Array | np.ndarray,
-    sh_colors: jax.Array | np.ndarray,
-    logit_opacities: jax.Array | np.ndarray,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Map stored parameters to the activated arrays ``project`` and ``rasterize`` consume.
+    log_scales: jax.Array | np.ndarray, logit_opacities: jax.Array | np.ndarray
+) -> tuple[jax.Array, jax.Array]:
+    """Map the stored geometry parameters to the arrays ``project`` and ``rasterize`` consume.
 
     Args:
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
-        sh_colors: Degree-0 SH color coefficients, shape ``(N, 3)``.
         logit_opacities: Opacity logits, shape ``(N,)``.
 
     Returns:
-        scales ``(N, 3)``, colors ``(N, 3)`` in ``[0, 1]``, and opacities ``(N,)`` in ``[0, 1]``.
+        scales ``(N, 3)`` and opacities ``(N,)`` in ``[0, 1]``.
     """
-    return jnp.exp(log_scales), sh_to_rgb(sh_colors), jax.nn.sigmoid(logit_opacities)
+    return jnp.exp(log_scales), jax.nn.sigmoid(logit_opacities)
 
 
 @jax.jit
 def invert_activations(
-    scales: jax.Array | np.ndarray,
-    colors: jax.Array | np.ndarray,
-    opacities: jax.Array | np.ndarray,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Map activated arrays to the stored parameters.
+    scales: jax.Array | np.ndarray, opacities: jax.Array | np.ndarray
+) -> tuple[jax.Array, jax.Array]:
+    """Map the activated geometry arrays to the stored parameters.
 
-    The conversion is the inverse of ``apply_activations`` in exact arithmetic. In float32 the
-    scale and opacity activations are lossy, so a value that has to survive repeated round trips
-    belongs in the parameters rather than in activated form.
+    The conversion is the inverse of ``apply_activations`` in exact arithmetic. In float32 both
+    activations are lossy, so a value that has to survive repeated round trips belongs in the
+    parameters. ``rgb_to_sh`` inverts the color map.
 
     Args:
         scales: Positive per-axis scales, shape ``(N, 3)``.
-        colors: RGB in ``[0, 1]``, shape ``(N, 3)``.
         opacities: Opacities in ``[0, 1]``, shape ``(N,)``.
 
     Returns:
-        log_scales ``(N, 3)``, sh_colors ``(N, 3)``, and logit_opacities ``(N,)``.
+        log_scales ``(N, 3)`` and logit_opacities ``(N,)``.
     """
-    logits = jax.scipy.special.logit(opacities)
-    return jnp.log(scales), rgb_to_sh(colors), logits
+    return jnp.log(scales), jax.scipy.special.logit(opacities)
 
 
 def fetch(
@@ -135,19 +126,34 @@ def load_ply(path: Path) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, ja
 
     Args:
         path: Path to a 3DGS ``.ply`` file containing the fields ``x``, ``y``, ``z``,
-            ``scale_0..2``, ``rot_0..3``, ``f_dc_0..2``, and ``opacity``.
+            ``scale_0..2``, ``rot_0..3``, ``f_dc_0..2``, ``opacity``, and optionally a block of
+            ``f_rest_j`` with the higher harmonics.
 
     Returns:
-        means (N, 3), log_scales (N, 3), quats (N, 4), sh_colors (N, 3), logit_opacities (N,) as
-        float32 jax arrays.
+        means (N, 3), log_scales (N, 3), quats (N, 4), sh_colors (N, K, 3), logit_opacities (N,) as
+        float32 jax arrays, where K is the SH coefficient count.
     """
     v = PlyData.read(str(path))["vertex"]
     means = jnp.asarray(np.stack([v["x"], v["y"], v["z"]], axis=-1), jnp.float32)
     log_scales = jnp.asarray(np.stack([v[f"scale_{i}"] for i in range(3)], axis=-1), jnp.float32)
     quats = jnp.asarray(np.stack([v[f"rot_{i}"] for i in range(4)], axis=-1), jnp.float32)
-    sh_colors = jnp.asarray(np.stack([v[f"f_dc_{i}"] for i in range(3)], axis=-1), jnp.float32)
+    base = np.stack([v[f"f_dc_{i}"] for i in range(3)], axis=-1, dtype=np.float32)[:, None]
+    rest = _load_rest(v)
+    sh_colors = base if rest is None else np.concatenate([base, rest], axis=1)
     logit_opacities = jnp.asarray(v["opacity"], jnp.float32)
-    return means, log_scales, quats, sh_colors, logit_opacities
+    return means, log_scales, quats, jnp.asarray(sh_colors), logit_opacities
+
+
+def _load_rest(vertex: PlyElement) -> np.ndarray | None:
+    """Read the higher-order coefficients of a 3DGS ``.ply`` as an (N, K - 1, 3) array."""
+    stored = sum(p.name.startswith("f_rest_") for p in vertex.properties)
+    if not stored:  # No higher-order coefficients available
+        return None
+    higher, remainder = divmod(stored, 3)
+    assert not remainder, f"f_rest holds {stored} fields, not three equal channel blocks"
+    assert higher + 1 in COEFFICIENTS, f"{higher + 1} coefficients is not a whole set of bands"
+    rest = np.stack([vertex[f"f_rest_{j}"] for j in range(stored)], axis=-1, dtype=np.float32)
+    return rest.reshape(-1, 3, higher).swapaxes(1, 2)  # Transpose from channel to band-major
 
 
 def write_ply(
@@ -165,7 +171,7 @@ def write_ply(
         means: World positions, shape ``(N, 3)``.
         log_scales: Log of the per-axis scales, shape ``(N, 3)``.
         quats: wxyz quaternions, shape ``(N, 4)``.
-        sh_colors: Degree-0 SH color coefficients, shape ``(N, 3)``.
+        sh_colors: SH color coefficients, shape ``(N, K, 3)``.
         logit_opacities: Opacity logits, shape ``(N,)``.
     """
     means = np.asarray(means, np.float32)
@@ -174,9 +180,14 @@ def write_ply(
     sh_colors = np.asarray(sh_colors, np.float32)
     logit_opacities = np.asarray(logit_opacities, np.float32)
     n = means.shape[0]
-    data = np.column_stack([means, np.zeros((n, 3)), sh_colors, logit_opacities, log_scales, quats])
-    fields = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity"]
-    fields += [f"scale_{i}" for i in range(3)] + [f"rot_{i}" for i in range(4)]
+    rest = sh_colors[:, 1:].swapaxes(1, 2).reshape(n, -1)  # Transpose back to channel-major
+    columns = [means, np.zeros((n, 3)), sh_colors[:, 0]]
+    fields = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"]
+    if rest.shape[1]:
+        columns.append(rest)
+        fields += [f"f_rest_{j}" for j in range(rest.shape[1])]
+    data = np.column_stack([*columns, logit_opacities, log_scales, quats])
+    fields += ["opacity"] + [f"scale_{i}" for i in range(3)] + [f"rot_{i}" for i in range(4)]
     verts = np.empty(n, dtype=[(f, "f4") for f in fields])
     for field, column in zip(fields, data.T, strict=True):
         verts[field] = column

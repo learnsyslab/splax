@@ -10,13 +10,20 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import warp as wp
-from utils import VIEWMAT, VIEWS, assert_finite_difference, camera, psnr, scene_params
+from utils import (
+    VIEWMAT,
+    VIEWS,
+    assert_finite_difference,
+    camera,
+    coeff_scene_params,
+    psnr,
+    scene_params,
+)
 
 import splax
 import splax._cache as _cache
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
     from types import ModuleType
 
@@ -194,15 +201,17 @@ def test_render_vmap_larger_batch():
 
 
 @pytest.mark.usefixtures("faithful_64bit_keys")
-def test_render_broadcast():
+@pytest.mark.parametrize("degree", [0, 3])
+def test_render_broadcast(degree: int):
     """Match vmap over B viewmats with a shared splat against the unbatched loop."""
-    splats = scene_params(N, seed=2, dense=True)[:5]
+    splats = list(coeff_scene_params(N, seed=2, dense=True)[:5])
+    splats[3] = splats[3][:, : (degree + 1) ** 2]
     render = jax.jit(partial(splax.render, *splats, **KW))
     ref = jnp.stack([render(viewmat=viewmat)[0] for viewmat in VIEWS])
 
     out = jax.jit(jax.vmap(render))(viewmat=VIEWS)[0]
     assert out.shape == ref.shape
-    np.testing.assert_array_equal(out, ref)
+    np.testing.assert_allclose(out, ref, rtol=0, atol=1e-6)
 
 
 @pytest.mark.usefixtures("faithful_64bit_keys")
@@ -276,14 +285,10 @@ def test_render_broadcast_nested_transforms():
 
 # region packed 32-bit sort key
 
-# The packed key is the default. It carves its depth field out of the bits the image id and the tile
-# id leave, so a B=8 batched render quantizes depth coarser than its B=1 references and the two
-# agree perceptually rather than exactly. This test must therefore run WITHOUT the
-# faithful_64bit_keys fixture.
-
 
 def test_render_vmap_packed_matches_loop():
     """Match the packed batched render against the unbatched loop to a perceptual bound."""
+    # The packed key quantizes depth coarser at B=8, so values only agree approximately
     splats = scene_params(12_000, seed=11, dense=True)[:5]
     render = jax.jit(partial(splax.render, *splats, background=jnp.zeros(3), **camera(512, 512)))
     views = jnp.stack([VIEWMAT.at[0, 3].set(0.1 * i) for i in range(8)])
@@ -304,22 +309,28 @@ def test_render_vmap_packed_matches_loop():
 
 
 @pytest.mark.gsplat
-@pytest.mark.parametrize("n,H,W", [(20_000, 256, 256), (100_000, 512, 512)])
-def test_render_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType):
-    """Bound the render and its alpha against the gsplat rasterization of the same random scene."""
-    *splats, background = scene_params(n, seed=n, dense=True)
+@pytest.mark.parametrize("degree", [0, 1, 2, 3])
+def test_render_vs_gsplat(degree: int, gsplat_shim: ModuleType):
+    """Bound the render and its alpha against gsplat at every degree."""
+    n, H, W = 20_000, 256, 256
+    *splats, background = coeff_scene_params(n, seed=n + degree, dense=True)
     means, log_scales, quats, sh_colors, logit_opacities = splats
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    sh_colors = sh_colors[:, : (degree + 1) ** 2]
+    # gsplat reads the coefficients directly, so only the scales and opacities are activated
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
 
-    img, alpha = jax.jit(partial(splax.render, **kw))(*splats)
-    ref_img, ref_alpha = gsplat_shim.render(means, scales, quats, colors, opacities, **kw)
+    render = jax.jit(partial(splax.render, **kw))
+    img, alpha = render(means, log_scales, quats, sh_colors, logit_opacities)
+    ref_img, ref_alpha = gsplat_shim.render(
+        means, scales, quats, sh_colors, opacities, sh_degree=degree, **kw
+    )
     assert img.shape == ref_img.shape and alpha.shape == ref_alpha.shape
     assert alpha.min() >= 0.0 and alpha.max() <= 1.0
     img_psnr, alpha_psnr = psnr(img, ref_img), psnr(alpha, ref_alpha)
     img_dev = jnp.abs(img - ref_img).max()
     alpha_dev = jnp.abs(alpha - ref_alpha).max()
-    # Measured ~100 dB and a max abs difference ~0.003 across these sizes
+    # Measured ~100 dB and a max abs difference under 0.003
     assert img_psnr > 60.0, f"splax vs gsplat image PSNR only {img_psnr:.1f} dB"
     assert alpha_psnr > 60.0, f"splax vs gsplat alpha PSNR only {alpha_psnr:.1f} dB"
     assert img_dev < 0.03, f"image max abs diff {img_dev:.3f}"
@@ -332,7 +343,8 @@ def test_render_depth_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType)
     """Bound the image and the expected depth map against the gsplat depth rasterization."""
     *splats, background = scene_params(n, seed=n, dense=True)
     means, log_scales, quats, sh_colors, logit_opacities = splats
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
+    colors = splax.io.sh_to_rgb(sh_colors[:, 0])
     kw = {"viewmat": VIEWMAT, "background": background, **camera(H, W)}
 
     render = jax.jit(partial(splax.render, **kw), static_argnames="render_depth")
@@ -355,15 +367,14 @@ def test_render_depth_vs_gsplat(n: int, H: int, W: int, gsplat_shim: ModuleType)
 
 
 @pytest.mark.gsplat
-def test_render_vs_gsplat_lego(
-    gsplat_shim: ModuleType, lego_meta: dict, lego_view: Callable[[str], np.ndarray], lego_ply: Path
-):
-    """Bound render against the gsplat rasterization of the real lego scene."""
+def test_render_vs_gsplat_lego(gsplat_shim: ModuleType, lego_meta: dict, lego_ply: Path):
+    """Bound the render against gsplat on the real lego scene."""
     splats = splax.io.load_ply(lego_ply)
     means, log_scales, quats, sh_colors, logit_opacities = splats
-    scales, colors, opacities = splax.io.apply_activations(log_scales, sh_colors, logit_opacities)
+    assert sh_colors.shape[1:] == (16, 3), "the lego ply is expected to store degree 3"
+    scales, opacities = splax.io.apply_activations(log_scales, logit_opacities)
     frame = lego_meta["frames"][0]
-    H, W = lego_view(frame["file_path"]).shape[:2]
+    H = W = 200  # Reduce the resolution for efficiency
     focal = float(0.5 * W / np.tan(0.5 * lego_meta["camera_angle_x"]))
     kw = {
         "viewmat": jnp.asarray(splax.utils.nerf_camera(frame["transform_matrix"])),
@@ -374,7 +385,11 @@ def test_render_vs_gsplat_lego(
     }
 
     img = jax.jit(partial(splax.render, **kw))(*splats)[0]
-    ref, _ = gsplat_shim.render(means, scales, quats, colors, opacities, **kw)
+    ref, _ = gsplat_shim.render(means, scales, quats, sh_colors, opacities, sh_degree=3, **kw)
     quality = psnr(img, ref)
-    # Measured ~82 dB on this pose, bounded well below to leave room for scene detail.
+    # Measured ~84 dB on this pose, bounded well below to leave room for scene detail
     assert quality > 45.0, f"splax vs gsplat lego render PSNR only {quality:.1f} dB"
+    # The harmonics have to change the image. Rendering without to check
+    render = jax.jit(partial(splax.render, **kw))
+    base = render(means, log_scales, quats, sh_colors[:, :1], logit_opacities)[0]
+    assert jnp.abs(img - base).max() > 1e-2

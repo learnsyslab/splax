@@ -6,9 +6,11 @@ scenes render fast and fit with jax.grad.
 splax.render is the rendering entry point. It is differentiable with respect to the gaussian
 parameters, the camera pose, and per-object rigid transforms.
 
-Gaussians are held as unconstrained parameters, i.e. log scales, degree-0 SH colors, and logit
-opacities. The kernel-facing primitives splax.project and splax.rasterize take the activated arrays
-instead, and splax.io.apply_activations and splax.io.invert_activations convert between the two.
+Gaussians are held as unconstrained parameters, i.e. log scales, SH colors, and logit opacities. The
+kernel-facing primitives splax.project and splax.rasterize take the activated arrays instead.
+splax.io.apply_activations and splax.io.invert_activations convert the scales and opacities between
+the two, splax.io.sh_to_rgb and splax.io.rgb_to_sh the base color, and splax.spherical_harmonics
+evaluates the higher-order coefficients along a view direction.
 """
 
 __version__ = "0.1.1"
@@ -33,6 +35,7 @@ import scipy  # noqa: F401, ensure scipy uses array API features
 
 from splax import io, mcmc, utils
 from splax._cache import clear_cache
+from splax._harmonics import spherical_harmonics
 from splax._project import opacity_compensation, project
 from splax._rasterize import rasterize, rasterize_depth
 from splax._render import render
@@ -44,6 +47,7 @@ __all__ = [
     "rasterize",
     "rasterize_depth",
     "render",
+    "spherical_harmonics",
     "mcmc",
     "io",
     "utils",
