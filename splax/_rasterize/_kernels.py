@@ -199,16 +199,16 @@ def _rasterize_kernel(
                 dy = s[1] - py
                 sigma = 0.5 * (s[3] * dx * dx + s[5] * dy * dy) + s[4] * dx * dy
                 alpha = wp.min(MAX_ALPHA, s[2] * wp.exp(-sigma))
-                if sigma < 0.0 or alpha < ALPHA_THRESHOLD:
-                    continue
-                next_T = T * (1.0 - alpha)
-                if next_T <= MIN_TRANSMITTANCE:
-                    done = wp.bool(True)
-                    break
-                vis = alpha * T
-                pix_out = pix_out + color_tile[t] * vis
-                T = next_T
-                cur_idx = batch_start + t
+                # Sigma/alpha guard is faster than a conditional continue in Warp
+                if sigma >= 0.0 and alpha >= ALPHA_THRESHOLD:
+                    next_T = T * (1.0 - alpha)
+                    if next_T <= MIN_TRANSMITTANCE:
+                        done = wp.bool(True)
+                        break
+                    vis = alpha * T
+                    pix_out = pix_out + color_tile[t] * vis
+                    T = next_T
+                    cur_idx = batch_start + t
 
     if inside:
         bg = background[wp.where(sel_bg, image_id, 0)]
