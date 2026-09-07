@@ -18,6 +18,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import cv2
 import dm_pix
 import imageio.v3 as iio
 import jax
@@ -338,6 +339,51 @@ def _view_depth_targets(
     return uv, depth, mask
 
 
+def _rectify(
+    images: list[dict],
+    intr: tuple[float, float, float, float],
+    dist: tuple[float, float, float, float, float],
+    size: tuple[int, int],
+) -> tuple[tuple[float, float, float, float], tuple[int, int], tuple]:
+    """Undistort a COLMAP camera onto an ideal pinhole and move its keypoints with it.
+
+    The observations that feed depth supervision are in distorted pixels, so they are rewritten in
+    place to match the rectified images.
+
+    Args:
+        images: COLMAP images, whose ``obs_xy`` are rewritten in place.
+        intr: Camera intrinsics ``(fx, fy, cx, cy)`` in pixels.
+        dist: Brown-Conrady coefficients ``(k1, k2, p1, p2, k3)`` of the lens.
+        size: Image size ``(width, height)`` in pixels.
+
+    Returns:
+        The pinhole intrinsics, the cropped image size, and the ``(map_x, map_y, crop)`` the
+        loader remaps each photo with.
+    """
+    fx, fy, cx, cy = intr
+    W, H = size
+    # OpenCV puts the pixel origin at the top-left corner, COLMAP and splax at its center
+    K = np.array([[fx, 0.0, cx - 0.5], [0.0, fy, cy - 0.5], [0.0, 0.0, 1.0]], np.float64)
+    D = np.asarray(dist, np.float64)
+    # alpha=0 gives the largest rectangle free of blank pixels, so no invalid border is trained
+    newK, (rx, ry, rw, rh) = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 0)
+    assert rw > 0 and rh > 0, "the camera rectifies to an empty image, check the COLMAP fit"
+    map_x, map_y = cv2.initUndistortRectifyMap(K, D, None, newK, (W, H), cv2.CV_32FC1)
+    newK[:2, 2] -= (rx, ry)
+    splits = np.cumsum([len(im["obs_xy"]) for im in images])[:-1]
+    obs = np.concatenate([im["obs_xy"] for im in images]).reshape(-1, 1, 2) - 0.5
+    obs = cv2.undistortPoints(obs, K, D, P=newK).reshape(-1, 2) + 0.5
+    for im, chunk in zip(images, np.split(obs, splits), strict=True):
+        im["obs_xy"] = chunk
+    pinhole = (
+        float(newK[0, 0]),
+        float(newK[1, 1]),
+        float(newK[0, 2]) + 0.5,
+        float(newK[1, 2]) + 0.5,
+    )
+    return pinhole, (int(rw), int(rh)), (map_x, map_y, np.s_[ry : ry + rh, rx : rx + rw])
+
+
 def load_scene(
     data_dir: str | Path,
     downscale: int,
@@ -351,8 +397,9 @@ def load_scene(
     pose_filter: float = 0.0,
     frame_step: int = 1,
     adaptive_views: int = 0,
+    undistort: bool = True,
 ) -> dict:
-    """Load a COLMAP scene, normalized, downscaled."""
+    """Load a COLMAP scene, normalized, downscaled, and by default rectified."""
     data_dir = Path(data_dir)
     # COLMAP can emit several disconnected sub-models (sparse/0, 1, ...); the largest
     # is not always 0, so the index is selectable.
@@ -436,6 +483,15 @@ def load_scene(
     # intrinsics
     cam_name, W0, H0, params = cams[images[0]["camera_id"]]
     (fx, fy, cx, cy), dist = read_camera(cam_name, params)
+
+    # Rectify at load, where nerfstudio's datamanager also does it, and render an ideal pinhole.
+    remap = None
+    if undistort and any(dist):
+        params, (W0, H0), remap = _rectify(images, (fx, fy, cx, cy), dist, (W0, H0))
+        fx, fy, cx, cy = params
+        logger.info(f"rectified {cam_name} to PINHOLE {W0}x{H0}")
+        cam_name, dist = "PINHOLE", (0.0, 0.0, 0.0, 0.0, 0.0)
+
     W, H = W0 // downscale, H0 // downscale
     r = W / W0
     # Distortion coefficients live on normalized coordinates and survive the downscale untouched.
@@ -443,10 +499,13 @@ def load_scene(
 
     def _load_view(im: dict) -> tuple[np.ndarray, np.ndarray]:
         fp = data_dir / "images" / im["name"]
-        arr = iio.imread(fp)
+        arr = iio.imread(fp).astype(np.float32) / 255.0
+        if remap is not None:
+            m1, m2, crop = remap
+            arr = cv2.remap(arr, m1, m2, cv2.INTER_LINEAR)[crop]
         Hi, Wi = arr.shape[:2]
         fh, fw = Hi // H, Wi // W
-        arr = arr[: H * fh, : W * fw].astype(np.float32) / 255.0
+        arr = arr[: H * fh, : W * fw]
         arr = arr.reshape(H, fh, W, fw, 3).mean((1, 3))  # box downsample
         vm = normalize_pose(im["qvec"], im["tvec"])
         return arr, vm
@@ -565,6 +624,7 @@ def train(args: argparse.Namespace) -> dict:
         pose_filter=args.pose_filter,
         frame_step=args.frame_step,
         adaptive_views=args.adaptive_views,
+        undistort=args.undistort,
     )
     H, W, intr, dist = scene["H"], scene["W"], scene["intr"], scene["dist"]
     ntr = scene["train_imgs"].shape[0]
@@ -840,6 +900,12 @@ def main():
     )
     ap.add_argument("--out-ply", default="data/scenes/train.ply")
     ap.add_argument("--downscale", type=int, default=4, help="image downscale factor")
+    ap.add_argument(
+        "--undistort",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="rectify the photos at load and render an ideal pinhole, as nerfstudio does",
+    )
     ap.add_argument("--eval-every", type=int, default=8, help="hold out every Nth image")
     ap.add_argument("--n-eval", type=int, default=3, help="held-out views scored/rendered")
     ap.add_argument("--n", type=int, default=150_000)

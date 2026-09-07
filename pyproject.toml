@@ -26,7 +26,7 @@ dependencies = [
 viewer = ["viser>=1.0"]
 # pycolmap loads a sparse reconstruction for the training toolkit. torch stays below 2.11 because
 # newer versions target CUDA 13, while jax and the nvcc that compiles gsplat run on CUDA 12.8.
-tests = ["splax[viewer]", "pytest", "pytest-markdown-docs", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5", "pycolmap>=4.1", "matplotlib"]
+tests = ["splax[viewer]", "pytest", "pytest-markdown-docs", "torch>=2.8,<2.11", "gsplat>=1.5", "optax>=0.2.8", "dm-pix>=0.4.5", "pycolmap>=4.1", "matplotlib", "opencv-python>=4.10,<6"]
 
 [project.urls]
 Homepage = "https://github.com/learnsyslab/splax"
@@ -73,10 +73,12 @@ platforms = ["linux-64-cuda"]
 
 [tool.pixi.pypi-dependencies]
 splax = { path = "./", editable = true, extras = ["viewer"] }
-# The training scripts need an optimizer, SSIM, and a COLMAP scene loader. The library does not.
+# The training scripts need an optimizer, SSIM, a COLMAP scene loader, and the lens rectification.
+# The library does not.
 optax = ">=0.2.8"
 pycolmap = ">=4.1"
 dm-pix = ">=0.4.5"
+opencv-python = ">=4.10,<6"
 
 [tool.pixi.feature.docs.dependencies]
 python = ">=3.11"
