@@ -192,3 +192,43 @@ def write_ply(
     for field, column in zip(fields, data.T, strict=True):
         verts[field] = column
     PlyData([PlyElement.describe(verts, "vertex")], text=False).write(str(path))
+
+
+def prune(
+    means: jax.Array,
+    log_scales: jax.Array,
+    quats: jax.Array,
+    sh_colors: jax.Array,
+    logit_opacities: jax.Array,
+    *,
+    radius: float = 3.0,
+    opacity: float = 0.01,
+    scale: float = 10.0,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Prune gaussians that are significantly outside the scene.
+
+    Training creates stray gaussians outside the rendered scene, near transparent gaussians, and
+    oversized floaters. We prune all three based off the 99th percentile of the scene's statistics.
+
+    Args:
+        means: World positions, shape ``(N, 3)``.
+        log_scales: Log of the per-axis scales, shape ``(N, 3)``.
+        quats: wxyz quaternions, shape ``(N, 4)``.
+        sh_colors: SH color coefficients, shape ``(N, K, 3)``.
+        logit_opacities: Opacity logits, shape ``(N,)``.
+        radius: Multiple of the 99th percentile distance from the median center beyond which a
+            gaussian counts as a stray.
+        opacity: Opacity below which a gaussian is dropped.
+        scale: Multiple of the 99th percentile largest axis scale above which a gaussian is dropped.
+
+    Returns:
+        The five parameter arrays restricted to the kept gaussians.
+    """
+    positions = np.asarray(means)
+    distance = np.linalg.norm(positions - np.median(positions, axis=0), axis=1)
+    extent = np.exp(np.asarray(log_scales)).max(axis=1)
+    alpha = 1.0 / (1.0 + np.exp(-np.asarray(logit_opacities)))
+    keep = distance <= radius * np.percentile(distance, 99)
+    keep &= extent <= scale * np.percentile(extent, 99)
+    keep &= alpha >= opacity
+    return means[keep], log_scales[keep], quats[keep], sh_colors[keep], logit_opacities[keep]
