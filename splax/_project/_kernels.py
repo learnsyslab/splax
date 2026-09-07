@@ -50,6 +50,7 @@ def _project_warp(
     p1: float,
     p2: float,
     k3: float,
+    max_r2: float,
     glob_scale: float,
     clip_thresh: float,
     # outputs
@@ -106,6 +107,7 @@ def _project_warp(
         p1,
         p2,
         k3,
+        max_r2,
         glob_scale,
         clip_thresh,
     ]
@@ -158,6 +160,7 @@ def _project_kernel(
     p1: wp.float32,
     p2: wp.float32,
     k3: wp.float32,
+    max_r2: wp.float32,
     glob_scale: wp.float32,
     clip_thresh: wp.float32,
     # outputs
@@ -197,6 +200,12 @@ def _project_kernel(
     W, p_view, M = _project_geom(mean, quat, scales[s_idx], glob_scale, viewmat, vb, R_tf, moved)
     if p_view[2] <= clip_thresh:
         return
+    rw = 1.0 / (p_view[2] + 1e-6)
+    ux = p_view[0] * rw
+    uy = p_view[1] * rw
+    ur2 = ux * ux + uy * uy
+    if ur2 > max_r2:  # Lens validity guard. Cull gaussians outside the valid radius
+        return
     V3 = M * wp.transpose(M)
 
     # EWA projection of the covariance
@@ -224,10 +233,6 @@ def _project_kernel(
     conic = wp.vec3(cyy * inv_det, -cxy * inv_det, cxx * inv_det)
 
     # pixel center from the unclamped p_view, pushed through the lens
-    rw = 1.0 / (p_view[2] + 1e-6)
-    ux = p_view[0] * rw
-    uy = p_view[1] * rw
-    ur2 = ux * ux + uy * uy
     uradial = 1.0 + ur2 * (k1 + ur2 * (k2 + ur2 * k3))
     center_x = (ux * uradial + 2.0 * p1 * ux * uy + p2 * (ur2 + 2.0 * ux * ux)) * fx + cx
     center_y = (uy * uradial + p1 * (ur2 + 2.0 * uy * uy) + 2.0 * p2 * ux * uy) * fy + cy

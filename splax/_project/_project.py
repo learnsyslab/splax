@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from splax._project._kernels import project_bwd_ffi, project_ffi
 
@@ -141,6 +142,33 @@ def transform_ids(n: int, slices: Sequence[tuple[int, int]]) -> jax.Array:
     return ids
 
 
+def _cull_radius_sq(
+    dist: tuple[float, float, float, float, float],
+    img_shape: tuple[int, int],
+    f: tuple[float, float],
+    c: tuple[float, float],
+) -> float:
+    """Compute the squared radius for which the coefficients still describe a lens.
+
+    The radial map must be increasing for distortions. Polynomials decrease again at some point,
+    mapping gaussians back into the image. A lens that turns over inside its own frame is not a
+    usable camera model and gets rejected.
+    """
+    k1, k2, _, _, k3 = dist
+    # Derivative of the radial map in u = r^2, highest power first
+    roots = np.roots([7.0 * k3, 5.0 * k2, 3.0 * k1, 1.0])  # Drops leading zeros, so pinhole is 1
+    positive = [r.real for r in roots if abs(r.imag) <= 1e-9 * max(1.0, abs(r.real)) and r.real > 0]
+    if not positive:
+        return np.inf
+    u = min(positive)
+    H, W = img_shape
+    corner = np.hypot(max(c[0], W - c[0]) / f[0], max(c[1], H - c[1]) / f[1])
+    reach = np.sqrt(u) * (1.0 + u * (k1 + u * (k2 + u * k3)))
+    if reach < corner:
+        raise ValueError("Lens turns over inside its own frame, not a usable camera model.")
+    return u
+
+
 # region custom vjp
 
 
@@ -172,6 +200,7 @@ def _project(
     # the dummies never enter the math.
     H, W = img_shape
     n_transforms = gaussian_transforms.shape[-3]
+    max_r2 = _cull_radius_sq(dist, img_shape, f, c)
     xys, depths, radii, conics, n_tiles_hit, cum_tiles_hit = project_ffi(
         mean3ds,
         scales,
@@ -194,6 +223,7 @@ def _project(
         dist[2],
         dist[3],
         dist[4],
+        max_r2,
         glob_scale,
         clip_thresh,
         output_dims=n,

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from utils import VIEWMAT, VIEWS, assert_finite_difference, camera, poses, scene
 
 import splax
@@ -131,6 +132,40 @@ def test_project_jit():
     means, scales, quats, _, opacities, _ = scene(3000, seed=1, dense=True)
     project = jax.jit(partial(splax.project, opacities=opacities, **camera(128, 128)))
     jax.block_until_ready(project(means, scales, quats, VIEWMAT))
+
+
+# region lens validity
+
+
+def test_project_culls_only_beyond_the_lens_validity_radius():
+    """Test that a folding lens culls the gaussians it cannot image and nothing inside the frame."""
+    dist = (0.05, -0.07, 0.0004, -0.0006, 0.0)
+    axis = np.linspace(-2.2, 2.2, 45)
+    x, y = (a.ravel() for a in np.meshgrid(axis, axis))
+    n = x.size
+    r = np.hypot(x, y)
+    # An identity view puts the means into camera space at unit depth, so r is the ideal radius.
+    means = jnp.array(np.column_stack([x, y, np.ones(n)]), jnp.float32)
+    scales = jnp.full((n, 3), 0.01, jnp.float32)
+    quats = jnp.tile(jnp.array([1.0, 0.0, 0.0, 0.0], jnp.float32), (n, 1))
+    opacities = jnp.ones((n,), jnp.float32)
+    project = jax.jit(partial(splax.project, opacities=opacities, dist=dist, **camera(128, 128)))
+    _, _, radii, _, n_tiles_hit, _ = project(means, scales, quats, jnp.eye(4))
+    live, hit = np.asarray(radii) > 0, np.asarray(n_tiles_hit)
+    outer, inner = r > 1.7, r < 0.4
+    assert outer.any() and inner.any(), "the grid must straddle the lens' validity radius"
+    assert not live[outer].any(), "a gaussian the lens folds back into the frame survived"
+    assert not hit[outer].any(), "a culled gaussian still hit tiles"
+    assert live[inner].all(), "the cull reached inside the frame"
+
+
+def test_project_rejects_a_lens_that_folds_inside_its_own_frame():
+    """Test that a camera the lens cannot cover is refused instead of silently losing content."""
+    means, scales, quats, _, opacities, _ = scene(16, seed=1)
+    dist = (-0.5, 0.0, 0.0, 0.0, 0.0)  # barrel too strong to reach its own frame corner
+    project = jax.jit(partial(splax.project, opacities=opacities, dist=dist, **camera(128, 128)))
+    with pytest.raises(ValueError, match="turns over"):
+        project(means, scales, quats, VIEWMAT)
 
 
 # region batching
