@@ -14,6 +14,7 @@ import concurrent.futures
 import json
 import logging
 import time
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -134,6 +135,7 @@ def make_step(
     pose_opt: bool = False,
     pose_reg: float = 0.0,
     batch: int = 1,
+    sh_degree: int = 0,
 ) -> Callable:
     """Build a jitted train step.
 
@@ -160,6 +162,7 @@ def make_step(
         pose_opt: Left-compose a view's 6D pose delta onto the viewmat.
         pose_reg: Weight of the L2 anchor on the pose deltas.
         batch: Number of views per step.
+        sh_degree: Harmonics degree the step fits.
 
     Returns:
         The jitted step function. It takes a per-step render-side background color ``bg`` and
@@ -184,7 +187,7 @@ def make_step(
             assert aux_p is not None
             dlt = jax.lax.dynamic_index_in_dim(aux_p["pose"], vi, axis=0, keepdims=False)
             vm = apply_pose_delta(vm, dlt)
-        splats = render_args(p)
+        splats = render_args(p, sh_degree)
         if depth_loss:
             args = {"viewmat": vm, "background": bg, "render_depth": True, **camera}
             colors, _ = render(*splats, **args)
@@ -511,12 +514,13 @@ def load_scene(
 # region Rendering / metrics
 
 
-def render_args(params: dict[str, jax.Array]) -> tuple[jax.Array, ...]:
+def render_args(params: dict[str, jax.Array], sh_degree: int) -> tuple[jax.Array, ...]:
     """Map the trainer parameters onto the arguments ``render`` takes.
 
-    The colour is optimized as a logit, so the rendered colour stays inside the displayable range.
+    The base colour is optimized as a logit, so it stays inside the displayable range.
     """
-    sh_colors = splax.io.rgb_to_sh(jax.nn.sigmoid(params["colors_logit"]))
+    base = splax.io.rgb_to_sh(jax.nn.sigmoid(params["colors_logit"]))
+    sh_colors = jnp.concatenate([base, params["sh_rest"][:, : (sh_degree + 1) ** 2 - 1]], axis=1)
     return (params["means"], params["log_scales"], params["quats"], sh_colors, params["opac_logit"])
 
 
@@ -526,10 +530,10 @@ def psnr(a: np.ndarray | jax.Array, b: np.ndarray | jax.Array) -> float:
     return -10 * np.log10(mse) if mse > 0 else float("inf")
 
 
-def save_ply(path: str | Path, params: dict[str, jax.Array]):
+def save_ply(path: str | Path, params: dict[str, jax.Array], sh_degree: int):
     """Write current parameters to a 3DGS PLY file."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    splax.io.write_ply(path, *render_args(params))
+    splax.io.write_ply(path, *render_args(params, sh_degree))
     logger.info(f"wrote {path}")
 
 
@@ -575,6 +579,7 @@ def train(args: argparse.Namespace) -> dict:
         args.seed,
         weights=scene["pts_track_lens"],
     )
+    params["sh_rest"] = jnp.zeros((args.n, (args.sh_degree + 1) ** 2 - 1, 3), jnp.float32)
 
     # host-side image stacks; move one view per step (keeps GPU memory modest)
     train_imgs = scene["train_imgs"]
@@ -594,7 +599,7 @@ def train(args: argparse.Namespace) -> dict:
     camera |= {"background": jnp.ones(3), "antialiased": args.antialiased}
 
     def eval_psnr(idxs: list[int]) -> list[float]:
-        splats = render_args(params)
+        splats = render_args(params, args.sh_degree)
         return [psnr(render(*splats, viewmat=eval_vms[i], **camera)[0], eval_imgs[i]) for i in idxs]
 
     # spread the scored eval views over the whole trajectory. The first n_eval held-out
@@ -639,6 +644,7 @@ def train(args: argparse.Namespace) -> dict:
         "quats": optax.adam(group_sched(args.quats_lr * lr_scale)),
         "colors_logit": optax.adam(group_sched(args.colors_lr * lr_scale)),
         "opac_logit": optax.adam(group_sched(args.opac_lr * lr_scale)),
+        "sh_rest": optax.adam(group_sched(args.colors_lr / 20 * lr_scale)),  # From Inria's recipe
     }
     opt = optax.multi_transform(txs, {k: k for k in params})
     opt_state = opt.init(params)
@@ -648,9 +654,11 @@ def train(args: argparse.Namespace) -> dict:
     def relocate(
         p: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
     ) -> tuple[dict[str, jax.Array], optax.OptState]:
-        splats = tuple(p[k] for k in SPLAT_KEYS)
+        colors = jnp.concatenate([p["colors_logit"], p["sh_rest"]], axis=1)
+        splats = (p["means"], p["log_scales"], p["quats"], colors, p["opac_logit"])
         new, reset = splax.mcmc.relocate(key, *splats, binoms, min_opacity=args.min_opacity)
-        return dict(zip(SPLAT_KEYS, new)), _reset_opt_state(opt_state, reset)
+        rest = {"colors_logit": new[3][:, :1], "sh_rest": new[3][:, 1:]}
+        return dict(zip(SPLAT_KEYS, new)) | rest, _reset_opt_state(opt_state, reset)
 
     @jax.jit
     def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
@@ -677,7 +685,8 @@ def train(args: argparse.Namespace) -> dict:
             aux_params["pose"] = init_pose_deltas(ntr)
         aux_tx = optax.multi_transform(aux_txs, {k: k for k in aux_params})
         aux_state = aux_tx.init(aux_params)
-    step_fn = make_step(
+    make = partial(
+        make_step,
         opt,
         H,
         W,
@@ -697,6 +706,8 @@ def train(args: argparse.Namespace) -> dict:
         pose_reg=args.pose_reg,
         batch=B,
     )
+    sh_degree = 0  # Ramp up to args.sh_degree in steps of 1 every args.sh_interval steps
+    step_fn = make(sh_degree=sh_degree)
 
     p0 = float(np.mean(eval_psnr(eval_idxs)))
     logger.info(f"point-init eval PSNR: {p0:.2f} dB")
@@ -708,6 +719,9 @@ def train(args: argparse.Namespace) -> dict:
     white = jnp.ones(3)
     t0 = time.perf_counter()
     for it in range(1, args.steps + 1):
+        if sh_degree < min(it // args.sh_interval, args.sh_degree):
+            sh_degree += 1
+            step_fn = make(sh_degree=sh_degree)
         # B consecutive view-visits per step. At B=1, pos = it -> identical to the
         # pre-T6 ``order[it % ntr]`` sequence (default path unchanged).
         vis = [int(order[((it - 1) * B + 1 + j) % ntr]) for j in range(B)]
@@ -768,7 +782,7 @@ def train(args: argparse.Namespace) -> dict:
     logger.info(f"{args.steps} steps / {args.n} gaussians in {wall:.1f}s ")
 
     if args.out_ply:
-        save_ply(args.out_ply, params)
+        save_ply(args.out_ply, params, args.sh_degree)
     if args.plot:
         _plot_curve(curve, wall, ep_final)
     result = {
@@ -829,6 +843,19 @@ def main():
     ap.add_argument("--eval-every", type=int, default=8, help="hold out every Nth image")
     ap.add_argument("--n-eval", type=int, default=3, help="held-out views scored/rendered")
     ap.add_argument("--n", type=int, default=150_000)
+    ap.add_argument(
+        "--sh-degree",
+        type=int,
+        default=3,
+        choices=(0, 1, 2, 3),
+        help="spherical harmonics degree for view-dependent color (0=fixed color)",
+    )
+    ap.add_argument(
+        "--sh-interval",
+        type=int,
+        default=500,
+        help="steps between harmonics degree activations during the warm-up",
+    )
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument(
         "--batch-size",

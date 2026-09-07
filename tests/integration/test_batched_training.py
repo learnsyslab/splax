@@ -31,6 +31,7 @@ def _params(n: int = 200, seed: int = 0) -> dict[str, jax.Array]:
         "log_scales": jnp.full((n, 3), jnp.log(0.05)),
         "quats": jax.random.normal(k[1], (n, 4)),
         "colors_logit": jax.random.normal(k[2], (n, 1, 3)) * 0.3,
+        "sh_rest": jax.random.normal(k[3], (n, 3, 3)) * 0.1,
         "opac_logit": jnp.full((n,), -1.0),
     }
 
