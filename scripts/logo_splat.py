@@ -19,7 +19,6 @@ import argparse
 import logging
 import time
 from pathlib import Path
-from typing import cast
 
 import dm_pix
 import imageio.v3 as iio
@@ -232,8 +231,7 @@ def main() -> tuple[float, float]:
     ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
         loss, grads = jax.value_and_grad(loss_fn)(p)
         updates, opt_state = opt.update(grads, opt_state, p)
-        # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-        return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, loss)
+        return (optax.apply_updates(p, updates), opt_state, loss)
 
     render_at = set(STRIP_STEPS) | set(candidate_steps())
     frames = {}  # step -> uint8 HxWx3

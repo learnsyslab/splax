@@ -11,7 +11,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import dm_pix
 import imageio.v3 as iio
@@ -132,7 +132,7 @@ def _make_step(
             params, gt_rgb, gt_alpha, bg, viewmat
         )
         updates, opt_state = opt.update(grads, opt_state, params)
-        return cast("dict[str, jax.Array]", optax.apply_updates(params, updates)), opt_state, l1
+        return optax.apply_updates(params, updates), opt_state, l1
 
     return step
 

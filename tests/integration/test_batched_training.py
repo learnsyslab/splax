@@ -10,10 +10,10 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
-from train_colmap import init_exposure, make_step
+from train_colmap import build_loss_fn, build_step_fn, init_exposure
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
+    from collections.abc import Callable, Hashable
 
 pytestmark = pytest.mark.colmap
 
@@ -63,6 +63,35 @@ def _dummy_pts(batch: int) -> tuple[jax.Array, jax.Array, jax.Array]:
     )
 
 
+def _step(
+    opt: optax.GradientTransformation,
+    batch: int,
+    *,
+    opacity_reg: float = OPACITY_REG,
+    scale_reg: float = SCALE_REG,
+    depth_loss: bool = False,
+    aux_tx: optax.GradientTransformation | None = None,
+    exp_opt: bool = False,
+) -> Callable:
+    """Build the jitted training step for the tests."""
+    camera = {"img_shape": (H, W), "f": INTRINSICS[:2], "c": INTRINSICS[2:], "dist": DIST}
+    loss_fn = build_loss_fn(
+        camera,
+        sh_degree=3,
+        ssim_lambda=SSIM_LAMBDA,
+        opacity_reg=opacity_reg,
+        scale_reg=scale_reg,
+        opacity_entropy=0.0,
+        flat_reg=0.0,
+        depth_loss=depth_loss,
+        depth_lambda=1e-2,
+        exp_opt=exp_opt,
+        pose_opt=False,
+        pose_reg=0.0,
+    )
+    return build_step_fn(opt, loss_fn, aux_tx, batch)
+
+
 def _updated(
     params: dict[str, jax.Array],
     gts: jax.Array,
@@ -76,18 +105,7 @@ def _updated(
     """Run one plain gradient-descent step over a batch of views and return the new parameters."""
     batch = gts.shape[0]
     opt = _optimizer(params, optax.sgd(1.0))
-    step = make_step(
-        opt,
-        H,
-        W,
-        INTRINSICS,
-        DIST,
-        SSIM_LAMBDA,
-        opacity_reg,
-        scale_reg,
-        depth_loss=depth_loss,
-        batch=batch,
-    )
+    step = _step(opt, batch, opacity_reg=opacity_reg, scale_reg=scale_reg, depth_loss=depth_loss)
     bg = jnp.broadcast_to(jnp.ones(3), (batch, 3))
     new, _, _ = step(params, opt.init(params), gts, vms, bg, *pts)
     return new
@@ -170,7 +188,7 @@ def test_step_drives_the_loss_down():
     gt1, vm1 = _view(2)
     gts, vms = jnp.stack([gt0, gt1]), jnp.stack([vm0, vm1])
     opt = _optimizer(params, optax.adam(3e-3))
-    step = make_step(opt, H, W, INTRINSICS, DIST, SSIM_LAMBDA, OPACITY_REG, SCALE_REG, batch=2)
+    step = _step(opt, 2)
 
     state, bg = opt.init(params), jnp.broadcast_to(jnp.ones(3), (2, 3))
     losses = []
@@ -191,20 +209,7 @@ def test_exposure_updates_only_the_referenced_views():
     exp_tx = optax.sgd(1.0)
     exp_p = {"exp": init_exposure(8)}
     exp_state = exp_tx.init(exp_p)
-    step = make_step(
-        opt,
-        H,
-        W,
-        INTRINSICS,
-        DIST,
-        SSIM_LAMBDA,
-        OPACITY_REG,
-        SCALE_REG,
-        depth_loss=True,
-        aux_tx=exp_tx,
-        exp_opt=True,
-        batch=B,
-    )
+    step = _step(opt, B, depth_loss=True, aux_tx=exp_tx, exp_opt=True)
     gts = jax.random.uniform(jax.random.key(7), (B, H, W, 3))
     vms = jnp.broadcast_to(jnp.eye(4).at[2, 3].set(4.0), (B, 4, 4))
     bg = jnp.broadcast_to(jnp.ones(3), (B, 3))

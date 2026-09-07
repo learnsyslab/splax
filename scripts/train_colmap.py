@@ -4,7 +4,8 @@ Generalized trainer for any COLMAP sparse reconstruction consisting of ``sparse/
 ``cameras.bin``, ``images.bin``, ``points3D.bin`` and an ``images/`` folder.
 
 Usage:
-    python scripts/train_colmap.py --data data/drone --out-ply data/scenes/drone.ply
+    pixi run -e tests python scripts/train_colmap.py --data data/drone --out-ply \
+        data/scenes/drone.ply
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import logging
 import time
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import cv2
 import dm_pix
@@ -59,15 +60,7 @@ def _bilinear_sample(D: jax.Array, uv: jax.Array) -> jax.Array:
     return top * (1.0 - wy) + bot * wy
 
 
-# Per-image exposure correction
-
-# Real captures drift in exposure / white-balance across frames. Without correction the splat
-# absorbs that per-view color error as spurious view-dependent color. The affine fix learns one 3x4
-# color transform per *training* image so the shared 3D color no longer has to explain per-image ISP
-# variation.
-
-# Held-out views have NO learned transform, as letting eval fit its own transform would let it cheat
-# by regressing the render onto the GT. So eval always scores the RAW render vs GT
+# region exposure correction
 
 
 def init_exposure(ntr: int) -> jax.Array:
@@ -83,12 +76,7 @@ def apply_exposure(img: jax.Array, affine: jax.Array) -> jax.Array:
     return jnp.einsum("ij,hwj->hwi", M, img) + b
 
 
-# Per-image pose refinement
-
-# COLMAP poses of handheld video carry small residual errors (blur, rolling shutter, aliased loop
-# closures). A per-training-view 6D delta (axis-angle w, translation t) is left-composed onto the
-# w2c viewmat and optimized jointly with the splat. splax accumulates viewmat gradients, so this is
-# a first-class parameter. Held-out views keep their raw COLMAP poses: eval stays honest.
+# region pose refinement
 
 
 def init_pose_deltas(ntr: int) -> jax.Array:
@@ -117,60 +105,21 @@ def apply_pose_delta(vm: jax.Array, delta: jax.Array) -> jax.Array:
     return out
 
 
-def make_step(
-    opt: optax.GradientTransformation,
-    H: int,
-    W: int,
-    intr: tuple[float, float, float, float],
-    dist: tuple[float, float, float, float, float],
+def build_loss_fn(
+    camera: dict,
+    sh_degree: int,
     ssim_lambda: float,
     opacity_reg: float,
     scale_reg: float,
-    opacity_entropy: float = 0.0,
-    flat_reg: float = 0.0,
-    antialiased: bool = False,
-    depth_loss: bool = False,
-    depth_lambda: float = 1e-2,
-    aux_tx: optax.GradientTransformation | None = None,
-    exp_opt: bool = False,
-    pose_opt: bool = False,
-    pose_reg: float = 0.0,
-    batch: int = 1,
-    sh_degree: int = 0,
+    opacity_entropy: float,
+    flat_reg: float,
+    depth_loss: bool,
+    depth_lambda: float,
+    exp_opt: bool,
+    pose_opt: bool,
+    pose_reg: float,
 ) -> Callable:
-    """Build a jitted train step.
-
-    Args:
-        opt: Optimizer for the splat parameters.
-        H: Image height in pixels.
-        W: Image width in pixels.
-        intr: Camera intrinsics ``(fx, fy, cx, cy)`` in pixels.
-        dist: Brown-Conrady coefficients ``(k1, k2, p1, p2, k3)`` of the lens.
-        ssim_lambda: Weight of the DSSIM term in the photometric loss.
-        opacity_reg: Weight of the mean-opacity regularizer.
-        scale_reg: Weight of the mean-scale regularizer.
-        opacity_entropy: Weight of the SuGaR-style opacity binarization entropy.
-        flat_reg: Weight of the SuGaR-style smallest-axis flatness regularizer.
-        antialiased: Enable the Mip-Splatting opacity compensation.
-        depth_loss: Add a scale-normalized masked L1 between the rendered expected-depth channel
-            and the sparse points' camera-space depths.
-        depth_lambda: Weight of the depth term.
-        aux_tx: Optimizer for the per-image auxiliary tables, a dict with any of ``exp`` /
-            ``pose`` per ``exp_opt`` / ``pose_opt``. Without it the step takes no auxiliary
-            arguments.
-        exp_opt: Apply a view's 3x4 affine color transform to the render before the photometric
-            terms.
-        pose_opt: Left-compose a view's 6D pose delta onto the viewmat.
-        pose_reg: Weight of the L2 anchor on the pose deltas.
-        batch: Number of views per step.
-        sh_degree: Harmonics degree the step fits.
-
-    Returns:
-        The jitted step function. It takes a per-step render-side background color ``bg`` and
-        returns the updated parameters, optimizer states, and the batch-mean L1.
-    """
-    camera: dict = {"img_shape": (H, W), "f": intr[:2], "c": intr[2:], "dist": dist}
-    camera |= {"antialiased": antialiased}
+    """Build the photometric, depth and regularization loss over a batch of views."""
 
     def per_view(
         p: dict[str, jax.Array],
@@ -247,6 +196,16 @@ def make_step(
             loss = loss + pose_reg * jnp.mean(aux_p["pose"] ** 2)
         return loss, l1
 
+    return loss_fn
+
+
+def build_step_fn(
+    opt: optax.GradientTransformation,
+    loss_fn: Callable,
+    aux_tx: optax.GradientTransformation | None,
+    batch: int,
+) -> Callable:
+    """Build the jitted optimizer step, taking the auxiliary tables only when they are trained."""
     if aux_tx is None:
 
         @jax.jit
@@ -261,12 +220,11 @@ def make_step(
             pts_mask: jax.Array,
         ) -> tuple[dict[str, jax.Array], optax.OptState, jax.Array]:
             vi = jnp.zeros((batch,), jnp.int32)  # unused when aux_tx is None
-            (loss, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+            (_, l1), grads = jax.value_and_grad(loss_fn, has_aux=True)(
                 p, None, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
             )
             updates, opt_state = opt.update(grads, opt_state, p)
-            # apply_updates is typed as the broad optax ArrayTree; the params stay a dict.
-            return (cast("dict[str, jax.Array]", optax.apply_updates(p, updates)), opt_state, l1)
+            return optax.apply_updates(p, updates), opt_state, l1
     else:
 
         @jax.jit
@@ -285,16 +243,15 @@ def make_step(
         ) -> tuple[
             dict[str, jax.Array], optax.OptState, dict[str, jax.Array], optax.OptState, jax.Array
         ]:
-            (loss, l1), (grads, aux_grads) = jax.value_and_grad(
-                loss_fn, argnums=(0, 1), has_aux=True
-            )(p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask)
+            (_, l1), (grads, aux_grads) = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)(
+                p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
+            )
             updates, opt_state = opt.update(grads, opt_state, p)
             aux_updates, aux_state = aux_tx.update(aux_grads, aux_state, aux_p)
-            # apply_updates is typed as the broad optax ArrayTree; the pytrees keep their types.
             return (
-                cast("dict[str, jax.Array]", optax.apply_updates(p, updates)),
+                optax.apply_updates(p, updates),
                 opt_state,
-                cast("dict[str, jax.Array]", optax.apply_updates(aux_p, aux_updates)),
+                optax.apply_updates(aux_p, aux_updates),
                 aux_state,
                 l1,
             )
@@ -345,21 +302,7 @@ def _rectify(
     dist: tuple[float, float, float, float, float],
     size: tuple[int, int],
 ) -> tuple[tuple[float, float, float, float], tuple[int, int], tuple]:
-    """Undistort a COLMAP camera onto an ideal pinhole and move its keypoints with it.
-
-    The observations that feed depth supervision are in distorted pixels, so they are rewritten in
-    place to match the rectified images.
-
-    Args:
-        images: COLMAP images, whose ``obs_xy`` are rewritten in place.
-        intr: Camera intrinsics ``(fx, fy, cx, cy)`` in pixels.
-        dist: Brown-Conrady coefficients ``(k1, k2, p1, p2, k3)`` of the lens.
-        size: Image size ``(width, height)`` in pixels.
-
-    Returns:
-        The pinhole intrinsics, the cropped image size, and the ``(map_x, map_y, crop)`` the
-        loader remaps each photo with.
-    """
+    """Undistort a COLMAP camera onto an ideal pinhole, rewriting its keypoints to match."""
     fx, fy, cx, cy = intr
     W, H = size
     # OpenCV puts the pixel origin at the top-left corner, COLMAP and splax at its center
@@ -384,6 +327,85 @@ def _rectify(
     return pinhole, (int(rw), int(rh)), (map_x, map_y, np.s_[ry : ry + rh, rx : rx + rw])
 
 
+def _filter_views(images: list[dict], min_obs: int, pose_filter: float) -> list[dict]:
+    """Drop the views whose pose the reconstruction constrains poorly."""
+    if min_obs > 0:
+        n_all = len(images)
+        images = [im for im in images if len(im["obs_pid"]) >= min_obs]
+        logger.info(f"min-obs filter: kept {len(images)}/{n_all} views (>= {min_obs} obs)")
+    if pose_filter <= 0:
+        return images
+    n_all = len(images)
+    centers = _camera_centers(images)
+    med_step = np.median(np.linalg.norm(np.diff(centers, axis=0), axis=1))
+    # Drop views that teleport off the trajectory. The 15-frame window is wide enough to absorb
+    # excursions of up to about 5 frames.
+    half = 7
+    keep = np.empty(n_all, bool)
+    for i in range(n_all):
+        lo, hi = max(0, i - half), min(n_all, i + half + 1)
+        keep[i] = np.linalg.norm(centers[i] - np.median(centers[lo:hi], axis=0)) <= (
+            pose_filter * med_step
+        )
+    images = [im for im, k in zip(images, keep, strict=True) if k]
+    logger.info(
+        f"pose filter: kept {len(images)}/{n_all} views "
+        f"(<= {pose_filter:g} x median step {med_step:.4f} off the median path)"
+    )
+    return images
+
+
+def _camera_centers(images: list[dict]) -> np.ndarray:
+    """Compute the world-space camera centers of a list of COLMAP images, shape ``(N, 3)``."""
+    tvecs = np.array([im["tvec"] for im in images])
+    rots = R.from_quat(np.array([im["qvec"] for im in images]), scalar_first=True)
+    return TF.from_components(tvecs, rots).inv().translation
+
+
+def _split_views(
+    images: list[dict], eval_every: int, adaptive_views: int, frame_step: int
+) -> tuple[list[dict], list[dict]]:
+    """Split the views into a held-out benchmark and a thinned training set."""
+    eval_images = images[::eval_every]
+    train_images = [im for i, im in enumerate(images) if i % eval_every != 0]
+    n_all = len(train_images)
+    if adaptive_views and n_all > adaptive_views:
+        # Path length mixes translation with rotation angle in radians, which contribute image
+        # motion of the same order at roughly unit camera distance.
+        rots = R.from_quat(np.array([im["qvec"] for im in train_images]), scalar_first=True)
+        centers = _camera_centers(train_images)
+        step = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+        arc = np.concatenate([[0.0], np.cumsum(step + (rots[1:] * rots[:-1].inv()).magnitude())])
+        targets = np.linspace(0.0, arc[-1], adaptive_views)
+        sel = np.unique(np.searchsorted(arc, targets).clip(0, n_all - 1))
+        train_images = [train_images[i] for i in sel]
+        logger.info(f"adaptive sampling: kept {len(train_images)}/{n_all} train views")
+    elif frame_step > 1:
+        train_images = train_images[::frame_step]
+        logger.info(f"frame-step {frame_step}: kept {len(train_images)}/{n_all} train views")
+    return eval_images, train_images
+
+
+def _load_view(
+    im: dict, data_dir: Path, size: tuple[int, int], remap: tuple | None, gauge: tuple
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read one photo, rectify and box-downsample it, and normalize its pose."""
+    H, W = size
+    arr = iio.imread(data_dir / "images" / im["name"]).astype(np.float32) / 255.0
+    if remap is not None:
+        map_x, map_y, crop = remap
+        arr = cv2.remap(arr, map_x, map_y, cv2.INTER_LINEAR)[crop]
+    Hi, Wi = arr.shape[:2]
+    fh, fw = Hi // H, Wi // W
+    arr = arr[: H * fh, : W * fw].reshape(H, fh, W, fw, 3).mean((1, 3))
+    s, center = gauge
+    rmat = R.from_quat(im["qvec"], scalar_first=True).as_matrix()
+    vm = np.eye(4, dtype=np.float32)
+    vm[:3, :3] = rmat
+    vm[:3, 3] = s * (im["tvec"] + rmat @ center)
+    return arr, vm
+
+
 def load_scene(
     data_dir: str | Path,
     downscale: int,
@@ -401,89 +423,20 @@ def load_scene(
 ) -> dict:
     """Load a COLMAP scene, normalized, downscaled, and by default rectified."""
     data_dir = Path(data_dir)
-    # COLMAP can emit several disconnected sub-models (sparse/0, 1, ...); the largest
-    # is not always 0, so the index is selectable.
-    sparse = data_dir / sparse_dir / str(sparse_model)
-    cams, images, points = read_reconstruction(sparse)
-    if min_obs > 0:
-        # Views with few triangulated observations have weakly constrained poses (frequent
-        # misregistrations on long video captures); drop them from train AND eval.
-        n_all = len(images)
-        images = [im for im in images if len(im["obs_pid"]) >= min_obs]
-        logger.info(f"min-obs filter: kept {len(images)}/{n_all} views (>= {min_obs} obs)")
-    if pose_filter > 0:
-        # Video captures: drop misregistered views that teleport away from the trajectory.
-        # A view is an outlier if its camera center deviates from the windowed median of the
-        # (temporally ordered) center path by more than pose_filter times the median
-        # consecutive-frame step. The window (15) absorbs excursions up to ~5 frames.
-        n_all = len(images)
-        tvecs = np.array([im["tvec"] for im in images])
-        rots = R.from_quat(np.array([im["qvec"] for im in images]), scalar_first=True)
-        ctr_path = TF.from_components(tvecs, rots).inv().translation
-        med_step = np.median(np.linalg.norm(np.diff(ctr_path, axis=0), axis=1))
-        half = 7
-        keep_mask = np.ones(n_all, bool)
-        for i in range(n_all):
-            lo, hi = max(0, i - half), min(n_all, i + half + 1)
-            resid = np.linalg.norm(ctr_path[i] - np.median(ctr_path[lo:hi], axis=0))
-            keep_mask[i] = resid <= pose_filter * med_step
-        images = [im for im, k in zip(images, keep_mask) if k]
-        logger.info(
-            f"pose filter: kept {len(images)}/{n_all} views "
-            f"(<= {pose_filter:g} x median step {med_step:.4f} off the median path)"
-        )
+    # COLMAP can emit several disconnected sub-models, and the largest is not always 0
+    cams, images, points = read_reconstruction(data_dir / sparse_dir / str(sparse_model))
+    images = _filter_views(images, min_obs, pose_filter)
     pts_xyz, pts_rgb, pts_ids, pts_track_lens = points
     id2row = {int(pid): i for i, pid in enumerate(pts_ids)}
-
-    # camera centers + similarity normalization. The gauge comes from the full filtered list,
-    # BEFORE the eval split and any train-view sampling, so runs with different sampling share
-    # the same normalized world and their eval scores stay comparable.
-    tvecs = np.array([im["tvec"] for im in images])
-    rots = R.from_quat(np.array([im["qvec"] for im in images]), scalar_first=True)
-    centers = TF.from_components(tvecs, rots).inv().translation
+    centers = _camera_centers(images)
     ctr = np.median(centers, axis=0)
     s = 1.0 / np.mean(np.linalg.norm(centers - ctr, axis=1))
-
-    # Eval split BEFORE train-view sampling: the held-out views (every eval_every-th filtered
-    # view) are a fixed benchmark, independent of how the train views are thinned.
-    eval_images = images[::eval_every]
-    train_images = [im for i, im in enumerate(images) if i % eval_every != 0]
-    if adaptive_views and len(train_images) > adaptive_views:
-        # Motion-adaptive thinning: sample views uniformly along the camera path (translation
-        # plus rotation angle in radians, which at ~unit camera distances contributes image
-        # motion of the same order). Uniform-in-time sampling underserves fast sections, which
-        # is where held-out views end up farthest from their training neighbours.
-        n_all = len(train_images)
-        tvecs = np.array([im["tvec"] for im in train_images])
-        rots = R.from_quat(np.array([im["qvec"] for im in train_images]), scalar_first=True)
-        ctr_path = TF.from_components(tvecs, rots).inv().translation
-        ang = (rots[1:] * rots[:-1].inv()).magnitude()
-        dist = np.linalg.norm(np.diff(ctr_path, axis=0), axis=1) + ang
-        arc = np.concatenate([[0.0], np.cumsum(dist)])
-        targets = np.linspace(0.0, arc[-1], adaptive_views)
-        sel = np.unique(np.searchsorted(arc, targets).clip(0, n_all - 1))
-        train_images = [train_images[i] for i in sel]
-        logger.info(f"adaptive sampling: kept {len(train_images)}/{n_all} train views")
-    elif frame_step > 1:
-        n_all = len(train_images)
-        train_images = train_images[::frame_step]
-        logger.info(f"frame-step {frame_step}: kept {len(train_images)}/{n_all} train views")
-
-    def normalize_pose(qvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
-        """Similarity-transform a w2c pose: X' = s (X - ctr). R stays, t' = s(t + R ctr)."""
-        rmat = R.from_quat(qvec, scalar_first=True).as_matrix()
-        t_new = s * (tvec + rmat @ ctr)
-        vm = np.eye(4, dtype=np.float32)
-        vm[:3, :3] = rmat
-        vm[:3, 3] = t_new
-        return vm
-
+    gauge = (s, ctr)
     pts_xyz = (s * (pts_xyz - ctr)).astype(np.float32)
+    eval_images, train_images = _split_views(images, eval_every, adaptive_views, frame_step)
 
-    # intrinsics
     cam_name, W0, H0, params = cams[images[0]["camera_id"]]
     (fx, fy, cx, cy), dist = read_camera(cam_name, params)
-
     # Rectify at load, where nerfstudio's datamanager also does it, and render an ideal pinhole.
     remap = None
     if undistort and any(dist):
@@ -491,68 +444,45 @@ def load_scene(
         fx, fy, cx, cy = params
         logger.info(f"rectified {cam_name} to PINHOLE {W0}x{H0}")
         cam_name, dist = "PINHOLE", (0.0, 0.0, 0.0, 0.0, 0.0)
-
     W, H = W0 // downscale, H0 // downscale
     r = W / W0
     # Distortion coefficients live on normalized coordinates and survive the downscale untouched.
     intr = (fx * r, fy * r, cx * r, cy * r)
 
-    def _load_view(im: dict) -> tuple[np.ndarray, np.ndarray]:
-        fp = data_dir / "images" / im["name"]
-        arr = iio.imread(fp).astype(np.float32) / 255.0
-        if remap is not None:
-            m1, m2, crop = remap
-            arr = cv2.remap(arr, m1, m2, cv2.INTER_LINEAR)[crop]
-        Hi, Wi = arr.shape[:2]
-        fh, fw = Hi // H, Wi // W
-        arr = arr[: H * fh, : W * fw]
-        arr = arr.reshape(H, fh, W, fw, 3).mean((1, 3))  # box downsample
-        vm = normalize_pose(im["qvec"], im["tvec"])
-        return arr, vm
-
-    # load and downscale images
-    n_eval = len(eval_images)
-    n_train = len(train_images)
-    # Train images are stored uint8 (converted per step); GT came from uint8 JPEGs, so the only
-    # loss is sub-LSB rounding of the box-downsample mean. Cuts host RAM 4x -> all views fit.
+    n_train, n_eval = len(train_images), len(eval_images)
+    # Train images are stored uint8, so the whole set fits in host RAM. The ground truth came from
+    # uint8 JPEGs, and the only loss is sub-LSB rounding of the box-downsample mean.
     train_imgs = np.empty((n_train, H, W, 3), np.uint8)
     train_vms = np.empty((n_train, 4, 4), np.float32)
     eval_imgs = np.empty((n_eval, H, W, 3), np.float32)
     eval_vms = np.empty((n_eval, 4, 4), np.float32)
-    eval_names: list[str] = [""] * n_eval
     tp_uv = np.empty((n_train, max_depth_pts, 2), np.float32)
     tp_depth = np.empty((n_train, max_depth_pts), np.float32)
     tp_mask = np.empty((n_train, max_depth_pts), np.float32)
     tgt_rng = np.random.default_rng(seed)
+    load = partial(_load_view, data_dir=data_dir, size=(H, W), remap=remap, gauge=gauge)
     n_workers = min(max(1, load_workers), n_train + n_eval)
     logger.info(
         f"loading {n_train} train / {n_eval} eval images at {W}x{H} "
         f"(downscale {downscale}, {n_workers} workers) ..."
     )
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        for i, (arr, vm) in enumerate(pool.map(load, eval_images)):
+            eval_imgs[i], eval_vms[i] = arr, vm
         for i, (im, (arr, vm)) in enumerate(
-            zip(eval_images, pool.map(_load_view, eval_images), strict=True)
-        ):
-            eval_imgs[i] = arr
-            eval_vms[i] = vm
-            eval_names[i] = im["name"]
-        for i, (im, (arr, vm)) in enumerate(
-            zip(train_images, pool.map(_load_view, train_images), strict=True)
+            zip(train_images, pool.map(load, train_images), strict=True)
         ):
             train_imgs[i] = np.clip(arr * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
             train_vms[i] = vm
-            uv, dep, msk = _view_depth_targets(
+            tp_uv[i], tp_depth[i], tp_mask[i] = _view_depth_targets(
                 im, vm, id2row, pts_xyz, r, W, H, max_depth_pts, tgt_rng
             )
-            tp_uv[i] = uv
-            tp_depth[i] = dep
-            tp_mask[i] = msk
     return {
         "train_imgs": train_imgs,
         "train_vms": train_vms,
         "eval_imgs": eval_imgs,
         "eval_vms": eval_vms,
-        "eval_names": eval_names,
+        "eval_names": [im["name"] for im in eval_images],
         "H": H,
         "W": W,
         "intr": intr,
@@ -644,7 +574,7 @@ def train(args: argparse.Namespace) -> dict:
     # host-side image stacks; move one view per step (keeps GPU memory modest)
     train_imgs = scene["train_imgs"]
     train_vms = jnp.asarray(scene["train_vms"])
-    # depth-reg targets (survey T2); kept on host, one view moved per step.
+    # depth targets stay on the host too, one view moved per step
     tp_uv = scene["train_pts_uv"]
     tp_depth = scene["train_pts_depth"]
     tp_mask = scene["train_pts_mask"]
@@ -656,11 +586,15 @@ def train(args: argparse.Namespace) -> dict:
     eval_vms = [jnp.asarray(scene["eval_vms"][i]) for i in range(len(eval_imgs))]
 
     camera: dict = {"img_shape": (H, W), "f": intr[:2], "c": intr[2:], "dist": dist}
-    camera |= {"background": jnp.ones(3), "antialiased": args.antialiased}
+    camera |= {"antialiased": args.antialiased}
 
     def eval_psnr(idxs: list[int]) -> list[float]:
         splats = render_args(params, args.sh_degree)
-        return [psnr(render(*splats, viewmat=eval_vms[i], **camera)[0], eval_imgs[i]) for i in idxs]
+        white = jnp.ones(3)
+        return [
+            psnr(render(*splats, viewmat=eval_vms[i], background=white, **camera)[0], eval_imgs[i])
+            for i in idxs
+        ]
 
     # spread the scored eval views over the whole trajectory. The first n_eval held-out
     # views all come from the start of the capture and are not representative.
@@ -732,7 +666,8 @@ def train(args: argparse.Namespace) -> dict:
     aux_state: optax.OptState | None = None
     aux_txs: dict[Hashable, optax.GradientTransformation] = {}
     if args.exposure_opt:
-        aux_txs["exp"] = optax.adam(args.exposure_lr * lr_scale)  # sqrt(B) scaled too (T6)
+        # sqrt(B) scaled like the splat rates
+        aux_txs["exp"] = optax.adam(args.exposure_lr * lr_scale)
         logger.info("Exposure correction enabled. Learning per-image affine transforms")
     if args.pose_opt:
         aux_txs["pose"] = optax.adam(args.pose_lr * lr_scale)
@@ -745,29 +680,27 @@ def train(args: argparse.Namespace) -> dict:
             aux_params["pose"] = init_pose_deltas(ntr)
         aux_tx = optax.multi_transform(aux_txs, {k: k for k in aux_params})
         aux_state = aux_tx.init(aux_params)
-    make = partial(
-        make_step,
-        opt,
-        H,
-        W,
-        intr,
-        dist,
-        args.ssim_lambda,
-        args.opacity_reg,
-        args.scale_reg,
+    build_loss = partial(
+        build_loss_fn,
+        camera,
+        ssim_lambda=args.ssim_lambda,
+        opacity_reg=args.opacity_reg,
+        scale_reg=args.scale_reg,
         opacity_entropy=args.opacity_entropy,
         flat_reg=args.flat_reg,
-        antialiased=args.antialiased,
         depth_loss=args.depth_loss,
         depth_lambda=args.depth_lambda,
-        aux_tx=aux_tx,
         exp_opt=args.exposure_opt,
         pose_opt=args.pose_opt,
         pose_reg=args.pose_reg,
-        batch=B,
     )
+
+    def make(degree: int) -> Callable:
+        """Rebuild the step around the harmonics degree the warm-up has reached."""
+        return build_step_fn(opt, build_loss(degree), aux_tx, B)
+
     sh_degree = 0  # Ramp up to args.sh_degree in steps of 1 every args.sh_interval steps
-    step_fn = make(sh_degree=sh_degree)
+    step_fn = make(sh_degree)
 
     p0 = float(np.mean(eval_psnr(eval_idxs)))
     logger.info(f"point-init eval PSNR: {p0:.2f} dB")
@@ -781,15 +714,14 @@ def train(args: argparse.Namespace) -> dict:
     for it in range(1, args.steps + 1):
         if sh_degree < min(it // args.sh_interval, args.sh_degree):
             sh_degree += 1
-            step_fn = make(sh_degree=sh_degree)
-        # B consecutive view-visits per step. At B=1, pos = it -> identical to the
-        # pre-T6 ``order[it % ntr]`` sequence (default path unchanged).
+            step_fn = make(sh_degree)
+        # B consecutive view visits per step
         vis = [int(order[((it - 1) * B + 1 + j) % ntr]) for j in range(B)]
         vidx = np.asarray(vis)
         gt = jnp.asarray(train_imgs[vidx].astype(np.float32) / 255.0)  # (B, H, W, 3)
         vm = train_vms[jnp.asarray(vidx)]  # (B, 4, 4)
         if args.random_bkgd:
-            keys = jax.random.split(key, B + 1)  # B independent bg draws (T6)
+            keys = jax.random.split(key, B + 1)  # one background draw per view
             key = keys[0]
             bg = jax.vmap(lambda k: jax.random.uniform(k, (3,)))(keys[1:])
         else:
@@ -927,11 +859,9 @@ def main():
         "--batch-size",
         type=int,
         default=1,
-        help="views per training step (gsplat batch_size, survey T6). "
-        "Loss is averaged over the batch; all LRs are scaled by "
-        "sqrt(batch) and the per-step MCMC cadence by 1/batch "
-        "(steps_scaler). Set --steps to total_view_visits/batch. "
-        "B=1 (default) is numerically identical to the pre-T6 path.",
+        help="views per training step. The loss is averaged over the batch, every learning rate "
+        "is scaled by sqrt(batch) and the MCMC cadence by 1/batch, so --steps is "
+        "total_view_visits/batch",
     )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
@@ -998,11 +928,8 @@ def main():
     ap.add_argument(
         "--depth-loss",
         action="store_true",
-        help="COLMAP sparse-point depth regularization (gsplat depth_loss, "
-        "survey T2): scale-normalized masked L1 between the rendered "
-        "expected-depth channel and the sparse points' camera depths. "
-        "Off by default, leaving the render unchanged. See "
-        "reports/phase8g_depth_reg.md.",
+        help="scale-normalized masked L1 between the rendered expected-depth channel and the "
+        "COLMAP sparse points' camera depths",
     )
     ap.add_argument(
         "--depth-lambda", type=float, default=1e-2, help="depth-loss weight (gsplat default 1e-2)"
@@ -1047,7 +974,10 @@ def main():
     )
     ap.add_argument("--out-json", default=None, help="dump the result dict as JSON")
     ap.add_argument(
-        "--exposure-opt", action="store_true", help="learn a per-training-image color correction"
+        "--exposure-opt",
+        action="store_true",
+        help="learn a per-training-image affine color correction, so the shared 3D color does not "
+        "absorb capture exposure drift as view dependence",
     )
     ap.add_argument(
         "--exposure-lr", type=float, default=1e-3, help="LR for the exposure affine params"
@@ -1055,9 +985,8 @@ def main():
     ap.add_argument(
         "--pose-opt",
         action="store_true",
-        help="jointly refine per-training-view SE3 pose deltas (splax viewmat grads). "
-        "Held-out poses stay fixed. NOTE: the COLMAP depth-reg targets are computed "
-        "from the unrefined poses and go slightly stale as deltas grow.",
+        help="jointly refine a per-training-view SE3 pose delta. Held-out poses stay fixed, and "
+        "the depth targets are built from the unrefined poses, so they go stale as deltas grow",
     )
     ap.add_argument("--pose-lr", type=float, default=1e-4, help="LR for the per-view pose deltas")
     ap.add_argument(
