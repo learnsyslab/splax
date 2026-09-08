@@ -172,7 +172,7 @@ def rasterize_both_keymodes(args: tuple[jax.Array, ...], H: int, W: int) -> tupl
     orig = _sort._use_32bit_keys
     try:
         splax.clear_cache()
-        _sort._use_32bit_keys = lambda depth_bits: depth_bits >= 16  # ty: ignore[invalid-assignment]
+        _sort._use_32bit_keys = lambda depth_bits: depth_bits >= _sort.MIN_DEPTH_BITS  # ty: ignore[invalid-assignment]
         packed = np.asarray(splax.rasterize(*args, img_shape=(H, W))[0])
         splax.clear_cache()
         _sort._use_32bit_keys = lambda depth_bits: False  # ty: ignore[invalid-assignment]

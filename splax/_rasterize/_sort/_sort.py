@@ -19,6 +19,11 @@ from splax._rasterize._sort._kernels import (
     tile_bin_edges_64bit,
 )
 
+# Quantizing the float pattern linearly gives a constant relative depth resolution. The near plane
+# removes depths near zero, preventing us from spending buckets close to 0. A floor of 12 leaves 19
+# bits for the image and tile ids. Below it we fall back to 64 bits.
+MIN_DEPTH_BITS = 12
+
 
 def sort_and_bin(
     xys: wp.array,
@@ -116,12 +121,12 @@ def sort_and_bin(
             total,
             [
                 xys,
-                depths,
+                depths.view(wp.int32),  # The key quantizes the float pattern
                 radii,
                 conics,
                 map_opacities,
                 cum_tiles_hit,
-                depth_mm,
+                depth_mm.view(wp.int32),
                 n,
                 opac_mod,
                 tile_n_bits,
@@ -133,7 +138,8 @@ def sort_and_bin(
             ],
             device,
         )
-        wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, n_intersects)
+        end_bit = upper_bits + depth_bits  # Limit the sort to the bits a key can set
+        wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, n_intersects, end_bit=end_bit)
         args = [n_intersects, isect_ids, n_tiles, tile_n_bits, depth_bits, tile_bins]
         cached_launch(tile_bin_edges_32bit, n_intersects, args, device)
     else:
@@ -157,7 +163,8 @@ def sort_and_bin(
             ],
             device,
         )
-        wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, n_intersects)
+        end_bit = 32 + upper_bits  # Limit the sort to the bits a key can set
+        wp.utils.radix_sort_pairs(isect_ids, gaussian_ids, n_intersects, end_bit=end_bit)
         args = [n_intersects, isect_ids, n_tiles, tile_n_bits, tile_bins]
         cached_launch(tile_bin_edges_64bit, n_intersects, args, device)
     return gaussian_ids, tile_bins, n_intersects, tile_bounds_x, n_tiles
@@ -169,4 +176,4 @@ def _use_32bit_keys(depth_bits: int) -> bool:
     Note:
         Do not inline this function. It is used in the test suite to verify the packed key paths.
     """
-    return depth_bits >= 16
+    return depth_bits >= MIN_DEPTH_BITS

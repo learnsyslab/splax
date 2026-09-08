@@ -69,9 +69,9 @@ def test_packed_key_falls_back_when_bits_dont_fit():
     img.block_until_ready()
     assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int32
 
-    # B=8: image(3)+tile(13)=16 > 15, falls back to int64 scratch
+    # B=128: image(7)+tile(13)=20 > 19, falls back to int64 scratch
     splax.clear_cache()
-    views = jnp.stack([VIEWMAT.at[2, 3].set(5.0 + 0.1 * i) for i in range(8)])
+    views = jnp.stack([VIEWMAT.at[2, 3].set(5.0 + 0.1 * i) for i in range(128)])
     jax.block_until_ready(jax.jit(jax.vmap(partial(render, *splats, **kw)))(viewmat=views))
     assert _cache._scratch_cache[dev]["isect_dtype"] == wp.int64
     splax.clear_cache()

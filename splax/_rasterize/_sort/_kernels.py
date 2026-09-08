@@ -4,10 +4,10 @@ The forward blend and the backward pass both need a sorted per-tile gaussian lis
 produce these lists in a single batched launch. We reuse the ellipse criterion from the projection
 stage, emit one sort key per intersection, and return the bin edges for each tile.
 
-Sort keys come in two widths. When the image and tile ids leave at least 16 low bits, the whole key
-packs into one non-negative int32 holding the image id, the tile id, and the quantized depth. This
-halves the radix sort passes and quarters the bytes moved. Otherwise a 64 bit key carrying the image
-and tile ids above the depth bits is the automatic fallback.
+Sort keys come in two widths. When the image and tile ids leave enough low bits, the whole key packs
+into one non-negative int32 holding the image id, the tile id, and the quantized depth. This halves
+the radix sort passes and quarters the bytes moved. Otherwise a 64 bit key carrying the image and
+tile ids above the depth bits is the automatic fallback.
 """
 
 import warp as wp
@@ -69,12 +69,12 @@ def depth_minmax(
 @wp.kernel
 def map_intersects_32bit(
     xys: wp.array[wp.vec2],
-    depths: wp.array[wp.float32],
+    depths_int: wp.array[wp.int32],
     radii: wp.array[wp.int32],
     conics: wp.array[wp.vec3],
     map_opacities: wp.array[wp.float32],
     cum_tiles_hit: wp.array[wp.int32],
-    depth_mm: wp.array[wp.float32],
+    depth_mm_int: wp.array[wp.int32],
     n_gaussians: wp.int32,
     opac_mod: wp.int32,
     tile_n_bits: wp.int32,
@@ -85,7 +85,7 @@ def map_intersects_32bit(
     isect_ids: wp.array[wp.int32],
     gaussian_ids: wp.array[wp.int32],
 ):
-    # The 32 bit key is (iid | tile_id | quant_depth) with depth_bits >= 16.
+    # The 32 bit key is (iid | tile_id | quant_depth) with depth_bits >= MIN_DEPTH_BITS.
     # The sign bit stays 0, so cub's signed radix sort orders the keys as plain unsigned ascending
     # over 4 passes instead of 8.
     idx = wp.tid()
@@ -99,15 +99,16 @@ def map_intersects_32bit(
     if idx > 0:
         cur_idx = cum_tiles_hit[idx - 1]
 
-    # We linearly quantize the camera depth into depth_bits buckets over the per-image [dmin, dmax]
-    # range, which is monotone in depth. Near-coincident gaussians in the same bucket keep
-    # gaussian-id order under the stable sort, a perceptually negligible blend-order change.
-    dmin = depth_mm[2 * bid]
-    drange = depth_mm[2 * bid + 1] - dmin
+    # We linearly quantize the float pattern of the camera depth into depth_bits buckets over the
+    # per-image [bmin, bmax] span. The pattern is monotone in depth and scales with log2, so the
+    # precision stays relative to the depth. Near-coincident gaussians in the same bucket keep
+    # gaussian-id order under the stable sort.
+    bmin = depth_mm_int[2 * bid]
+    span = depth_mm_int[2 * bid + 1] - bmin
     maxq = wp.float32((wp.int32(1) << depth_bits) - wp.int32(1))
     depth_q = wp.int32(0)
-    if drange > 0.0:
-        f = (depths[idx] - dmin) / drange
+    if span > 0:
+        f = wp.float32(depths_int[idx] - bmin) / wp.float32(span)
         depth_q = wp.clamp(
             wp.int32(f * maxq), wp.int32(0), (wp.int32(1) << depth_bits) - wp.int32(1)
         )
