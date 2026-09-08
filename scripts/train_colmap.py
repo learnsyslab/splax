@@ -170,6 +170,7 @@ def build_loss_fn(
         pts_depth: jax.Array,
         pts_mask: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
+        gt = gt.astype(jnp.float32) / 255.0  # Fusing conversion into the render is faster
         l1s, dssims, dls = jax.vmap(per_view, in_axes=(None, None, 0, 0, 0, 0, 0, 0, 0))(
             p, aux_p, gt, vm, bg, vi, pts_uv, pts_depth, pts_mask
         )
@@ -539,6 +540,82 @@ def _reset_opt_state(opt_state: optax.OptState, reset_mask: jax.Array) -> optax.
 
 
 # region Training
+def build_optimizer(
+    args: argparse.Namespace, params: dict[str, jax.Array], lr_scale: float
+) -> tuple[optax.GradientTransformation, optax.Schedule]:
+    """Give every parameter group its own Adam rate, and hand back the means schedule."""
+    decay_steps = args.decay_steps if args.decay_steps else args.steps
+    means_sched = optax.exponential_decay(args.means_lr * lr_scale, decay_steps, 0.01)
+
+    def group_sched(lr: float) -> float | optax.Schedule:
+        """Hold a rate flat, or plateau and decay it to a hundredth from --late-decay-start."""
+        if not args.late_decay_start:
+            return lr
+        tail = optax.exponential_decay(lr, max(1, args.steps - args.late_decay_start), 0.01)
+        return optax.join_schedules([optax.constant_schedule(lr), tail], [args.late_decay_start])
+
+    txs: dict[Hashable, optax.GradientTransformation] = {
+        "means": optax.adam(means_sched),
+        "log_scales": optax.adam(group_sched(args.scales_lr * lr_scale)),
+        "quats": optax.adam(group_sched(args.quats_lr * lr_scale)),
+        "colors_logit": optax.adam(group_sched(args.colors_lr * lr_scale)),
+        "opac_logit": optax.adam(group_sched(args.opac_lr * lr_scale)),
+        "sh_rest": optax.adam(group_sched(args.colors_lr / 20 * lr_scale)),  # From Inria's recipe
+    }
+    return optax.multi_transform(txs, {k: k for k in params}), means_sched
+
+
+def build_aux_optimizer(
+    args: argparse.Namespace, ntr: int, lr_scale: float
+) -> tuple[optax.GradientTransformation | None, dict[str, jax.Array] | None, optax.OptState | None]:
+    """Build the per-image exposure and pose tables, one optax group each, or nothing."""
+    txs: dict[Hashable, optax.GradientTransformation] = {}
+    aux_params: dict[str, jax.Array] = {}
+    if args.exposure_opt:
+        txs["exp"] = optax.adam(args.exposure_lr * lr_scale)
+        aux_params["exp"] = init_exposure(ntr)
+        logger.info("Exposure correction enabled. Learning per-image affine transforms")
+    if args.pose_opt:
+        txs["pose"] = optax.adam(args.pose_lr * lr_scale)
+        aux_params["pose"] = init_pose_deltas(ntr)
+        logger.info("Pose refinement enabled. Learning per-image SE3 deltas")
+    if not txs:
+        return None, None, None
+    aux_tx = optax.multi_transform(txs, {k: k for k in aux_params})
+    return aux_tx, aux_params, aux_tx.init(aux_params)
+
+
+def build_relocate_fn(args: argparse.Namespace) -> Callable:
+    """Build the jitted relocation of the gaussians that went transparent."""
+    binoms = splax.mcmc.make_binoms(51)
+
+    @jax.jit
+    def relocate(
+        p: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
+    ) -> tuple[dict[str, jax.Array], optax.OptState]:
+        colors = jnp.concatenate([p["colors_logit"], p["sh_rest"]], axis=1)
+        splats = (p["means"], p["log_scales"], p["quats"], colors, p["opac_logit"])
+        new, reset = splax.mcmc.relocate(key, *splats, binoms, min_opacity=args.min_opacity)
+        rest = {"colors_logit": new[3][:, :1], "sh_rest": new[3][:, 1:]}
+        return dict(zip(SPLAT_KEYS, new)) | rest, _reset_opt_state(opt_state, reset)
+
+    return relocate
+
+
+def build_inject_noise_fn(args: argparse.Namespace) -> Callable:
+    """Build the jitted MCMC noise injection into the gaussian positions."""
+
+    @jax.jit
+    def inject_noise(
+        p: dict[str, jax.Array], key: jax.Array, scaler: float
+    ) -> dict[str, jax.Array]:
+        splats = (p["means"], p["log_scales"], p["quats"], p["opac_logit"])
+        means = splax.mcmc.inject_noise(key, *splats, scaler, min_opacity=args.min_opacity)
+        return {**p, "means": means}
+
+    return inject_noise
+
+
 def train(args: argparse.Namespace) -> dict:
     """Train splats on a COLMAP scene and return metrics."""
     scene = load_scene(
@@ -613,73 +690,11 @@ def train(args: argparse.Namespace) -> dict:
     if B > 1:
         logger.info(f"Batched training: LRs scaled to {lr_scale:.3f}, relocate and refine adjusted")
 
-    decay_steps = args.decay_steps if args.decay_steps else args.steps
-    means_sched = optax.exponential_decay(args.means_lr * lr_scale, decay_steps, 0.01)
-
-    def group_sched(lr: float) -> float | optax.Schedule:
-        """Constant LR, or plateau + exponential decay to 1% when --late-decay-start is set.
-
-        Only the means LR is scheduled in the base recipe; the other groups step at full size
-        forever, which keeps churning the model (and the eval score) late into long runs.
-        """
-        if not args.late_decay_start:
-            return lr
-        return optax.join_schedules(
-            [
-                optax.constant_schedule(lr),
-                optax.exponential_decay(lr, max(1, args.steps - args.late_decay_start), 0.01),
-            ],
-            [args.late_decay_start],
-        )
-
-    txs: dict[Hashable, optax.GradientTransformation] = {
-        "means": optax.adam(means_sched),
-        "log_scales": optax.adam(group_sched(args.scales_lr * lr_scale)),
-        "quats": optax.adam(group_sched(args.quats_lr * lr_scale)),
-        "colors_logit": optax.adam(group_sched(args.colors_lr * lr_scale)),
-        "opac_logit": optax.adam(group_sched(args.opac_lr * lr_scale)),
-        "sh_rest": optax.adam(group_sched(args.colors_lr / 20 * lr_scale)),  # From Inria's recipe
-    }
-    opt = optax.multi_transform(txs, {k: k for k in params})
+    opt, means_sched = build_optimizer(args, params, lr_scale)
     opt_state = opt.init(params)
-    binoms = splax.mcmc.make_binoms(51)
-
-    @jax.jit
-    def relocate(
-        p: dict[str, jax.Array], opt_state: optax.OptState, key: jax.Array
-    ) -> tuple[dict[str, jax.Array], optax.OptState]:
-        colors = jnp.concatenate([p["colors_logit"], p["sh_rest"]], axis=1)
-        splats = (p["means"], p["log_scales"], p["quats"], colors, p["opac_logit"])
-        new, reset = splax.mcmc.relocate(key, *splats, binoms, min_opacity=args.min_opacity)
-        rest = {"colors_logit": new[3][:, :1], "sh_rest": new[3][:, 1:]}
-        return dict(zip(SPLAT_KEYS, new)) | rest, _reset_opt_state(opt_state, reset)
-
-    @jax.jit
-    def add_noise(p: dict[str, jax.Array], key: jax.Array, scaler: float) -> dict[str, jax.Array]:
-        splats = (p["means"], p["log_scales"], p["quats"], p["opac_logit"])
-        m = splax.mcmc.inject_noise(key, *splats, scaler, min_opacity=args.min_opacity)
-        return {**p, "means": m}
-
-    # Per-image auxiliary tables (exposure affine / pose delta), one optax group per table
-    aux_tx = None
-    aux_params: dict[str, jax.Array] | None = None
-    aux_state: optax.OptState | None = None
-    aux_txs: dict[Hashable, optax.GradientTransformation] = {}
-    if args.exposure_opt:
-        # sqrt(B) scaled like the splat rates
-        aux_txs["exp"] = optax.adam(args.exposure_lr * lr_scale)
-        logger.info("Exposure correction enabled. Learning per-image affine transforms")
-    if args.pose_opt:
-        aux_txs["pose"] = optax.adam(args.pose_lr * lr_scale)
-        logger.info("Pose refinement enabled. Learning per-image SE3 deltas")
-    if aux_txs:
-        aux_params = {}
-        if args.exposure_opt:
-            aux_params["exp"] = init_exposure(ntr)
-        if args.pose_opt:
-            aux_params["pose"] = init_pose_deltas(ntr)
-        aux_tx = optax.multi_transform(aux_txs, {k: k for k in aux_params})
-        aux_state = aux_tx.init(aux_params)
+    relocate = build_relocate_fn(args)
+    inject_noise = build_inject_noise_fn(args)
+    aux_tx, aux_params, aux_state = build_aux_optimizer(args, ntr, lr_scale)
     build_loss = partial(
         build_loss_fn,
         camera,
@@ -718,7 +733,7 @@ def train(args: argparse.Namespace) -> dict:
         # B consecutive view visits per step
         vis = [int(order[((it - 1) * B + 1 + j) % ntr]) for j in range(B)]
         vidx = np.asarray(vis)
-        gt = jnp.asarray(train_imgs[vidx].astype(np.float32) / 255.0)  # (B, H, W, 3)
+        gt = jnp.asarray(train_imgs[vidx])  # (B, H, W, 3) uint8, the loss converts it
         vm = train_vms[jnp.asarray(vidx)]  # (B, 4, 4)
         if args.random_bkgd:
             keys = jax.random.split(key, B + 1)  # one background draw per view
@@ -752,7 +767,7 @@ def train(args: argparse.Namespace) -> dict:
         if args.noise_lr > 0 and it < args.steps and (noise_stop_iter < 0 or it < noise_stop_iter):
             scaler = float(jnp.asarray(means_sched(it))) * args.noise_lr
             key, sk = jax.random.split(key)
-            params = add_noise(params, sk, scaler)
+            params = inject_noise(params, sk, scaler)
 
         if it % args.log_every == 0 or it == args.steps:
             l1.block_until_ready()

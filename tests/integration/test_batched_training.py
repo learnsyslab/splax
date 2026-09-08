@@ -39,7 +39,7 @@ def _params(n: int = 200, seed: int = 0) -> dict[str, jax.Array]:
 def _view(seed: int) -> tuple[jax.Array, jax.Array]:
     """Draw a ground truth image and the camera pose it was taken from."""
     k = jax.random.split(jax.random.key(100 + seed), 2)
-    gt = jax.random.uniform(k[0], (H, W, 3))
+    gt = jax.random.randint(k[0], (H, W, 3), 0, 256, jnp.uint8)
     vm = jnp.array(
         [[1, 0, 0, 0.1 * seed], [0, 1, 0, -0.05 * seed], [0, 0, 1, 4.0], [0, 0, 0, 1]], jnp.float32
     )
@@ -210,7 +210,7 @@ def test_exposure_updates_only_the_referenced_views():
     exp_p = {"exp": init_exposure(8)}
     exp_state = exp_tx.init(exp_p)
     step = _step(opt, B, depth_loss=True, aux_tx=exp_tx, exp_opt=True)
-    gts = jax.random.uniform(jax.random.key(7), (B, H, W, 3))
+    gts = jax.random.randint(jax.random.key(7), (B, H, W, 3), 0, 256, jnp.uint8)
     vms = jnp.broadcast_to(jnp.eye(4).at[2, 3].set(4.0), (B, 4, 4))
     bg = jnp.broadcast_to(jnp.ones(3), (B, 3))
     view_index = jnp.array([0, 3, 5], jnp.int32)
