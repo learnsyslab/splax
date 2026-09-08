@@ -23,6 +23,14 @@
 
 splax renders and trains 3D gaussian splats inside JAX. Batched rendering and training run through `jax.vmap`, `jax.grad`, and `jax.jit`, with no system CUDA toolchain needed.
 
+## Installation
+
+```sh
+pip install splax
+```
+
+splax needs an NVIDIA GPU and requires CUDA-enabled JAX. No system CUDA toolchain is required.
+
 ## Examples
 
 Render a `.ply` scene from one camera.
@@ -112,13 +120,7 @@ Ported from [gsplat](https://github.com/nerfstudio-project/gsplat) and the paper
 - View-dependent color from spherical harmonics up to degree 3 (3DGS, gsplat)
 - Anti-aliased opacity compensation (Mip-Splatting, gsplat), depth regularization from COLMAP points (gsplat `depth_loss`), per-image exposure correction (gsplat appearance optimization), all opt-in
 
-## Installation
-
-Requires an NVIDIA GPU and a CUDA-enabled JAX (`jax[cuda]`, pulled in as a dependency).
-
-```sh
-uv pip install "git+https://github.com/learnsyslab/splax"
-```
+## Development
 
 Developer setup with [pixi](https://pixi.sh/), which installs splax editable with the dev tooling:
 
