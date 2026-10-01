@@ -306,6 +306,8 @@ def _project_bwd(
         n,
         k,
         has_transforms,
+        img_shape[0],
+        img_shape[1],
         f[0],
         f[1],
         dist[0],
