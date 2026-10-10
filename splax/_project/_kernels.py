@@ -264,8 +264,7 @@ def _project_kernel(
 # region backward kernels
 
 # cov3d is recomputed in the backward instead of cached, saving memory on the order of 6N. The EWA
-# Jacobian is rebuilt at the position clamped to the FOV limits, as in the forward kernel, and the
-# gradient follows the clamp.
+# Jacobian is rebuilt at the position clamped to the FOV limits.
 
 
 def _project_bwd_warp(
@@ -459,7 +458,7 @@ def _project_bwd_kernel(
         V = M * wp.transpose(M)
         R = wp.quat_to_matrix(quat)
         s = glob_scale * scales[s_idx]
-        # J at the position clamped to the FOV limits, the Jacobian the forward kernel used
+        # J at the position clamped to the FOV limits
         lim = _fov_limits(img_w, img_h, fx, fy)
         p_clamped = _clamp_to_fov(p, lim)
         J = _ewa_jacobian(p_clamped[0], p_clamped[1], p_clamped[2], fx, fy, k1, k2, p1, p2, k3)
@@ -543,12 +542,8 @@ def _proj_vjp(
     The lens enters twice, once between the screen cotangent and the perspective divide, and once
     through its own variation with the normalized coordinates.
 
-    The Jacobian depends on the position through the normalized coordinates clamped to the FOV
-    limits, u = clamp(x / z) and v = clamp(y / z), and through the depth: J = G(u, v) / z. Where a
-    coordinate is clamped, the covariance does not change with it, so its gradient vanishes.
-
     Note:
-        p is the unclamped camera-space position, and T = J W holds the clamped Jacobian
+        p is the unclamped camera-space position
     """
     tx = p[0]
     ty = p[1]

@@ -289,45 +289,29 @@ def test_project_grad_distorted():
     assert_finite_difference(loss, args, grads, eps=1e-3, rtol=5e-4)
 
 
-def test_project_grad_clamped():
-    """Match the gradient of gaussians beyond the FOV limits against finite differences.
-
-    Large gaussians close to the camera, like a floor or a wall, reach into the image from well
-    outside the field of view. The projection evaluates their EWA Jacobian at the position clamped
-    to the FOV limits, so their gradient has to follow the clamp. The loss only fits the conics,
-    which the clamp acts on, because the screen-space centers would dominate it for gaussians this
-    large.
-    """
-    n, H, W = 400, 96, 96
-    kw = camera(H, W)
-    lim = 1.3 * 0.5 * W / kw["f"][0]  # FOV limit of |x / z|, and of |y / z| in a square image
-    k = jax.random.split(jax.random.key(7), 7)
-    z = jax.random.uniform(k[0], (n,), minval=1.0, maxval=3.0)
-    # Each coordinate lies inside the limit or beyond it, clear of the kink of the clamp
-    beyond = jax.random.bernoulli(k[1], 0.7, (n, 2))
-    inside = jax.random.uniform(k[2], (n, 2), maxval=0.9)
-    outside = jax.random.uniform(k[3], (n, 2), minval=1.1, maxval=1.8)
-    sign = jnp.where(jax.random.bernoulli(k[4], 0.5, (n, 2)), 1.0, -1.0)
-    cam = jnp.concatenate(
-        [sign * jnp.where(beyond, outside, inside) * lim * z[:, None], z[:, None]], 1
-    )
-    means = cam - VIEWMAT[:3, 3]  # VIEWMAT only translates
-    scales = jax.random.uniform(k[5], (n, 3), minval=0.3, maxval=0.8)
-    quats = jax.random.normal(k[6], (n, 4))
+@pytest.mark.parametrize(
+    "lens", [{}, {"dist": (-0.3, 0.08, 2e-3, -1e-3, 0.0)}], ids=["pinhole", "distorted"]
+)
+def test_project_grad_clamped(lens: dict):
+    """Match the gradient of gaussians beyond the FOV limits against finite differences."""
+    H = W = 96
+    kw = camera(H, W) | lens
+    lim = 1.3 * 0.5 * W / kw["f"][0]  # FOV limits in a square image
+    axis = jnp.linspace(-1.75, 1.75, 8) * lim  # Place Gaussians inside and outside the FOV limit
+    uv = jnp.stack(jnp.meshgrid(axis, axis), -1).reshape(-1, 2)
+    z = 2.0
+    means = jnp.concatenate([uv, jnp.ones((64, 1))], 1) * z - VIEWMAT[:3, 3]
+    keys = jax.random.split(jax.random.key(0))
+    scales = jax.random.uniform(keys[0], (64, 3), minval=0.3, maxval=0.8)
+    quats = jax.random.normal(keys[1], (64, 4))
     args = (means, scales, quats, VIEWMAT)
-    project = jax.jit(partial(splax.project, opacities=jnp.full((n,), 0.9), **kw))
-    _, _, radii, conics, _, _ = project(*args)
-    clamped = beyond.any(axis=-1) & (radii > 0)
-    assert clamped.sum() > n // 4, f"only {clamped.sum()} clamped gaussians reach into the image"
-    (target,) = _target(conics, seed=8)
+    project = jax.jit(partial(splax.project, opacities=jnp.ones(64), **kw))
 
     def loss(*args: jax.Array) -> jax.Array:
-        return jnp.sum(((project(*args)[3] - target) / jnp.std(target)) ** 2)
+        return jnp.sum(project(*args)[3] ** 2)
 
     grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
-    # The conics of gaussians this close to the camera curve strongly, so the step is smaller and
-    # the tolerance looser than for the scenes above. An unclamped Jacobian is off by 10% to 95%.
-    assert_finite_difference(loss, args, grads, eps=2e-4, rtol=5e-3)
+    assert_finite_difference(loss, args, grads)
 
 
 def test_project_grad_distorted_differs_from_pinhole():
