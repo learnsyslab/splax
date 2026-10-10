@@ -289,6 +289,31 @@ def test_project_grad_distorted():
     assert_finite_difference(loss, args, grads, eps=1e-3, rtol=5e-4)
 
 
+@pytest.mark.parametrize(
+    "lens", [{}, {"dist": (-0.3, 0.08, 2e-3, -1e-3, 0.0)}], ids=["pinhole", "distorted"]
+)
+def test_project_grad_clamped(lens: dict):
+    """Match the gradient of gaussians beyond the FOV limits against finite differences."""
+    H = W = 96
+    kw = camera(H, W) | lens
+    lim = 1.3 * 0.5 * W / kw["f"][0]  # FOV limits in a square image
+    axis = jnp.linspace(-1.75, 1.75, 8) * lim  # Place Gaussians inside and outside the FOV limit
+    uv = jnp.stack(jnp.meshgrid(axis, axis), -1).reshape(-1, 2)
+    z = 2.0
+    means = jnp.concatenate([uv, jnp.ones((64, 1))], 1) * z - VIEWMAT[:3, 3]
+    keys = jax.random.split(jax.random.key(0))
+    scales = jax.random.uniform(keys[0], (64, 3), minval=0.3, maxval=0.8)
+    quats = jax.random.normal(keys[1], (64, 4))
+    args = (means, scales, quats, VIEWMAT)
+    project = jax.jit(partial(splax.project, opacities=jnp.ones(64), **kw))
+
+    def loss(*args: jax.Array) -> jax.Array:
+        return jnp.sum(project(*args)[3] ** 2)
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+    assert_finite_difference(loss, args, grads)
+
+
 def test_project_grad_distorted_differs_from_pinhole():
     """The lens must move the gradient, not only the forward projection."""
     n, H, W = 400, 96, 96

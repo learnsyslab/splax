@@ -208,17 +208,9 @@ def _project_kernel(
         return
     V3 = M * wp.transpose(M)
 
-    # EWA projection of the covariance
-    tan_fovx = 0.5 * wp.float32(img_w) / fx
-    tan_fovy = 0.5 * wp.float32(img_h) / fy
-    lim_x = 1.3 * tan_fovx
-    lim_y = 1.3 * tan_fovy
-    tx = p_view[0]
-    ty = p_view[1]
-    tz = p_view[2]
-    tx = tz * wp.min(lim_x, wp.max(-lim_x, tx / tz))
-    ty = tz * wp.min(lim_y, wp.max(-lim_y, ty / tz))
-    J = _ewa_jacobian(tx, ty, tz, fx, fy, k1, k2, p1, p2, k3)
+    # EWA projection of the covariance, with the Jacobian at the position clamped to the FOV limits
+    p_clamped = _clamp_to_fov(p_view, _fov_limits(img_w, img_h, fx, fy))
+    J = _ewa_jacobian(p_clamped[0], p_clamped[1], p_clamped[2], fx, fy, k1, k2, p1, p2, k3)
     T = J * W
     cov = T * V3 * wp.transpose(T)
     # 0.3 px screen-space dilation, the standard 3DGS low-pass guard
@@ -272,7 +264,7 @@ def _project_kernel(
 # region backward kernels
 
 # cov3d is recomputed in the backward instead of cached, saving memory on the order of 6N. The EWA
-# Jacobian is rebuilt from the unclamped camera-space position, the standard gsplat approximation.
+# Jacobian is rebuilt at the position clamped to the FOV limits.
 
 
 def _project_bwd_warp(
@@ -290,6 +282,8 @@ def _project_bwd_warp(
     n_gaussians: int,
     n_transforms: int,
     has_transforms: bool,
+    img_h: int,
+    img_w: int,
     fx: float,
     fy: float,
     k1: float,
@@ -357,6 +351,8 @@ def _project_bwd_warp(
             sel_vdepth,
             sel_vconic,
             sel_transforms,
+            img_h,
+            img_w,
             fx,
             fy,
             k1,
@@ -411,6 +407,8 @@ def _project_bwd_kernel(
     sel_vdepth: wp.bool,
     sel_vconic: wp.bool,
     sel_transforms: wp.bool,
+    img_h: wp.int32,
+    img_w: wp.int32,
     fx: wp.float32,
     fy: wp.float32,
     k1: wp.float32,
@@ -460,8 +458,10 @@ def _project_bwd_kernel(
         V = M * wp.transpose(M)
         R = wp.quat_to_matrix(quat)
         s = glob_scale * scales[s_idx]
-        # Note that J is rebuilt from the unclamped p (the gsplat approximation)
-        J = _ewa_jacobian(p[0], p[1], p[2], fx, fy, k1, k2, p1, p2, k3)
+        # J at the position clamped to the FOV limits
+        lim = _fov_limits(img_w, img_h, fx, fy)
+        p_clamped = _clamp_to_fov(p, lim)
+        J = _ewa_jacobian(p_clamped[0], p_clamped[1], p_clamped[2], fx, fy, k1, k2, p1, p2, k3)
         T = J * W
         # Gradient computation, starting with the projection
         conic = conics[c_idx]
@@ -471,7 +471,7 @@ def _project_bwd_kernel(
         S = X * G * X
         vcov2d = wp.vec3(-S[0, 0], -(S[0, 1] + S[1, 0]), -S[1, 1])
         v_p, v_T, v_V = _proj_vjp(
-            p, T, W, V, fx, fy, k1, k2, p1, p2, k3, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d
+            p, T, W, V, fx, fy, k1, k2, p1, p2, k3, lim, v_xy_in[vx_idx], v_depth_in[vd_idx], vcov2d
         )
         v_mean_world = wp.transpose(W) * v_p  # world-space mean cotangent
         v_M_world = (v_V + wp.transpose(v_V)) * M  # covariance-factor cotangent
@@ -532,6 +532,7 @@ def _proj_vjp(
     p1: wp.float32,
     p2: wp.float32,
     k3: wp.float32,
+    lim: wp.vec2,
     v_xy: wp.vec2,
     v_depth: wp.float32,
     vcov2d: wp.vec3,
@@ -549,16 +550,10 @@ def _proj_vjp(
     tz = p[2]
     rz = 1.0 / tz
     rz2 = rz * rz
-    rz3 = rz2 * rz
     rw = 1.0 / (tz + 1e-6)
     nx = tx * rz
     ny = ty * rz
-    r2 = nx * nx + ny * ny
     d = _lens_jacobian(nx, ny, k1, k2, p1, p2, k3)
-    a11 = fx * d[0]
-    a12 = fx * d[1]
-    a21 = fy * d[1]
-    a22 = fy * d[2]
 
     # center path, the screen cotangent crosses the lens before the divide
     vpx = fx * v_xy[0]
@@ -578,32 +573,49 @@ def _proj_vjp(
     v_T = 2.0 * v_cov * T * V  # v_cov is symmetric, so v_cov T V + v_cov^T T V = 2 v_cov T V
     v_J = v_T * wp.transpose(W)
 
-    # covariance path, the perspective terms with the lens jacobian held fixed
-    v_t_x = -rz2 * (a11 * v_J[0, 2] + a21 * v_J[1, 2])
-    v_t_y = -rz2 * (a12 * v_J[0, 2] + a22 * v_J[1, 2])
+    # covariance path, at the clamped normalized coordinates
+    u = wp.min(lim[0], wp.max(-lim[0], nx))
+    v = wp.min(lim[1], wp.max(-lim[1], ny))
+    dc = _lens_jacobian(u, v, k1, k2, p1, p2, k3)
+    a11 = fx * dc[0]
+    a12 = fx * dc[1]
+    a21 = fy * dc[1]
+    a22 = fy * dc[2]
+    # the depth with u and v held fixed
     v_t_z = -rz2 * (a11 * v_J[0, 0] + a12 * v_J[0, 1] + a21 * v_J[1, 0] + a22 * v_J[1, 1])
-    v_t_z += 2.0 * rz3 * ((a11 * tx + a12 * ty) * v_J[0, 2] + (a21 * tx + a22 * ty) * v_J[1, 2])
+    v_t_z += rz2 * ((a11 * u + a12 * v) * v_J[0, 2] + (a21 * u + a22 * v) * v_J[1, 2])
+    # u and v, the perspective terms with the lens jacobian held fixed
+    v_u = -rz * (a11 * v_J[0, 2] + a21 * v_J[1, 2])
+    v_v = -rz * (a12 * v_J[0, 2] + a22 * v_J[1, 2])
 
-    # covariance path, the lens jacobian itself moving with the normalized coordinates
-    va11 = v_J[0, 0] * rz - v_J[0, 2] * tx * rz2
-    va12 = v_J[0, 1] * rz - v_J[0, 2] * ty * rz2
-    va21 = v_J[1, 0] * rz - v_J[1, 2] * tx * rz2
-    va22 = v_J[1, 1] * rz - v_J[1, 2] * ty * rz2
+    # u and v, the lens jacobian itself moving with the normalized coordinates
+    va11 = (v_J[0, 0] - v_J[0, 2] * u) * rz
+    va12 = (v_J[0, 1] - v_J[0, 2] * v) * rz
+    va21 = (v_J[1, 0] - v_J[1, 2] * u) * rz
+    va22 = (v_J[1, 1] - v_J[1, 2] * v) * rz
     vd11 = fx * va11
     vd12 = fx * va12 + fy * va21
     vd22 = fy * va22
+    r2 = u * u + v * v
     g = k1 + r2 * (2.0 * k2 + 3.0 * k3 * r2)
     h = 2.0 * k2 + 6.0 * k3 * r2  # d(g)/d(r2)
     # d11 and d22 share their cross derivative with d12, so three terms cover all six partials
-    dxx = 6.0 * nx * g + 4.0 * nx * nx * nx * h + 6.0 * p2
-    dxy = 2.0 * ny * g + 4.0 * nx * nx * ny * h + 2.0 * p1
-    dyx = 2.0 * nx * g + 4.0 * nx * ny * ny * h + 2.0 * p2
-    dyy = 6.0 * ny * g + 4.0 * ny * ny * ny * h + 6.0 * p1
-    v_nx = vd11 * dxx + vd12 * dxy + vd22 * dyx
-    v_ny = vd11 * dxy + vd12 * dyx + vd22 * dyy
-    v_t_x += v_nx * rz
-    v_t_y += v_ny * rz
-    v_t_z -= (v_nx * tx + v_ny * ty) * rz2
+    dxx = 6.0 * u * g + 4.0 * u * u * u * h + 6.0 * p2
+    dxy = 2.0 * v * g + 4.0 * u * u * v * h + 2.0 * p1
+    dyx = 2.0 * u * g + 4.0 * u * v * v * h + 2.0 * p2
+    dyy = 6.0 * v * g + 4.0 * v * v * v * h + 6.0 * p1
+    v_u += vd11 * dxx + vd12 * dxy + vd22 * dyx
+    v_v += vd11 * dxy + vd12 * dyx + vd22 * dyy
+
+    # through the clamp, u = x / z and v = y / z where they are not clamped
+    v_t_x = wp.float32(0.0)
+    v_t_y = wp.float32(0.0)
+    if nx > -lim[0] and nx < lim[0]:
+        v_t_x = v_u * rz
+        v_t_z -= v_u * tx * rz2
+    if ny > -lim[1] and ny < lim[1]:
+        v_t_y = v_v * rz
+        v_t_z -= v_v * ty * rz2
 
     v_p = wp.vec3(vvx + v_t_x, vvy + v_t_y, vvz + v_t_z)
     return v_p, v_T, v_V
@@ -770,6 +782,25 @@ def _lens_jacobian(
         2.0 * nx * ny * g + 2.0 * p1 * nx + 2.0 * p2 * ny,
         radial + 2.0 * ny * ny * g + 6.0 * p1 * ny + 2.0 * p2 * nx,
     )
+
+
+@wp.func
+def _fov_limits(img_w: wp.int32, img_h: wp.int32, fx: wp.float32, fy: wp.float32) -> wp.vec2:
+    """Bounds of |x / z| and |y / z| at which the projection evaluates the EWA Jacobian.
+
+    The affine EWA approximation inflates gaussians far outside the image, so the Jacobian is taken
+    at the camera-space position clamped to 1.3 times the half field of view.
+    """
+    return wp.vec2(1.3 * (0.5 * wp.float32(img_w) / fx), 1.3 * (0.5 * wp.float32(img_h) / fy))
+
+
+@wp.func
+def _clamp_to_fov(p: wp.vec3, lim: wp.vec2) -> wp.vec3:
+    """Clamp a camera-space position to the FOV limits at its depth."""
+    tz = p[2]
+    tx = tz * wp.min(lim[0], wp.max(-lim[0], p[0] / tz))
+    ty = tz * wp.min(lim[1], wp.max(-lim[1], p[1] / tz))
+    return wp.vec3(tx, ty, tz)
 
 
 @wp.func
