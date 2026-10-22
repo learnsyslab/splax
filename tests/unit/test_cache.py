@@ -44,6 +44,36 @@ def test_scratch_released_on_signature_change():
     assert small < big / 2, "scratch has not released after signature change"
 
 
+def test_failed_cache_growth_keeps_cache_valid(monkeypatch: pytest.MonkeyPatch):
+    """Test that a failed cache allocation doesn't corrupt the cache."""
+    dev = wp.get_device()
+    splax.clear_cache()
+    rasterize = jax.jit(splax.rasterize, static_argnames=("img_shape",))
+    args = projected(2_000, 64, 64, seed=3)
+    ref = rasterize(*args, img_shape=(64, 64))[0]
+    entry = _cache._scratch_cache[str(dev)]
+    wp.synchronize_device(dev)
+    used = wp.get_mempool_used_mem_current(dev)
+    
+    _wp_empty = wp.empty
+
+    def _empty_without_int32(shape: int, dtype: type, device: wp.Device) -> wp.array:
+        # Allocate like wp.empty but fail for int32 arrays to imitate OOMs
+        if dtype == wp.int32:
+            raise MemoryError("forced allocation failure")
+        return _wp_empty(shape, dtype=dtype, device=device)
+    
+    with monkeypatch.context() as m:
+        m.setattr(wp, "empty", _empty_without_int32)
+        with pytest.raises(MemoryError):
+            _cache.cached_scratch(
+                dev, entry["sig"], 10 * entry["isect_cap"], len(entry["tile_bins"]), wp.int64
+            )
+    wp.synchronize_device(dev)
+    assert wp.get_mempool_used_mem_current(dev) < used, "failed growth left a sort buffer behind"
+    assert np.array_equal(rasterize(*args, img_shape=(64, 64))[0], ref), "render changed"
+
+
 # region packed 32-bit sort key
 
 

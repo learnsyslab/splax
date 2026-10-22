@@ -80,13 +80,13 @@ def cached_scratch(
         # buffers before the free below.
         _launch_cache.clear()
         # Free before allocating larger, avoiding an old plus new transient peak.
-        entry["isect_ids"] = None
-        entry["gaussian_ids"] = None
-        entry["isect_cap"] = 0
-        entry["isect_dtype"] = isect_dtype
-        entry["isect_ids"] = wp.empty(cap, dtype=isect_dtype, device=device)
-        entry["gaussian_ids"] = wp.empty(cap, dtype=wp.int32, device=device)
-        entry["isect_cap"] = cap
+        entry.update(isect_cap=0, isect_ids=None, gaussian_ids=None)
+        # Allocate before assigning. If it fails, we don't have a partially udpated entry.
+        isect_ids = wp.empty(cap, dtype=isect_dtype, device=device)
+        gaussian_ids = wp.empty(cap, dtype=wp.int32, device=device)
+        entry.update(
+            isect_cap=cap, isect_dtype=isect_dtype, isect_ids=isect_ids, gaussian_ids=gaussian_ids
+        )
     return entry
 
 
