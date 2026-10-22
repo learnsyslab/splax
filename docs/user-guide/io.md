@@ -40,6 +40,26 @@ processing.
 splax.io.write_ply("out.ply", *splats)
 ```
 
+## Pruning
+
+Training leaves gaussians that do not contribute to the scene, i.e. strays, transparent ones, and oversized floaters. [`splax.io.prune`][splax.io.prune] removes all three,
+with thresholds relative to the 99th percentile of the scene's distances and scales. The keywords
+`radius`, `opacity`, and `scale` set how strict each one is.
+
+```{ .python continuation }
+splats = splax.io.prune(*splats)
+```
+
+## Reordering for rendering
+
+Trained scenes usually store their gaussians in an order unrelated to 3D space.
+[`splax.io.morton_sort`][splax.io.morton_sort] reorders them, so gaussians
+close in space sit close in memory, which accelerates rendering.
+
+```{ .python continuation }
+splats = splax.io.morton_sort(*splats)
+```
+
 ## Activated arrays
 
 [`splax.project`][splax.project] and [`splax.rasterize`][splax.rasterize] consume activated arrays,

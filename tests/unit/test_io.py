@@ -62,3 +62,24 @@ def test_prune_drops_strays_faint_and_blobs():
     assert np.linalg.norm(np.asarray(p_means), axis=1).max() < 100
     assert np.asarray(p_logit_opacities).min() == 2.0
     assert np.asarray(p_log_scales).max() == -3.0
+
+
+def test_morton_sort_brings_neighbors_together():
+    """Gaussians sit closer together after the sort than in a random order."""
+    means = jnp.asarray(np.random.default_rng(0).uniform(size=(4096, 3)), jnp.float32)
+    sorted_means = splax.io.morton_sort(means, means, means, means[:, None], means[:, 0])[0]
+    before = np.linalg.norm(np.diff(means, axis=0), axis=1).mean()
+    after = np.linalg.norm(np.diff(sorted_means, axis=0), axis=1).mean()
+    assert after < before / 4
+
+
+def test_morton_sort_moves_every_array_with_its_gaussian():
+    """Sorting rearranges all arrays in the same order."""
+    means = jnp.asarray(np.random.default_rng(1).normal(size=(500, 3)), jnp.float32)
+    ids = jnp.arange(500, dtype=jnp.float32)
+    params = (means, means + 1, jnp.concatenate([means, ids[:, None]], 1), means[:, None] * 2, ids)
+    out = [np.asarray(x) for x in splax.io.morton_sort(*params)]
+    order = out[4].astype(int)
+    np.testing.assert_array_equal(np.sort(order), np.arange(500))
+    for before, after in zip(params, out):
+        np.testing.assert_array_equal(np.asarray(before)[order], after)

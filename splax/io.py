@@ -232,3 +232,36 @@ def prune(
     keep &= extent <= scale * np.percentile(extent, 99)
     keep &= alpha >= opacity
     return means[keep], log_scales[keep], quats[keep], sh_colors[keep], logit_opacities[keep]
+
+
+@jax.jit
+def morton_sort(
+    means: jax.Array,
+    log_scales: jax.Array,
+    quats: jax.Array,
+    sh_colors: jax.Array,
+    logit_opacities: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Sort the gaussians along the Morton curve of their means.
+
+    Keeping Gaussians close in space also close in memory improves memory access and increases
+    render speeds.
+
+    Args:
+        means: World positions, shape ``(N, 3)``.
+        log_scales: Log of the per-axis scales, shape ``(N, 3)``.
+        quats: wxyz quaternions, shape ``(N, 4)``.
+        sh_colors: SH color coefficients, shape ``(N, K, 3)``.
+        logit_opacities: Opacity logits, shape ``(N,)``.
+
+    Returns:
+        The five parameter arrays in Morton order.
+    """
+    lo, hi = means.min(axis=0), means.max(axis=0)
+    cells = ((means - lo) / (hi - lo) * 2**10 - 1).astype(jnp.uint32)
+    # Extract the MSBs from each axis by broadcasting the 10-bit shift and masking with 1
+    bits = cells[..., None] >> jnp.arange(9, -1, -1, dtype=jnp.uint32) & 1
+    # Flatten all codes into a 30D dim to later sum over and sort by
+    code = bits.transpose(0, 2, 1).reshape(-1, 30) << jnp.arange(29, -1, -1, dtype=jnp.uint32)
+    order = jnp.argsort(code.sum(-1, dtype=jnp.uint32))
+    return means[order], log_scales[order], quats[order], sh_colors[order], logit_opacities[order]
