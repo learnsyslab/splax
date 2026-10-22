@@ -54,7 +54,7 @@ def test_failed_cache_growth_keeps_cache_valid(monkeypatch: pytest.MonkeyPatch):
     entry = _cache._scratch_cache[str(dev)]
     wp.synchronize_device(dev)
     used = wp.get_mempool_used_mem_current(dev)
-    
+
     _wp_empty = wp.empty
 
     def _empty_without_int32(shape: int, dtype: type, device: wp.Device) -> wp.array:
@@ -62,7 +62,7 @@ def test_failed_cache_growth_keeps_cache_valid(monkeypatch: pytest.MonkeyPatch):
         if dtype == wp.int32:
             raise MemoryError("forced allocation failure")
         return _wp_empty(shape, dtype=dtype, device=device)
-    
+
     with monkeypatch.context() as m:
         m.setattr(wp, "empty", _empty_without_int32)
         with pytest.raises(MemoryError):

@@ -19,7 +19,7 @@ import jax
 import jax.core
 import jax.numpy as jnp
 from jax.extend.core import Primitive
-from jax.interpreters import batching, mlir
+from jax.interpreters import ad, batching, mlir
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -29,13 +29,19 @@ if TYPE_CHECKING:
     FrozenDims = int | tuple[int, ...] | frozenset[tuple[str, int | tuple[int, int]]]
 
 
-def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
+def nested_vmap(
+    ffi: Callable, n_arrays: int, name: str, transpose: Callable | None = None
+) -> Callable:
     """Wrap a Warp jax_callable so nested jax.vmap flattens to its single-axis batch.
 
     Args:
         ffi: The jax_callable to wrap, called as ``ffi(*arrays, *statics, output_dims=...)``.
         n_arrays: Number of leading array operands. The remaining positional args are static.
         name: Name for the wrapping primitive.
+        transpose: Transpose rule of a primitive that is linear in some of its operands. The
+            expected signature is
+            `transpose(cotangents, *arrays, mask=..., statics=..., out_dims=...)`. `mask` marks
+            the operands that carry the flattened batch axis.
     """
     prim = Primitive(name)
     prim.multiple_results = True
@@ -106,6 +112,8 @@ def nested_vmap(ffi: Callable, n_arrays: int, name: str) -> Callable:
     prim.def_abstract_eval(abstract)
     mlir.register_lowering(prim, mlir.lower_fun(impl, multiple_results=True))
     batching.primitive_batchers[prim] = batch
+    if transpose is not None:
+        ad.primitive_transposes[prim] = transpose
 
     def wrapped(*args: jax.Array | Static, output_dims: OutputDims) -> list[jax.Array]:
         arrays, statics = args[:n_arrays], tuple(args[n_arrays:])
