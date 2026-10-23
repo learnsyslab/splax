@@ -258,7 +258,7 @@ def morton_sort(
         The five parameter arrays in Morton order.
     """
     lo, hi = means.min(axis=0), means.max(axis=0)
-    cells = ((means - lo) / (hi - lo) * 2**10 - 1).astype(jnp.uint32)
+    cells = ((means - lo) / (hi - lo) * (2**10 - 1)).astype(jnp.uint32)
     # Extract the MSBs from each axis by broadcasting the 10-bit shift and masking with 1
     bits = cells[..., None] >> jnp.arange(9, -1, -1, dtype=jnp.uint32) & 1
     # Flatten all codes into a 30D dim to later sum over and sort by
