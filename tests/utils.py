@@ -112,8 +112,8 @@ def projected(
 
 def poses(batch: int, seed: int = 0) -> jax.Array:
     """Draw ``batch`` distinct camera poses around ``VIEWMAT``, with an exact bottom row."""
-    d = 0.02 * jax.random.normal(jax.random.key(seed), (batch, 4, 4))
-    vms = jnp.broadcast_to(VIEWMAT, (batch, 4, 4)) + d
+    d = 0.02 * jax.random.normal(jax.random.key(seed), (batch, 3, 4))
+    vms = jnp.broadcast_to(VIEWMAT, (batch, 4, 4)).at[:, :3].add(d)
     return TF.from_matrix(vms).as_matrix()  # Only return valid matrices
 
 
