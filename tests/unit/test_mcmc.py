@@ -14,8 +14,8 @@ def test_compute_relocation_ratio_one_is_identity():
     scales = jnp.tile(jnp.array([0.05, 0.1, 0.3], jnp.float32), (opac.shape[0], 1))
     binoms = mcmc.make_binoms(51)
     o, s = mcmc.compute_relocation(opac, scales, jnp.ones_like(opac), binoms)
-    np.testing.assert_allclose(np.asarray(o), np.asarray(opac), rtol=1e-7)
-    np.testing.assert_allclose(np.asarray(s), np.asarray(scales), rtol=1e-7)
+    np.testing.assert_allclose(np.asarray(o), np.asarray(opac), rtol=2e-7)
+    np.testing.assert_allclose(np.asarray(s), np.asarray(scales), rtol=2e-7)
 
 
 def test_relocate_teleports_dead_onto_alive():

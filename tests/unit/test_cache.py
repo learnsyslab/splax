@@ -44,13 +44,14 @@ def test_scratch_released_on_signature_change():
     assert small < big / 2, "scratch has not released after signature change"
 
 
+@pytest.mark.skipif(jax.default_backend() != "gpu", reason="memory pools exist on CUDA only")
 def test_failed_cache_growth_keeps_cache_valid(monkeypatch: pytest.MonkeyPatch):
     """Test that a failed cache allocation doesn't corrupt the cache."""
     dev = wp.get_device()
     splax.clear_cache()
     rasterize = jax.jit(splax.rasterize, static_argnames=("img_shape",))
     args = projected(2_000, 64, 64, seed=3)
-    ref = rasterize(*args, img_shape=(64, 64))[0]
+    ref = jax.block_until_ready(rasterize(*args, img_shape=(64, 64))[0])
     entry = _cache._scratch_cache[str(dev)]
     wp.synchronize_device(dev)
     used = wp.get_mempool_used_mem_current(dev)
@@ -87,7 +88,7 @@ def test_packed_key_matches_64bit():
 
 def test_packed_key_falls_back_when_bits_dont_fit():
     """Test that the wide sort key takes over when too few bits remain for depth."""
-    dev = str(wp.get_device("cuda:0"))
+    dev = str(wp.get_device())
     H, W = 1080, 1920
     splats = scene_params(4000, seed=1, dense=True)[:5]
     kw = {"background": jnp.zeros(3), **camera(H, W)}
@@ -134,7 +135,7 @@ def test_tile_emission_matches_count(n: int, H: int, W: int):
     n_tiles = tbx * tby
     tile_n_bits = (n_tiles - 1).bit_length()  # bits to index [0, n_tiles), see sort_and_bin
 
-    dev = "cuda:0"
+    dev = str(wp.get_device())
     xys_w = wp.array(np.asarray(xys), dtype=wp.vec2, device=dev)
     depths_int = wp.array(np.asarray(depths).view(np.int32), dtype=wp.int32, device=dev)
     radii_w = wp.array(np.asarray(radii).astype(np.int32), dtype=wp.int32, device=dev)

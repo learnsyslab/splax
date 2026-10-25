@@ -296,8 +296,9 @@ def test_render_vmap_packed_matches_loop():
     splax.clear_cache()
     ref = jnp.stack([render(viewmat=viewmat)[0] for viewmat in views])  # B=1 packs depth_bits=21
     splax.clear_cache()
-    out = jax.jit(jax.vmap(render))(viewmat=views)[0]  # B=8 packs image 3 + tile 10, depth_bits=18
-    assert _cache._scratch_cache[str(wp.get_device("cuda:0"))]["isect_dtype"] == wp.int32
+    # B=8 packs image 3 + tile 10, depth_bits=18
+    out = jax.block_until_ready(jax.jit(jax.vmap(render))(viewmat=views)[0])
+    assert _cache._scratch_cache[str(wp.get_device())]["isect_dtype"] == wp.int32
 
     deviation, quality = jnp.abs(out - ref).max(), psnr(out, ref)
     assert deviation < 0.05, f"packed batched vs stacked max abs diff {deviation:.2e}"

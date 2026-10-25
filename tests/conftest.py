@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import imageio.v3 as iio
 import pytest
+import warp as wp
 
 import splax._rasterize._sort._sort as _sort
 from splax.io import fetch
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     import numpy as np
+
+# Tiled kernels need cooperative blocks to run on the CPU
+wp.config.enable_cpu_blocks = True
 
 BASE = os.environ.get(
     "SPLAX_TEST_DATA", "https://huggingface.co/datasets/amacati/splax-test-data/resolve/main"

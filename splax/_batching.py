@@ -20,18 +20,17 @@ import jax.core
 import jax.numpy as jnp
 from jax.extend.core import Primitive
 from jax.interpreters import ad, batching, mlir
+from warp import JaxCallableGraphMode, jax_callable
 
 if TYPE_CHECKING:
-    from typing import Callable
+    from typing import Any, Callable
 
     Static = int | float | bool
     OutputDims = int | tuple[int, ...] | dict[str, int | tuple[int, int]]
     FrozenDims = int | tuple[int, ...] | frozenset[tuple[str, int | tuple[int, int]]]
 
 
-def nested_vmap(
-    ffi: Callable, n_arrays: int, name: str, transpose: Callable | None = None
-) -> Callable:
+def nested_vmap(ffi: Any, n_arrays: int, name: str, transpose: Callable | None = None) -> Callable:
     """Wrap a Warp jax_callable so nested jax.vmap flattens to its single-axis batch.
 
     Args:
@@ -45,11 +44,22 @@ def nested_vmap(
     """
     prim = Primitive(name)
     prim.multiple_results = True
+    # Warp graphs only work for CUDA, so we fall back to no graph mode on the CPU
+    cpu_ffi = jax_callable(
+        ffi.func,
+        num_outputs=ffi.num_outputs,
+        graph_mode=JaxCallableGraphMode.NONE,
+        vmap_method=ffi.vmap_method,
+    )
 
     def call(statics: tuple[Static, ...], out_dims: FrozenDims) -> Callable:
         # dict output_dims -> frozenset for hashability. Warp reads by name so order doesn't matter.
         dims = dict(out_dims) if isinstance(out_dims, frozenset) else out_dims
-        return lambda *arrays: tuple(ffi(*arrays, *statics, output_dims=dims))
+        return lambda *arrays: jax.lax.platform_dependent(
+            *arrays,
+            cpu=lambda *arrays: tuple(cpu_ffi(*arrays, *statics, output_dims=dims)),
+            default=lambda *arrays: tuple(ffi(*arrays, *statics, output_dims=dims)),
+        )
 
     def impl(
         *arrays: jax.Array,

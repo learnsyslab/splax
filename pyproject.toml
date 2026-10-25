@@ -19,7 +19,7 @@ dependencies = [
     "jax[cuda]>=0.10",
     "imageio",
     "plyfile",
-    "warp-lang>=1.14.0",
+    "warp-lang>=1.18.0",
 ]
 
 [project.optional-dependencies]
@@ -192,6 +192,25 @@ XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 tests = { cmd = "pytest -v tests", description = "Run tests" }
 test-docs = { cmd = "pytest -v --markdown-docs --markdown-docs-syntax=superfences splax/ docs/ --ignore=docs/gen_ref_pages.py", description = "Run the code blocks in the docs and docstrings" }
 
+[tool.pixi.feature.tests-cpu]
+platforms = ["linux-64"]
+
+[tool.pixi.feature.tests-cpu.dependencies]
+python = "3.14.*"
+pytest = "*"
+matplotlib = "*"
+
+[tool.pixi.feature.tests-cpu.pypi-dependencies]
+pytest-markdown-docs = "*"
+
+[tool.pixi.feature.tests-cpu.pypi-options]
+dependency-overrides = { jax = ">=0.10" }
+
+[tool.pixi.feature.tests-cpu.activation.env]
+JAX_PLATFORMS = "cpu"
+CUDA_VISIBLE_DEVICES = ""  # force warp to run on CPU
+SCIPY_ARRAY_API = "1"
+
 # Lint feature: ty type checking of the library.
 [tool.pixi.feature.lint.pypi-dependencies]
 ty = "==0.0.90"
@@ -216,6 +235,7 @@ default = { features = ["cuda"], solve-group = "default" }
 docs = { features = ["docs"], solve-group = "docs" }
 colmap = { features = ["colmap"], solve-group = "colmap" }
 tests = { features = ["cuda", "tests"], solve-group = "tests" }
+tests-cpu = { features = ["tests-cpu"], solve-group = "tests-cpu" }
 lint = { features = ["lint"], solve-group = "lint" }
 dist = { features = ["cuda", "dist"], solve-group = "dist" }
 

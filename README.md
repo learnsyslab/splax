@@ -15,6 +15,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests](https://github.com/learnsyslab/splax/actions/workflows/tests.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/tests.yml)
 [![Ruff](https://github.com/learnsyslab/splax/actions/workflows/ruff.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/ruff.yml)
 [![Ty](https://github.com/learnsyslab/splax/actions/workflows/ty.yml/badge.svg)](https://github.com/learnsyslab/splax/actions/workflows/ty.yml)
 [![Docs](https://github.com/learnsyslab/splax/actions/workflows/docs.yml/badge.svg)](https://learnsyslab.github.io/splax)

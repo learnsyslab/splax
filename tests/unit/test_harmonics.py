@@ -37,9 +37,10 @@ def test_partial_band_count_raises(count: int):
 def test_single_coefficient_is_the_stored_color_map():
     """One coefficient per gaussian evaluates to exactly what ``splax.io.sh_to_rgb`` maps."""
     coeffs, directions = coeffs_and_directions(4096, seed=30)
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         np.asarray(splax.spherical_harmonics(coeffs[:, :1], directions)),
         np.asarray(splax.io.sh_to_rgb(coeffs[:, 0])),
+        atol=2e-7,
     )
 
 

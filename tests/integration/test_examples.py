@@ -10,10 +10,15 @@ import time
 from pathlib import Path
 
 import imageio.v3 as iio
+import jax
 import numpy as np
 import pytest
 
 from splax.io import fetch
+
+# Example scripts start their own process without setting the required warp CPU config, and hence
+# have to be skipped on the CPU
+pytestmark = pytest.mark.skipif(jax.default_backend() != "gpu", reason="examples run on the GPU")
 
 EXAMPLES = Path(__file__).parents[2] / "examples"
 TIMEOUT = 10.0
