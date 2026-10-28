@@ -9,6 +9,9 @@ Note that this is not equivalent to vmap_method="broadcast_all" for two reasons.
 vmaps to make them compatible with our kernels. Second, and more importantly, we only tile arguments
 that are at least vmapped over once. Unbatched arguments, i.e. the splat parameters, remain shared
 across the batch, avoiding excessive memory allocation.
+
+Kernels can also register their own vjp to allow for more efficient gradient computation and
+accumulation.
 """
 
 from __future__ import annotations
@@ -34,24 +37,39 @@ def nested_vmap(ffi: Any, n_arrays: int, name: str) -> Callable:
         ffi: The jax_callable to wrap, called as ``ffi(*arrays, *statics, output_dims=...)``.
         n_arrays: Number of leading array operands. The remaining positional args are static.
         name: Name for the wrapping primitive.
+
+    Returns:
+        The wrapped callable. It optionally takes a ``vjp`` that maps the arrays, the cotangents,
+        their batch mask and the statics to one gradient per array.
     """
     # Warp graphs only work for CUDA, so we fall back to no graph mode on the CPU
     cpu_ffi = jax_callable(
         ffi.func, num_outputs=ffi.num_outputs, graph_mode=JaxCallableGraphMode.NONE
     )
 
-    def bind(*args: jax.Array | Static, output_dims: OutputDims) -> tuple[jax.Array, ...]:
+    def bind(
+        *args: jax.Array | Static,
+        output_dims: OutputDims,
+        vjp: Callable | None = None,
+        mask: tuple[bool, ...] | None = None,
+        summed: tuple[bool, ...] | None = None,
+    ) -> tuple[jax.Array, ...]:
         arrays, statics = args[:n_arrays], tuple(args[n_arrays:])
+        mask = mask or (False,) * n_arrays
+        avals = [jax.typeof(a) for a in arrays]
+        b = next((a.shape[0] for a, m in zip(avals, mask) if m), None)
         out_dims = frozenset(output_dims.items()) if isinstance(output_dims, dict) else output_dims
         params = {
             "name": name,
-            "mask": (False,) * n_arrays,
+            "mask": mask,
+            "out_blocks": tuple(None if s else b for s in summed or (False,) * ffi.num_outputs),
             "_ffi": ffi,
             "_cpu_ffi": cpu_ffi,
             "_statics": statics,
             "_out_dims": out_dims,
+            "_vjp": vjp,
         }
-        return NestedVmap([jax.typeof(a) for a in arrays], params)(*arrays)
+        return NestedVmap(avals, params)(*arrays)
 
     return bind
 
@@ -73,7 +91,10 @@ class NestedVmap(HiPrim):
     """A primitive for accumulating nested batches into a single batch dimension for FFI calls."""
 
     mask: tuple[bool, ...]
+    out_blocks: tuple[int | None, ...]  # Batch size of each output. None if unbatched
     _ffi: Any
+    _statics: tuple[Static, ...]
+    _vjp: Callable
 
     def __init__(self, avals: list[ShapedArray], params: dict):
         mask = params["mask"]
@@ -81,11 +102,11 @@ class NestedVmap(HiPrim):
             jax.ShapeDtypeStruct(a.shape[1:] if m else a.shape, a.dtype)
             for a, m in zip(avals, mask)
         ]
-        b = next((a.shape[0] for a, m in zip(avals, mask) if m), None)
         outs = jax.eval_shape(_call(params), *specs)
         self.in_avals = tuple(avals)
         self.out_aval = tuple(
-            ShapedArray((b, *o.shape) if b is not None else o.shape, o.dtype) for o in outs
+            ShapedArray(o.shape if k is None else (k, *o.shape), o.dtype)
+            for o, k in zip(outs, params["out_blocks"])
         )
         self.params = params
         super().__init__()
@@ -94,8 +115,8 @@ class NestedVmap(HiPrim):
         # The kernels see the batch flattened into the leading axis of each operand and output
         flat = [a.reshape(-1, *a.shape[2:]) if m else a for a, m in zip(arrays, self.mask)]
         shapes = [
-            (o.shape[0] * o.shape[1], *o.shape[2:]) if any(self.mask) else o.shape
-            for o in self.out_aval
+            (o.shape[0] * o.shape[1], *o.shape[2:]) if k else o.shape
+            for o, k in zip(self.out_aval, self.out_blocks)
         ]
         dims = {arg.name: s for arg, s in zip(self._ffi.output_args, shapes)}
         outs = _call({**self.params, "_out_dims": frozenset(dims.items())})(*flat)
@@ -124,7 +145,24 @@ class NestedVmap(HiPrim):
                 flat.append(jnp.repeat(m, cur, axis=0))  # Retroactively repeat across prior batches
             else:  # Not folded and no batch dimension, continue to share across the batch
                 flat.append(m)
-        prim = NestedVmap([jax.typeof(a) for a in flat], {**self.params, "mask": new_mask})
-        outs = prim(*flat)
-        split = lambda o: o.reshape(sz, cur, *o.shape[1:]) if prior else o.reshape(sz, *o.shape[1:])  # noqa: E731
-        return tuple(split(o) for o in outs), (0,) * len(outs)
+        # A new batch axis is added to every output. Either it's sz * k if we have a prior batch
+        # with k elements, or it's sz if k is None.
+        out_blocks = tuple(sz * (k or 1) for k in self.out_blocks)
+        params = {**self.params, "mask": new_mask, "out_blocks": out_blocks}
+        outs = NestedVmap([jax.typeof(a) for a in flat], params)(*flat)
+        split = [
+            o if k is None else o.reshape(sz, k, *o.shape[1:])
+            for o, k in zip(outs, self.out_blocks)
+        ]
+        return tuple(split), (0,) * len(outs)
+
+    def vjp_fwd(
+        self, nzs_in: tuple[bool, ...], *arrays: jax.Array
+    ) -> tuple[tuple[jax.Array, ...], tuple[jax.Array, ...]]:
+        return self(*arrays), arrays
+
+    def vjp_bwd_retval(
+        self, arrays: tuple[jax.Array, ...], cotangents: tuple[jax.Array, ...]
+    ) -> tuple[jax.Array, ...]:
+        mask = (*self.mask, *(k is not None for k in self.out_blocks))
+        return self._vjp(arrays, cotangents, mask, *self._statics)
