@@ -63,9 +63,9 @@ def _project_warp(
 ):
     """Launch the kernel behind the ffi, deriving the batch selectors from runtime shapes.
 
-    Native batch handling in jax requires jax.vmap with vmap_method="expand_dims". Warp's FFI
-    callback, however, collapses batches into the leading array dimension. We detect this and
-    configure the kernel to account for it, enabling one single kernel launch over all batches.
+    Batched inputs arrive with their batches collapsed into the leading array dimension. We detect
+    this and configure the kernel to account for it, enabling one single kernel launch over all
+    batches.
     """
     # N is passed statically because jax.vmap hides the batch axis from this wrapper. B is recovered
     # from an output shape. Inputs arrive flattened, so batched inputs have shape  (B1 * ... * N).
@@ -120,12 +120,7 @@ def _project_warp(
 
 
 project_ffi = nested_vmap(
-    jax_callable(
-        _project_warp,
-        num_outputs=6,
-        graph_mode=JaxCallableGraphMode.WARP,
-        vmap_method="expand_dims",  # native batch handling in one single kernel launch
-    ),
+    jax_callable(_project_warp, num_outputs=6, graph_mode=JaxCallableGraphMode.WARP),
     n_arrays=7,
     name="project",
 )
@@ -369,12 +364,7 @@ def _project_bwd_warp(
 
 
 project_bwd_ffi = nested_vmap(
-    jax_callable(
-        _project_bwd_warp,
-        num_outputs=5,
-        graph_mode=JaxCallableGraphMode.WARP,
-        vmap_method="expand_dims",
-    ),
+    jax_callable(_project_bwd_warp, num_outputs=5, graph_mode=JaxCallableGraphMode.WARP),
     n_arrays=11,
     name="project_bwd",
 )
