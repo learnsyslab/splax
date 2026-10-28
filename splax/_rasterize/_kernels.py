@@ -96,12 +96,7 @@ def _rasterize_warp(
 
 
 rasterize_ffi = nested_vmap(
-    jax_callable(
-        _rasterize_warp,
-        num_outputs=3,
-        graph_mode=JaxCallableGraphMode.NONE,
-        vmap_method="expand_dims",
-    ),
+    jax_callable(_rasterize_warp, num_outputs=3, graph_mode=JaxCallableGraphMode.NONE),
     n_arrays=9,
     name="rasterize",
 )
@@ -280,12 +275,7 @@ def _rasterize_depth_warp(
 
 
 rasterize_depth_ffi = nested_vmap(
-    jax_callable(
-        _rasterize_depth_warp,
-        num_outputs=4,
-        graph_mode=JaxCallableGraphMode.NONE,
-        vmap_method="expand_dims",
-    ),
+    jax_callable(_rasterize_depth_warp, num_outputs=4, graph_mode=JaxCallableGraphMode.NONE),
     n_arrays=9,
     name="rasterize_depth",
 )
@@ -491,12 +481,7 @@ def _rasterize_bwd_warp(
 
 
 rasterize_bwd_ffi = nested_vmap(
-    jax_callable(
-        _rasterize_bwd_warp,
-        num_outputs=4,
-        graph_mode=JaxCallableGraphMode.NONE,
-        vmap_method="expand_dims",
-    ),
+    jax_callable(_rasterize_bwd_warp, num_outputs=4, graph_mode=JaxCallableGraphMode.NONE),
     n_arrays=13,
     name="rasterize_bwd",
 )
@@ -871,12 +856,7 @@ def _rasterize_bwd_depth_warp(
 
 
 rasterize_bwd_depth_ffi = nested_vmap(
-    jax_callable(
-        _rasterize_bwd_depth_warp,
-        num_outputs=5,
-        graph_mode=JaxCallableGraphMode.NONE,
-        vmap_method="expand_dims",
-    ),
+    jax_callable(_rasterize_bwd_depth_warp, num_outputs=5, graph_mode=JaxCallableGraphMode.NONE),
     n_arrays=14,
     name="rasterize_bwd_depth",
 )

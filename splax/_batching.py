@@ -37,10 +37,7 @@ def nested_vmap(ffi: Any, n_arrays: int, name: str) -> Callable:
     """
     # Warp graphs only work for CUDA, so we fall back to no graph mode on the CPU
     cpu_ffi = jax_callable(
-        ffi.func,
-        num_outputs=ffi.num_outputs,
-        graph_mode=JaxCallableGraphMode.NONE,
-        vmap_method=ffi.vmap_method,
+        ffi.func, num_outputs=ffi.num_outputs, graph_mode=JaxCallableGraphMode.NONE
     )
 
     def bind(*args: jax.Array | Static, output_dims: OutputDims) -> tuple[jax.Array, ...]:
@@ -76,6 +73,7 @@ class NestedVmap(HiPrim):
     """A primitive for accumulating nested batches into a single batch dimension for FFI calls."""
 
     mask: tuple[bool, ...]
+    _ffi: Any
 
     def __init__(self, avals: list[ShapedArray], params: dict):
         mask = params["mask"]
@@ -93,10 +91,15 @@ class NestedVmap(HiPrim):
         super().__init__()
 
     def expand(self, *arrays: jax.Array) -> tuple[jax.Array, ...]:
-        fn = _call(self.params)
-        if not any(self.mask):
-            return fn(*arrays)
-        return jax.vmap(fn, in_axes=tuple(0 if m else None for m in self.mask))(*arrays)
+        # The kernels see the batch flattened into the leading axis of each operand and output
+        flat = [a.reshape(-1, *a.shape[2:]) if m else a for a, m in zip(arrays, self.mask)]
+        shapes = [
+            (o.shape[0] * o.shape[1], *o.shape[2:]) if any(self.mask) else o.shape
+            for o in self.out_aval
+        ]
+        dims = {arg.name: s for arg, s in zip(self._ffi.output_args, shapes)}
+        outs = _call({**self.params, "_out_dims": frozenset(dims.items())})(*flat)
+        return tuple(o.reshape(a.shape) for o, a in zip(outs, self.out_aval))
 
     def batch(
         self, axis_data: Any, args: tuple[jax.Array, ...], dims: tuple[int | None, ...]
