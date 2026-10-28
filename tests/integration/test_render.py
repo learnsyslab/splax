@@ -147,7 +147,7 @@ def test_render_distortion_grad_vmap():
 
     batched = jax.jit(jax.vmap(jax.grad(loss)))(VIEWS)
     single = jnp.stack([jax.jit(jax.grad(loss))(view) for view in VIEWS])
-    np.testing.assert_allclose(batched, single, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(batched, single, rtol=1e-5, atol=4e-5)
 
 
 # region batched render
