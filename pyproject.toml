@@ -299,6 +299,7 @@ docstring-code-line-length = "dynamic"
 # language, which warp's type stubs cannot type.
 exclude = [
     "splax/_intersect.py",
+    "splax/_harmonics/_kernels.py",
     "splax/_project/_kernels.py",
     "splax/_rasterize/_kernels.py",
     "splax/_rasterize/_sort/_kernels.py",

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
-from utils import VIEWMAT, camera, coeff_scene_params
+from utils import VIEWMAT, assert_finite_difference, camera, coeff_scene_params
 
 import splax
 
@@ -60,3 +63,30 @@ def test_render_is_view_dependent():
     other_base = np.asarray(splax.render(*base_splat, **moved)[0])
     # both cameras see the same geometry, so the difference must come from the view-dependence
     assert np.abs((other - other_base) - (full - base)).max() > 1e-2
+
+
+@pytest.mark.parametrize("in_axes", [(None, 0, 0), (0, None, 0)], ids=["coeffs", "directions"])
+def test_spherical_harmonics_grad_broadcast(in_axes: tuple[int | None, ...]):
+    """Sum the gradient of an operand shared across nested views over exactly those views."""
+    n, scenes, views = 512, 2, 3
+    shared, batched = in_axes.index(None), in_axes.index(0)
+    args = list(coeffs_and_directions(n, seed=0))
+    args[batched] = jax.random.normal(jax.random.key(1), (scenes, views, *args[batched].shape))
+    weights = jax.random.normal(jax.random.key(2), (scenes, views, n, 3))
+
+    def view_loss(coeffs: jax.Array, directions: jax.Array, weight: jax.Array) -> jax.Array:
+        return jnp.sum(splax.spherical_harmonics(coeffs, directions) * weight)
+
+    def scene_loss(coeffs: jax.Array, directions: jax.Array, weight: jax.Array) -> jax.Array:
+        return jnp.sum(jax.vmap(view_loss, in_axes)(coeffs, directions, weight))
+
+    def loss(coeffs: jax.Array, directions: jax.Array) -> jax.Array:
+        return jnp.sum(jax.vmap(scene_loss, in_axes)(coeffs, directions, weights))
+
+    grad = partial(jax.grad, argnums=shared)
+    per_view_grad = jax.vmap(jax.vmap(grad(view_loss), in_axes), in_axes)(*args, weights)
+    per_scene_grad = jax.vmap(grad(scene_loss), in_axes)(*args, weights)
+    total_grad = jax.grad(loss, argnums=(0, 1))(*args)
+    assert_finite_difference(loss, tuple(args), total_grad)
+    np.testing.assert_allclose(per_view_grad.sum(1), per_scene_grad, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(per_scene_grad.sum(0), total_grad[shared], rtol=1e-5, atol=1e-5)
